@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -194,6 +195,46 @@ func TestPairSession(t *testing.T) {
 	oldLog, err := invoke(repo, "", "log", "--session", first.ID)
 	if err != nil || !strings.Contains(oldLog, "proposal") {
 		t.Fatalf("old transcript missing: %s, %v", oldLog, err)
+	}
+}
+
+func TestOpenReader(t *testing.T) {
+	var links []string
+	openURL = func(link string) error { links = append(links, link); return nil }
+	t.Cleanup(func() { openURL = func(link string) error { return exec.Command("open", link).Run() } })
+	for _, tc := range []struct{ app, host, pathKey, promptKey string }{
+		{"codex", "threads", "path", "prompt"},
+		{"claude", "code", "folder", "q"},
+	} {
+		links = nil
+		repo := filepath.Join(t.TempDir(), "my repo & co")
+		if out, err := exec.Command("git", "init", "-q", repo).CombinedOutput(); err != nil {
+			t.Fatalf("git init: %v: %s", err, out)
+		}
+		t.Setenv("PEER_HOME", filepath.Join(t.TempDir(), "data"))
+		if _, err := invoke(repo, "", "start", "--writer", "claude", "--reader", "codex", "--open-reader", "slack"); err == nil || len(links) != 0 {
+			t.Fatal("unknown app accepted")
+		}
+		if _, err := invoke(repo, "", "status"); err == nil {
+			t.Fatal("session started despite an unknown app")
+		}
+		started, err := invoke(repo, "", "start", "--writer", "claude", "--reader", "codex", "--open-reader", tc.app)
+		var v session
+		if err != nil || json.Unmarshal([]byte(started), &v) != nil {
+			t.Fatalf("start output is not one session: %q, %v", started, err)
+		}
+		if len(links) != 1 {
+			t.Fatalf("want one %s link, got %q", tc.app, links)
+		}
+		u, err := url.Parse(links[0])
+		if err != nil || u.Scheme != tc.app || u.Host != tc.host || u.Path != "/new" {
+			t.Fatalf("wrong %s link: %s, %v", tc.app, links[0], err)
+		}
+		resolved, _ := filepath.EvalSymlinks(repo)
+		prompt := u.Query().Get(tc.promptKey)
+		if u.Query().Get(tc.pathKey) != resolved || !strings.Contains(prompt, "participant codex") || strings.HasPrefix(prompt, "/") {
+			t.Fatalf("wrong %s query: %v", tc.app, u.Query())
+		}
 	}
 }
 

@@ -24,23 +24,23 @@ To build the CLI from source instead, use Go 1.22 or newer: create `~/.local/bin
 
 ## Pair on a task
 
-Open one **local** chat in Claude Code Desktop's Code tab and one in Codex Desktop, both in the same Git checkout without separate worktrees. Keep both chats open. Send this to Claude first, replacing the example task with yours:
+Open one **local** chat in Claude Code Desktop's Code tab in the Git checkout, without a separate worktree. Send it this, replacing the example task with yours:
 
 ```text
 /peer
-You are the writer (Claude); Codex is the reader. Pair with Codex on this task: add CSV export to the reports page. Discuss the approach through peer before editing. Then implement it, ask Codex to review the diff, address its findings, and end the peer session.
+You are the writer (Claude); Codex is the reader. Open the Codex reader chat for me. Pair with Codex on this task: add CSV export to the reports page. Discuss the approach through peer before editing. Then implement it, ask Codex to review the diff, address its findings, and end the peer session.
 ```
 
-Then send this to Codex:
+Claude runs `peer start --writer claude --reader codex --open-reader codex`. This opens a new Codex Desktop chat in the same checkout with the reader prompt filled in. Press Enter in that chat to start the reader; neither app sends a deep-linked prompt by itself. `--open-reader claude` does the same for a Claude Code Desktop reader, for example when Codex is the writer. The agents then use `peer send` and `peer wait` to talk. To watch their conversation, run `peer log --follow` in a terminal in the checkout.
+
+To open the reader chat yourself instead, omit "Open the Codex reader chat for me", open a local Codex Desktop chat in the same checkout, and send it:
 
 ```text
 $peer
 You are the reader for Claude's peer session in this checkout. Discuss the approach through peer, then review Claude's diff and send concrete findings through peer. Do not edit files. Keep waiting for replies until the review is closed.
 ```
 
-Claude starts the session with `peer start --writer claude --reader codex`; the agents use `peer send` and `peer wait` to talk. To watch their conversation, run `peer log --follow` in a terminal in the checkout.
-
-To pair with GitHub Copilot instead, open a Copilot app session in the **local repository** (or use Copilot CLI or VS Code agent mode). Replace `Codex` with `Copilot` in Claude's prompt, then send Copilot:
+To pair with GitHub Copilot instead, open a Copilot app session in the **local repository** (or use Copilot CLI or VS Code agent mode). Replace `Codex` with `Copilot` in Claude's prompt and omit the request to open the reader chat, then send Copilot:
 
 ```text
 Use the peer skill. You are participant copilot, the reader in Claude's peer session in this checkout. Discuss the approach through peer, then review Claude's diff and send concrete findings through peer. Do not edit files. Keep waiting for replies until the review is closed.
@@ -58,6 +58,7 @@ peer skills reader
 peer update
 peer status
 peer start --writer codex --reader copilot
+peer start --writer claude --reader codex --open-reader codex
 peer send --as codex <<'MESSAGE'
 Please challenge this approach before I edit.
 MESSAGE

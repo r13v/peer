@@ -5,7 +5,7 @@ description: Pair with another local coding agent on the same Git checkout. Use 
 
 # Peer
 
-The user opens both local chats in the same Git checkout and gives each agent a distinct participant name (for example, `claude` and `copilot`). Run `peer status` to identify the session and your role. If no session exists, only the chosen writer runs `peer start --writer YOUR_NAME --reader OTHER_NAME`. The reader waits for the writer to start. An ended session can be replaced for a new task.
+The user opens a local chat in the Git checkout for each agent, or only the writer's chat when the writer opens the reader chat, and gives each agent a distinct participant name (for example, `claude` and `copilot`). Run `peer status` to identify the session and your role. If no session exists, only the chosen writer runs `peer start --writer YOUR_NAME --reader OTHER_NAME`. If the reader chat is not open yet and the reader is Codex Desktop or Claude Desktop, add `--open-reader codex` or `--open-reader claude`; this opens a new chat in the checkout with the reader prompt filled in, and the user presses Enter there. The reader waits for the writer to start. An ended session can be replaced for a new task.
 
 Then load your role's instructions from the installed CLI and follow them:
 
