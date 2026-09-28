@@ -33,8 +33,7 @@ jobs:
           for arch in amd64 arm64; do
             mkdir -p "dist/$arch"
             GOOS=darwin GOARCH="$arch" CGO_ENABLED=0 go build -trimpath -o "dist/$arch/peer" .
-            cp skills/peer/SKILL.md "dist/$arch/SKILL.md"
-            tar -czf "dist/peer-darwin-$arch.tar.gz" -C "dist/$arch" peer SKILL.md
+            tar -czf "dist/peer-darwin-$arch.tar.gz" -C "dist/$arch" peer
           done
           (cd dist && sha256sum peer-darwin-*.tar.gz > checksums.txt)
           cp scripts/install.sh dist/install.sh

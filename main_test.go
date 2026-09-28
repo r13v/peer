@@ -53,13 +53,11 @@ func TestInstallScriptVerifiesArchive(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	for name, content := range map[string]string{"peer": "verified binary", "SKILL.md": "verified skill"} {
-		if err := os.WriteFile(filepath.Join(stage, name), []byte(content), 0600); err != nil {
-			t.Fatal(err)
-		}
+	if err := os.WriteFile(filepath.Join(stage, "peer"), []byte("verified binary"), 0600); err != nil {
+		t.Fatal(err)
 	}
 	archive := "peer-darwin-arm64.tar.gz"
-	if out, err := exec.Command("tar", "-czf", filepath.Join(assets, archive), "-C", stage, "peer", "SKILL.md").CombinedOutput(); err != nil {
+	if out, err := exec.Command("tar", "-czf", filepath.Join(assets, archive), "-C", stage, "peer").CombinedOutput(); err != nil {
 		t.Fatalf("package: %v: %s", err, out)
 	}
 	data, err := os.ReadFile(filepath.Join(assets, archive))
@@ -87,10 +85,30 @@ func TestInstallScriptVerifiesArchive(t *testing.T) {
 	if out, err := runInstall(); err != nil {
 		t.Fatalf("install: %v: %s", err, out)
 	}
-	for _, path := range []string{filepath.Join(bin, "peer"), filepath.Join(home, ".claude/skills/peer/SKILL.md"), filepath.Join(home, ".codex/skills/peer/SKILL.md")} {
+	got, err := os.ReadFile(filepath.Join(bin, "peer"))
+	if err != nil || string(got) != "verified binary" {
+		t.Fatalf("missing verified CLI: %s, %v", got, err)
+	}
+	for _, app := range []string{".claude", ".codex"} {
+		path := filepath.Join(home, app, "skills/peer/SKILL.md")
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("CLI installer created skill at %s: %v", path, err)
+		}
+		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("managed by npx"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if out, err := runInstall(); err != nil {
+		t.Fatalf("update: %v: %s", err, out)
+	}
+	for _, app := range []string{".claude", ".codex"} {
+		path := filepath.Join(home, app, "skills/peer/SKILL.md")
 		got, err := os.ReadFile(path)
-		if err != nil || !strings.HasPrefix(string(got), "verified ") {
-			t.Fatalf("missing verified install at %s: %s, %v", path, got, err)
+		if err != nil || string(got) != "managed by npx" {
+			t.Fatalf("CLI update changed skill at %s: %s, %v", path, got, err)
 		}
 	}
 	if err := os.WriteFile(filepath.Join(assets, archive), []byte("corrupt"), 0600); err != nil {
@@ -99,7 +117,7 @@ func TestInstallScriptVerifiesArchive(t *testing.T) {
 	if out, err := runInstall(); err == nil || !strings.Contains(string(out), "checksum mismatch") {
 		t.Fatalf("corrupt archive accepted: %s, %v", out, err)
 	}
-	got, err := os.ReadFile(filepath.Join(bin, "peer"))
+	got, err = os.ReadFile(filepath.Join(bin, "peer"))
 	if err != nil || string(got) != "verified binary" {
 		t.Fatalf("failed update replaced working binary: %s, %v", got, err)
 	}

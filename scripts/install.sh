@@ -36,15 +36,11 @@ actual="$(shasum -a 256 "$tmp/$archive" | awk '{ print $1 }')"
 [ "$actual" = "$expected" ] || fail 'archive checksum mismatch'
 
 tar -xzf "$tmp/$archive" -C "$tmp"
-[ -f "$tmp/peer" ] && [ -f "$tmp/SKILL.md" ] || fail 'release archive is incomplete'
+[ -f "$tmp/peer" ] || fail 'release archive is incomplete'
 
 install_dir="${PEER_INSTALL_DIR:-$HOME/.local/bin}"
 install -d -m 755 "$install_dir"
 [ ! -d "$install_dir/peer" ] || fail 'install target is a directory'
-install -d -m 700 "$HOME/.claude/skills/peer" "$HOME/.codex/skills/peer"
-install -m 644 "$tmp/SKILL.md" "$HOME/.claude/skills/peer/SKILL.md"
-install -m 644 "$tmp/SKILL.md" "$HOME/.codex/skills/peer/SKILL.md"
-
 stage="$(mktemp "$install_dir/.peer.XXXXXX")"
 install -m 755 "$tmp/peer" "$stage"
 mv "$stage" "$install_dir/peer"

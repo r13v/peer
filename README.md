@@ -10,17 +10,17 @@ Requires macOS, Git, and both desktop apps. Install the current `latest` release
 curl -fsSL https://github.com/r13v/peer/releases/download/latest/install.sh | sh
 ```
 
-The installer checks the archive's SHA-256 digest, puts `peer` in `~/.local/bin`, and installs the same discovery skill for Claude Code and Codex. Add `~/.local/bin` to `PATH` if needed, then restart the apps. To get the newest release later, run `peer update`; it updates the command and both skill copies. Every push to `main` replaces the single `latest` release.
+The installer checks the archive's SHA-256 digest and puts `peer` in `~/.local/bin`. Add `~/.local/bin` to `PATH` if needed. To get the newest CLI later, run `peer update`. Every push to `main` replaces the single `latest` release.
 
-If you already installed the CLI separately and only need the skill, install it globally for both apps with Node.js and `npx skills`:
+Install the skill separately for Claude Code and Codex with Node.js and `npx skills`:
 
 ```sh
 npx skills add r13v/peer --skill peer -g -a claude-code -a codex -y
 ```
 
-This command installs only the skill; `peer` must still be on `PATH`. The one-line installer above already installs both, so it does not need this extra step.
+This command installs only the skill; `peer` must also be on `PATH`. Restart the apps after installation. `peer update` updates only the CLI; update the skill with `npx skills update peer -g`.
 
-To build from source instead, use Go 1.22 or newer: create `~/.local/bin`, run `go build -o "$HOME/.local/bin/peer" .`, and copy `skills/peer/SKILL.md` to `~/.claude/skills/peer/SKILL.md` and `~/.codex/skills/peer/SKILL.md`.
+To build the CLI from source instead, use Go 1.22 or newer: create `~/.local/bin` and run `go build -o "$HOME/.local/bin/peer" .`.
 
 Open **local** chats in the same checkout, without separate worktrees. Ask one agent to write and the other to read and review. The writer runs `peer start --as claude` or `--as codex`; both agents load the corresponding instructions from the CLI.
 
