@@ -34,7 +34,7 @@ func TestRoleInstructions(t *testing.T) {
 	cwd := t.TempDir() // Skill docs must work before a checkout or session exists.
 	for _, role := range []string{"reader", "writer"} {
 		got, err := invoke(cwd, "", "skills", role)
-		if err != nil || !strings.HasPrefix(got, "# ") || !strings.Contains(got, "peer wait --as YOUR_AGENT") {
+		if err != nil || !strings.HasPrefix(got, "# ") || !strings.Contains(got, "peer wait --as YOUR_NAME") {
 			t.Fatalf("%s instructions unavailable: %s, %v", role, got, err)
 		}
 	}
@@ -125,56 +125,62 @@ func TestInstallScriptVerifiesArchive(t *testing.T) {
 
 func TestPairSession(t *testing.T) {
 	repo := testRepo(t)
-	started, err := invoke(repo, "", "start", "--as", "codex")
+	started, err := invoke(repo, "", "start", "--writer", "claude", "--reader", "copilot")
 	if err != nil {
 		t.Fatal(err)
 	}
 	var first session
-	if err := json.Unmarshal([]byte(started), &first); err != nil || first.Writer != "codex" || first.Reviewer != "claude" {
+	if err := json.Unmarshal([]byte(started), &first); err != nil || first.Writer != "claude" || first.Reader != "copilot" {
 		t.Fatalf("wrong writer assignment: %s, %v", started, err)
 	}
-	if _, err := invoke(repo, "", "start", "--as", "claude"); err == nil {
+	if _, err := invoke(repo, "", "start", "--writer", "copilot", "--reader", "codex"); err == nil {
 		t.Fatal("a second writer could start in the same checkout")
 	}
-	if _, err := invoke(repo, "proposal", "send", "--as", "codex"); err != nil {
+	if _, err := invoke(repo, "proposal", "send", "--as", "claude"); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := invoke(repo, "", "wait", "--as", "codex", "--timeout", "0s"); err != nil || !strings.Contains(got, `"status":"timeout"`) {
+	if _, err := invoke(repo, "intrusion", "send", "--as", "codex"); err == nil {
+		t.Fatal("nonparticipant sent a message")
+	}
+	if _, err := invoke(repo, "", "wait", "--as", "codex", "--timeout", "0s"); err == nil {
+		t.Fatal("nonparticipant read a message")
+	}
+	if got, err := invoke(repo, "", "wait", "--as", "claude", "--timeout", "0s"); err != nil || !strings.Contains(got, `"status":"timeout"`) {
 		t.Fatalf("writer consumed its own message: %s, %v", got, err)
 	}
-	got, err := invoke(repo, "", "wait", "--as", "claude", "--timeout", "0s")
+	got, err := invoke(repo, "", "wait", "--as", "copilot", "--timeout", "0s")
 	if err != nil || !strings.Contains(got, `"text":"proposal"`) {
 		t.Fatalf("reviewer missed proposal: %s, %v", got, err)
 	}
-	if got, err := invoke(repo, "", "wait", "--as", "claude", "--timeout", "0s"); err != nil || !strings.Contains(got, `"status":"timeout"`) {
+	if got, err := invoke(repo, "", "wait", "--as", "copilot", "--timeout", "0s"); err != nil || !strings.Contains(got, `"status":"timeout"`) {
 		t.Fatalf("message delivered twice: %s, %v", got, err)
 	}
-	if _, err := invoke(repo, "check line 12", "send", "--as", "claude"); err != nil {
+	if _, err := invoke(repo, "check line 12", "send", "--as", "copilot"); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := invoke(repo, "", "wait", "--as", "codex", "--timeout", "0s"); err != nil || !strings.Contains(got, `"text":"check line 12"`) {
+	if got, err := invoke(repo, "", "wait", "--as", "claude", "--timeout", "0s"); err != nil || !strings.Contains(got, `"text":"check line 12"`) {
 		t.Fatalf("writer missed review: %s, %v", got, err)
 	}
 	log, err := invoke(repo, "", "log")
 	if err != nil || !strings.Contains(log, "proposal") || !strings.Contains(log, "check line 12") {
 		t.Fatalf("transcript incomplete: %s, %v", log, err)
 	}
-	if _, err := invoke(repo, "", "end", "--as", "claude"); err == nil {
+	if _, err := invoke(repo, "", "end", "--as", "copilot"); err == nil {
 		t.Fatal("reviewer ended writer's session")
 	}
-	if _, err := invoke(repo, "review complete", "send", "--as", "codex"); err != nil {
+	if _, err := invoke(repo, "review complete", "send", "--as", "claude"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := invoke(repo, "", "end", "--as", "codex"); err != nil {
+	if _, err := invoke(repo, "", "end", "--as", "claude"); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := invoke(repo, "", "wait", "--as", "claude", "--timeout", "0s"); err != nil || !strings.Contains(got, `"text":"review complete"`) {
+	if got, err := invoke(repo, "", "wait", "--as", "copilot", "--timeout", "0s"); err != nil || !strings.Contains(got, `"text":"review complete"`) {
 		t.Fatalf("closing message lost when session ended: %s, %v", got, err)
 	}
-	if _, err := invoke(repo, "too late", "send", "--as", "claude"); err == nil {
+	if _, err := invoke(repo, "too late", "send", "--as", "copilot"); err == nil {
 		t.Fatal("send accepted after end")
 	}
-	if _, err := invoke(repo, "", "start", "--as", "claude"); err != nil {
+	if _, err := invoke(repo, "", "start", "--writer", "copilot", "--reader", "codex"); err != nil {
 		t.Fatal(err)
 	}
 	history, err := invoke(repo, "", "history")
@@ -191,9 +197,38 @@ func TestPairSession(t *testing.T) {
 	}
 }
 
+func TestParticipantNames(t *testing.T) {
+	repo := testRepo(t)
+	for _, pair := range [][2]string{{"claude", "claude"}, {"../claude", "codex"}, {"claude", "copilot/other"}} {
+		if _, err := invoke(repo, "", "start", "--writer", pair[0], "--reader", pair[1]); err == nil {
+			t.Fatalf("invalid pair accepted: %q, %q", pair[0], pair[1])
+		}
+	}
+	if _, err := invoke(repo, "", "start", "--writer", "claude", "--reader", "copilot"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := invoke(repo, "", "wait", "--as", "../copilot", "--timeout", "0s"); err == nil {
+		t.Fatal("unsafe participant name accepted")
+	}
+}
+
+func TestDefaultHome(t *testing.T) {
+	repo := testRepo(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PEER_HOME", "")
+	s, err := openStore(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(home, ".peer", "repos"); filepath.Dir(s.dir) != want {
+		t.Fatalf("store directory = %q, want under %q", s.dir, want)
+	}
+}
+
 func TestWaitReceivesLaterMessage(t *testing.T) {
 	repo := testRepo(t)
-	if _, err := invoke(repo, "", "start", "--as", "claude"); err != nil {
+	if _, err := invoke(repo, "", "start", "--writer", "codex-main", "--reader", "codex-review"); err != nil {
 		t.Fatal(err)
 	}
 	done := make(chan struct {
@@ -201,14 +236,14 @@ func TestWaitReceivesLaterMessage(t *testing.T) {
 		err  error
 	}, 1)
 	go func() {
-		text, err := invoke(repo, "", "wait", "--as", "codex", "--timeout", "2s")
+		text, err := invoke(repo, "", "wait", "--as", "codex-review", "--timeout", "2s")
 		done <- struct {
 			text string
 			err  error
 		}{text, err}
 	}()
 	time.Sleep(50 * time.Millisecond)
-	if _, err := invoke(repo, "ready for review", "send", "--as", "claude"); err != nil {
+	if _, err := invoke(repo, "ready for review", "send", "--as", "codex-main"); err != nil {
 		t.Fatal(err)
 	}
 	result := <-done

@@ -26,7 +26,7 @@ type session struct {
 	ID        string `json:"id"`
 	Repo      string `json:"repo"`
 	Writer    string `json:"writer"`
-	Reviewer  string `json:"reviewer"`
+	Reader    string `json:"reader"`
 	StartedAt string `json:"started_at"`
 	EndedAt   string `json:"ended_at,omitempty"`
 }
@@ -94,7 +94,9 @@ func run(args []string, in io.Reader, out io.Writer, cwd string) error {
 	}
 	fs := flag.NewFlagSet(args[0], flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	actor := fs.String("as", "", "codex or claude")
+	actor := fs.String("as", "", "participant name")
+	writer := fs.String("writer", "", "writer name for start")
+	reader := fs.String("reader", "", "reader name for start")
 	timeout := fs.Duration("timeout", 90*time.Second, "wait timeout, at most 110s")
 	id := fs.String("session", "", "session ID for log")
 	follow := fs.Bool("follow", false, "follow log")
@@ -106,14 +108,20 @@ func run(args []string, in io.Reader, out io.Writer, cwd string) error {
 	}
 	switch args[0] {
 	case "start":
-		if err := checkActor(*actor); err != nil {
+		if err := checkName(*writer); err != nil {
 			return err
 		}
-		return s.start(*actor, out)
+		if err := checkName(*reader); err != nil {
+			return err
+		}
+		if *writer == *reader {
+			return errors.New("writer and reader must be different participants")
+		}
+		return s.start(*writer, *reader, out)
 	case "status":
 		return s.status(out)
 	case "send":
-		if err := checkActor(*actor); err != nil {
+		if err := checkName(*actor); err != nil {
 			return err
 		}
 		body, err := io.ReadAll(io.LimitReader(in, 64*1024+1))
@@ -129,7 +137,7 @@ func run(args []string, in io.Reader, out io.Writer, cwd string) error {
 		}
 		return s.send(*actor, text, out)
 	case "wait":
-		if err := checkActor(*actor); err != nil {
+		if err := checkName(*actor); err != nil {
 			return err
 		}
 		if *timeout < 0 || *timeout > 110*time.Second {
@@ -137,7 +145,7 @@ func run(args []string, in io.Reader, out io.Writer, cwd string) error {
 		}
 		return s.wait(*actor, *timeout, out)
 	case "end":
-		if err := checkActor(*actor); err != nil {
+		if err := checkName(*actor); err != nil {
 			return err
 		}
 		return s.end(*actor, out)
@@ -178,18 +186,27 @@ func update(in io.Reader, out io.Writer) error {
 	return cmd.Run()
 }
 
-func checkActor(a string) error {
-	if a != "codex" && a != "claude" {
-		return errors.New("--as must be codex or claude")
+func checkName(name string) error {
+	if len(name) == 0 || len(name) > 64 {
+		return errors.New("participant name must be 1-64 characters: a-z, 0-9, - or _, starting with a letter")
+	}
+	for i, c := range name {
+		if c >= 'a' && c <= 'z' || i > 0 && (c >= '0' && c <= '9' || c == '-' || c == '_') {
+			continue
+		}
+		return errors.New("participant name must be 1-64 characters: a-z, 0-9, - or _, starting with a letter")
 	}
 	return nil
 }
 
-func other(a string) string {
-	if a == "codex" {
-		return "claude"
+func (s session) other(name string) (string, error) {
+	if name == s.Writer {
+		return s.Reader, nil
 	}
-	return "codex"
+	if name == s.Reader {
+		return s.Writer, nil
+	}
+	return "", fmt.Errorf("%q is not a participant in session %s", name, s.ID)
 }
 
 func openStore(cwd string) (*store, error) {
@@ -204,11 +221,11 @@ func openStore(cwd string) (*store, error) {
 	}
 	home := os.Getenv("PEER_HOME")
 	if home == "" {
-		config, err := os.UserConfigDir()
+		userHome, err := os.UserHomeDir()
 		if err != nil {
 			return nil, err
 		}
-		home = filepath.Join(config, "peer")
+		home = filepath.Join(userHome, ".peer")
 	}
 	key := sha256.Sum256([]byte(repo))
 	dir := filepath.Join(home, "repos", hex.EncodeToString(key[:8]))
@@ -305,7 +322,7 @@ func (s *store) current() (session, error) {
 	return s.session(id)
 }
 
-func (s *store) start(writer string, out io.Writer) error {
+func (s *store) start(writer, reader string, out io.Writer) error {
 	return s.locked(func() error {
 		old, err := s.current()
 		if err == nil && old.EndedAt == "" {
@@ -318,7 +335,7 @@ func (s *store) start(writer string, out io.Writer) error {
 		if err != nil {
 			return err
 		}
-		v := session{ID: id, Repo: s.repo, Writer: writer, Reviewer: other(writer), StartedAt: time.Now().UTC().Format(time.RFC3339Nano)}
+		v := session{ID: id, Repo: s.repo, Writer: writer, Reader: reader, StartedAt: time.Now().UTC().Format(time.RFC3339Nano)}
 		dir := filepath.Join(s.dir, "sessions", id)
 		if err := os.MkdirAll(dir, 0700); err != nil {
 			return err
@@ -352,11 +369,15 @@ func (s *store) send(from, text string, out io.Writer) error {
 		if v.EndedAt != "" {
 			return errors.New("session has ended")
 		}
+		to, err := v.other(from)
+		if err != nil {
+			return err
+		}
 		id, err := newID()
 		if err != nil {
 			return err
 		}
-		m := message{ID: id, At: time.Now().UTC().Format(time.RFC3339Nano), From: from, To: other(from), Text: text}
+		m := message{ID: id, At: time.Now().UTC().Format(time.RFC3339Nano), From: from, To: to, Text: text}
 		b, err := json.Marshal(m)
 		if err != nil {
 			return err
@@ -384,6 +405,9 @@ func (s *store) nextMessage(as string) (*message, error) {
 	err := s.locked(func() error {
 		v, err := s.current()
 		if err != nil {
+			return err
+		}
+		if _, err := v.other(as); err != nil {
 			return err
 		}
 		dir := filepath.Join(s.dir, "sessions", v.ID)
