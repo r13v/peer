@@ -22,7 +22,23 @@ This command installs only the skill; `peer` must also be on `PATH`. Restart the
 
 To build the CLI from source instead, use Go 1.22 or newer: create `~/.local/bin` and run `go build -o "$HOME/.local/bin/peer" .`.
 
-Open **local** chats in the same checkout, without separate worktrees. Ask one agent to write and the other to read and review. The writer runs `peer start --as claude` or `--as codex`; both agents load the corresponding instructions from the CLI.
+## Pair on a task
+
+Open one **local** chat in Claude Code Desktop's Code tab and one in Codex Desktop, both in the same Git checkout without separate worktrees. Keep both chats open. Send this to Claude first, replacing the example task with yours:
+
+```text
+/peer
+You are the writer (Claude); Codex is the reader. Pair with Codex on this task: add CSV export to the reports page. Discuss the approach through peer before editing. Then implement it, ask Codex to review the diff, address its findings, and end the peer session.
+```
+
+Then send this to Codex:
+
+```text
+$peer
+You are the reader for Claude's peer session in this checkout. Discuss the approach through peer, then review Claude's diff and send concrete findings through peer. Do not edit files. Keep waiting for replies until the review is closed.
+```
+
+Claude starts the session with `peer start --as claude`; the agents use `peer send` and `peer wait` to talk. To watch their conversation, run `peer log --follow` in a terminal in the checkout.
 
 ## CLI
 
