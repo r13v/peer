@@ -11,6 +11,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -51,6 +52,9 @@ var readerInstructions []byte
 var writerInstructions []byte
 
 var errNoSession = errors.New("no session; the writer must run peer start")
+
+// openURL is replaced in tests.
+var openURL = func(link string) error { return exec.Command("open", link).Run() }
 
 func main() {
 	cwd, err := os.Getwd()
@@ -97,6 +101,7 @@ func run(args []string, in io.Reader, out io.Writer, cwd string) error {
 	actor := fs.String("as", "", "participant name")
 	writer := fs.String("writer", "", "writer name for start")
 	reader := fs.String("reader", "", "reader name for start")
+	openReader := fs.String("open-reader", "", "codex or claude: open a prefilled reader chat after start")
 	timeout := fs.Duration("timeout", 90*time.Second, "wait timeout, at most 110s")
 	id := fs.String("session", "", "session ID for log")
 	follow := fs.Bool("follow", false, "follow log")
@@ -117,7 +122,17 @@ func run(args []string, in io.Reader, out io.Writer, cwd string) error {
 		if *writer == *reader {
 			return errors.New("writer and reader must be different participants")
 		}
-		return s.start(*writer, *reader, out)
+		if *openReader != "" && *openReader != "codex" && *openReader != "claude" {
+			return errors.New("--open-reader must be codex or claude")
+		}
+		if err := s.start(*writer, *reader, out); err != nil || *openReader == "" {
+			return err
+		}
+		link := readerLink(*openReader, s.repo, *writer, *reader)
+		if err := openURL(link); err != nil {
+			return fmt.Errorf("session started, but opening %s failed: %v; open this link: %s", *openReader, err, link)
+		}
+		return nil
 	case "status":
 		return s.status(out)
 	case "send":
@@ -184,6 +199,16 @@ func update(in io.Reader, out io.Writer) error {
 	}
 	cmd.Env = append(os.Environ(), "PEER_INSTALL_DIR="+filepath.Dir(executable))
 	return cmd.Run()
+}
+
+// readerLink builds a desktop deep link that opens a new chat in repo with
+// the reader prompt prefilled. Neither app submits the prompt by itself.
+func readerLink(app, repo, writer, reader string) string {
+	prompt := fmt.Sprintf("Use the peer skill. You are participant %s, the reader in %s's peer session in this checkout. Discuss the approach through peer, then review the diff and send concrete findings through peer. Do not edit files. Keep waiting for replies until the review is closed.", reader, writer)
+	if app == "codex" {
+		return (&url.URL{Scheme: "codex", Host: "threads", Path: "/new", RawQuery: url.Values{"path": {repo}, "prompt": {prompt}}.Encode()}).String()
+	}
+	return (&url.URL{Scheme: "claude", Host: "code", Path: "/new", RawQuery: url.Values{"folder": {repo}, "q": {prompt}}.Encode()}).String()
 }
 
 func checkName(name string) error {
