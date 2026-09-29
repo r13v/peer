@@ -2,21 +2,28 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 )
 
-// realStartReader is the launcher TestMain replaces.
-var realStartReader func([]string, string, string) error
+// realStartReader and realAppRunning are the hooks TestMain replaces.
+var (
+	realStartReader func([]string, string, string) error
+	realAppRunning  func(string) bool
+)
 
 func TestMain(m *testing.M) {
 	openURL = func(string) error { return nil }
+	realAppRunning = appRunning
 	appRunning = func(string) bool { return false }
 	realStartReader = startReader
 	startReader = func([]string, string, string) error { return nil }
@@ -64,6 +71,107 @@ func TestVersion(t *testing.T) {
 	}
 	if _, err := invoke(cwd, "", "--version", "extra"); err == nil {
 		t.Fatal("extra argument accepted")
+	}
+}
+
+func TestInstallScriptVerifiesArchive(t *testing.T) {
+	for _, tc := range []struct{ kernel, machine, archive string }{
+		{"Darwin", "arm64", "peer_darwin_arm64.tar.gz"},
+		{"Linux", "aarch64", "peer_linux_arm64.tar.gz"},
+		{"Linux", "x86_64", "peer_linux_amd64.tar.gz"},
+	} {
+		dir := t.TempDir()
+		assets := filepath.Join(dir, "assets")
+		stage := filepath.Join(dir, "stage")
+		fakeBin := filepath.Join(dir, "fake-bin")
+		for _, path := range []string{assets, stage, fakeBin} {
+			if err := os.MkdirAll(path, 0700); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.WriteFile(filepath.Join(stage, "peer"), []byte("verified binary"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if out, err := exec.Command("tar", "-czf", filepath.Join(assets, tc.archive), "-C", stage, "peer").CombinedOutput(); err != nil {
+			t.Fatalf("package: %v: %s", err, out)
+		}
+		data, err := os.ReadFile(filepath.Join(assets, tc.archive))
+		if err != nil {
+			t.Fatal(err)
+		}
+		sum := sha256.Sum256(data)
+		if err := os.WriteFile(filepath.Join(assets, "checksums.txt"), []byte(fmt.Sprintf("%x  %s\n", sum, tc.archive)), 0600); err != nil {
+			t.Fatal(err)
+		}
+		uname := fmt.Sprintf("#!/bin/sh\n[ \"$1\" = -s ] && echo %s || echo %s\n", tc.kernel, tc.machine)
+		if err := os.WriteFile(filepath.Join(fakeBin, "uname"), []byte(uname), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(fakeBin, "curl"), []byte("#!/bin/sh\ncp \"$PEER_TEST_ASSETS/${2##*/}\" \"$4\"\n"), 0700); err != nil {
+			t.Fatal(err)
+		}
+		bin := filepath.Join(dir, "bin")
+		env := append(os.Environ(), "HOME="+filepath.Join(dir, "home"), "PEER_INSTALL_DIR="+bin, "PEER_TEST_ASSETS="+assets, "PATH="+fakeBin+":"+os.Getenv("PATH"))
+		runInstall := func() ([]byte, error) {
+			cmd := exec.Command("sh", "scripts/install.sh")
+			cmd.Env = env
+			return cmd.CombinedOutput()
+		}
+		if out, err := runInstall(); err != nil {
+			t.Fatalf("%s %s install: %v: %s", tc.kernel, tc.machine, err, out)
+		}
+		got, err := os.ReadFile(filepath.Join(bin, "peer"))
+		if err != nil || string(got) != "verified binary" {
+			t.Fatalf("missing verified CLI: %s, %v", got, err)
+		}
+		if err := os.WriteFile(filepath.Join(assets, tc.archive), []byte("corrupt"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if out, err := runInstall(); err == nil || !strings.Contains(string(out), "checksum mismatch") {
+			t.Fatalf("corrupt archive accepted: %s, %v", out, err)
+		}
+		got, err = os.ReadFile(filepath.Join(bin, "peer"))
+		if err != nil || string(got) != "verified binary" {
+			t.Fatalf("failed update replaced working binary: %s, %v", got, err)
+		}
+	}
+}
+
+func TestUpdateSkipsHomebrew(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := invoke(dir, "", "update", "extra"); err == nil {
+		t.Fatal("extra argument accepted")
+	}
+	for _, sub := range []string{"Caskroom/peer/0.1.2", "Cellar/peer/0.1.2/bin", "local/bin"} {
+		target := filepath.Join(dir, sub, "peer")
+		if err := os.MkdirAll(filepath.Dir(target), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(target, nil, 0700); err != nil {
+			t.Fatal(err)
+		}
+		link := filepath.Join(t.TempDir(), "peer")
+		if err := os.Symlink(target, link); err != nil {
+			t.Fatal(err)
+		}
+		got, err := installDir(link)
+		resolved, _ := filepath.EvalSymlinks(filepath.Dir(target))
+		if sub == "local/bin" {
+			if err != nil || got != resolved {
+				t.Fatalf("%s: %q, %v", sub, got, err)
+			}
+		} else if err == nil || !strings.Contains(err.Error(), "brew upgrade") {
+			t.Fatalf("%s: replaced a Homebrew copy: %q, %v", sub, got, err)
+		}
+	}
+}
+
+func TestAppRunningOffMacOS(t *testing.T) {
+	if runtime.GOOS == "darwin" {
+		t.Skip("macOS asks the app itself")
+	}
+	if realAppRunning("codex") {
+		t.Fatal("reported a desktop app off macOS")
 	}
 }
 

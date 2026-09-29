@@ -63,7 +63,7 @@ var readerInstructions []byte
 //go:embed instructions/writer.md
 var writerInstructions []byte
 
-const usage = "usage: peer, peer --version, peer skills flow|writer|reader, peer start NAME, peer send|wait|end ID --as NAME, peer status [ID], peer history, or peer log ID"
+const usage = "usage: peer, peer --version, peer update, peer skills flow|writer|reader, peer start NAME, peer send|wait|end ID --as NAME, peer status [ID], peer history, or peer log ID"
 
 // version is set at release build time.
 var version = "dev"
@@ -96,6 +96,12 @@ func run(args []string, in io.Reader, out io.Writer, cwd string) error {
 		}
 		_, err := fmt.Fprintln(out, version)
 		return err
+	}
+	if args[0] == "update" {
+		if len(args) != 1 {
+			return errors.New("usage: peer update")
+		}
+		return update(in, out)
 	}
 	if args[0] == "skills" {
 		docs := map[string][]byte{"flow": flowInstructions, "writer": writerInstructions, "reader": readerInstructions}
@@ -164,7 +170,11 @@ func run(args []string, in io.Reader, out io.Writer, cwd string) error {
 			return nil
 		}
 		if *headed {
-			fmt.Fprintf(os.Stderr, "peer: %s is not open, so it runs headless\n", *reader)
+			why := *reader + " is not open"
+			if runtime.GOOS != "darwin" {
+				why = "desktop chats open only on macOS"
+			}
+			fmt.Fprintf(os.Stderr, "peer: %s, so %s runs headless\n", why, *reader)
 		}
 		logPath := filepath.Join(s.dir, "sessions", v.ID, "reader.log")
 		if err := startReader(readerArgs(s, v), s.repo, logPath); err != nil {
@@ -216,6 +226,51 @@ func run(args []string, in io.Reader, out io.Writer, cwd string) error {
 	}
 }
 
+// update reruns the latest release's installer over this binary.
+func update(in io.Reader, out io.Writer) error {
+	executable, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	target, err := installDir(executable)
+	if err != nil {
+		return err
+	}
+	dir, err := os.MkdirTemp("", "peer-update-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(dir)
+	script := filepath.Join(dir, "install.sh")
+	cmd := exec.Command("curl", "-fsSL", "https://github.com/r13v/peer/releases/latest/download/install.sh", "-o", script)
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("download latest installer: %w", err)
+	}
+	cmd = exec.Command("sh", script)
+	cmd.Stdin = in
+	cmd.Stdout = out
+	cmd.Stderr = os.Stderr
+	cmd.Env = append(os.Environ(), "PEER_INSTALL_DIR="+target)
+	return cmd.Run()
+}
+
+// installDir is the directory update replaces executable in. Homebrew owns
+// its copies, so replacing one would leave brew with a version it did not
+// install.
+func installDir(executable string) (string, error) {
+	resolved, err := filepath.EvalSymlinks(executable)
+	if err != nil {
+		return "", err
+	}
+	for _, part := range strings.Split(filepath.ToSlash(resolved), "/") {
+		if part == "Caskroom" || part == "Cellar" {
+			return "", errors.New("peer is installed with Homebrew; update it with brew upgrade --cask peer")
+		}
+	}
+	return filepath.Dir(resolved), nil
+}
+
 // readerPrompt starts the reader's chat. A headless reader has nobody to
 // ask, so it is told to keep waiting on its own.
 func readerPrompt(v session, headless bool) string {
@@ -230,11 +285,12 @@ func readerPrompt(v session, headless bool) string {
 var appBundles = map[string]string{"codex": "com.openai.codex", "claude": "com.anthropic.claudefordesktop"}
 
 // appRunning reports whether reader's desktop app is open without
-// launching it; it is replaced in tests. Only macOS can tell, so other
-// systems report true and --headed opens the link as before.
+// launching it; it is replaced in tests. The desktop apps and their deep
+// links exist only on macOS, so other systems report false and run the
+// reader headless.
 var appRunning = func(reader string) bool {
 	if runtime.GOOS != "darwin" {
-		return true
+		return false
 	}
 	out, err := exec.Command("osascript", "-e", `application id "`+appBundles[reader]+`" is running`).Output()
 	return err == nil && strings.TrimSpace(string(out)) == "true"
