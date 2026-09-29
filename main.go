@@ -265,7 +265,7 @@ func installDir(executable string) (string, error) {
 	}
 	for _, part := range strings.Split(filepath.ToSlash(resolved), "/") {
 		if part == "Caskroom" || part == "Cellar" {
-			return "", errors.New("peer is installed with Homebrew; update it with brew upgrade --cask peer")
+			return "", errors.New("installed with Homebrew; update it with brew upgrade --cask peer")
 		}
 	}
 	return filepath.Dir(resolved), nil
