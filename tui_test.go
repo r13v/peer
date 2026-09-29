@@ -194,7 +194,7 @@ func TestRoomListKeepsSelectionVisible(t *testing.T) {
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 20})
 	m.choose(7)
 	list := ansi.Strip(m.roomList())
-	if lines := strings.Split(list, "\n"); len(lines) != m.topH-2 || !strings.HasPrefix(lines[len(lines)-2], " "+m.rooms[7].v.ID) {
+	if lines := strings.Split(list, "\n"); len(lines) != m.topH-2 || !strings.HasPrefix(lines[len(lines)-2], " ○ "+m.rooms[7].v.ID) {
 		t.Fatalf("selected room and its summary not both on screen:\n%s", list)
 	}
 }
@@ -202,17 +202,21 @@ func TestRoomListKeepsSelectionVisible(t *testing.T) {
 func TestEmptyRoomListReplacesLastRoom(t *testing.T) {
 	repo := testRepo(t)
 	v := startRoom(t, repo, "last", "claude", "codex")
-	m := loaded(t, nil) // outside a checkout only active rooms are listed
+	m := loaded(t, nil) // outside a checkout, every checkout's rooms are listed
 	if len(m.rooms) != 1 {
 		t.Fatalf("want the active room: %d", len(m.rooms))
 	}
-	if _, err := invoke(repo, "", "end", v.ID, "--as", "claude"); err != nil {
+	s, err := openStore(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(filepath.Join(s.dir, "sessions", v.ID)); err != nil {
 		t.Fatal(err)
 	}
 	m.lastRooms = time.Time{}
 	m.Update(m.poll()())
 	if len(m.rooms) != 0 {
-		t.Fatalf("ended room still listed: %+v", m.rooms)
+		t.Fatalf("removed room still listed: %+v", m.rooms)
 	}
 }
 
@@ -259,11 +263,11 @@ func runAll(cmd tea.Cmd) {
 	}
 }
 
-func TestEndedRoomOfOtherCheckoutStaysShown(t *testing.T) {
+func TestEndedRoomStaysSelected(t *testing.T) {
 	repo := testRepo(t)
 	startRoom(t, repo, "older", "claude", "codex")
 	v := startRoom(t, repo, "watched", "claude", "codex")
-	m := loaded(t, nil) // outside a checkout, an ended room leaves the list
+	m := loaded(t, nil)
 	if m.room.e.v.ID != "watched" {
 		t.Fatalf("newest room not selected: %s", m.room.e.v.ID)
 	}
@@ -277,12 +281,45 @@ func TestEndedRoomOfOtherCheckoutStaysShown(t *testing.T) {
 	if _, cmd := m.Update(m.poll()()); cmd == nil {
 		t.Fatal("no commands after a poll")
 	}
-	if m.room.e.v.ID != "watched" || m.room.e.v.EndedAt == "" || len(m.room.msgs) != 1 || m.sel != -1 || len(m.rooms) != 1 {
-		t.Fatalf("the ended room's last read was dropped: %+v sel %d", m.room, m.sel)
+	if m.room.e.v.ID != "watched" || m.room.e.v.EndedAt == "" || len(m.room.msgs) != 1 || m.sel != 1 || m.rooms[0].v.ID != "older" {
+		t.Fatalf("the ended room did not move below the active one, selected: %+v sel %d", m.room, m.sel)
 	}
-	m.Update(press('j'))
-	if m.room.e.v.ID != "older" {
-		t.Fatalf("j did not select the remaining room: %s", m.room.e.v.ID)
+	list := ansi.Strip(m.roomList())
+	if !strings.Contains(list, "Active · 1") || !strings.Contains(list, "Today") || !strings.Contains(list, "1 msgs") {
+		t.Fatalf("list lacks its sections or count:\n%s", list)
+	}
+}
+
+func TestNarrowRoomListKeepsCountAndDuration(t *testing.T) {
+	m := newModel(nil)
+	t.Cleanup(m.zones.Close)
+	m.Update(tea.WindowSizeMsg{Width: 80, Height: 24}) // the narrowest list
+	now := time.Now()
+	old := session{ID: "long-running", Repo: "/src/peer-chat", Writer: "claude", Reader: "codex", StartedAt: now.Add(-(24*time.Hour + 3*time.Minute)).UTC().Format(time.RFC3339Nano)}
+	done := session{ID: "done", Repo: "/src/peer-chat", Writer: "claude", Reader: "codex", StartedAt: now.Add(-time.Minute).UTC().Format(time.RFC3339Nano), EndedAt: now.UTC().Format(time.RFC3339Nano)}
+	m.rooms = []entry{{s: &store{}, v: old, count: 123}, {s: &store{}, v: done, count: 8}}
+	m.sel = -1
+	list := ansi.Strip(m.roomList())
+	if !strings.Contains(list, "123 msgs · 24h 3m ·") || !strings.Contains(list, "8 msgs · 1m ·") {
+		t.Fatalf("a narrow list clipped counts or durations:\n%s", list)
+	}
+}
+
+func TestDayLabel(t *testing.T) {
+	now := time.Date(2026, 3, 1, 0, 30, 0, 0, time.Local)
+	for _, c := range []struct {
+		t    time.Time
+		want string
+	}{
+		{now.Add(-40 * time.Minute), "Yesterday"},
+		{time.Date(2026, 2, 28, 0, 1, 0, 0, time.Local), "Yesterday"},
+		{time.Date(2026, 2, 27, 23, 59, 0, 0, time.Local), "Fri 27 Feb"},
+		{time.Date(2025, 12, 31, 12, 0, 0, 0, time.Local), "Wed 31 Dec 2025"},
+		{now.Add(time.Minute), "Today"},
+	} {
+		if got := dayLabel(c.t, now); got != c.want {
+			t.Errorf("dayLabel(%v) = %q, want %q", c.t, got, c.want)
+		}
 	}
 }
 

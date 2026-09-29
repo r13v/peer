@@ -457,20 +457,58 @@ func TestPickerLists(t *testing.T) {
 	if _, err := invoke(repo, "", "end", v.ID, "--as", "claude"); err != nil {
 		t.Fatal(err)
 	}
+	for range 11 {
+		v := startRoom(t, other, "old", "codex", "claude")
+		if _, err := invoke(other, "", "end", v.ID, "--as", "codex"); err != nil {
+			t.Fatal(err)
+		}
+	}
 	startRoom(t, other, "one", "codex", "claude")
 	startRoom(t, other, "two", "codex", "claude")
 	if _, err := invoke(repo, ""); err == nil || !strings.HasPrefix(err.Error(), "usage:") {
 		t.Fatalf("picker ran without a terminal: %v", err)
 	}
-	local, err := openStore(repo)
+	entries, err := listEntries(map[string]int{})
+	if err != nil || len(entries) != 14 || entries[0].v.ID != "two" || entries[1].v.ID != "one" || entries[2].v.ID != "old-11" || entries[13].v.ID != "done" {
+		t.Fatalf("want active rooms, then every ended one, newest first: %+v, %v", entries, err)
+	}
+}
+
+func TestPickerCachesEndedCounts(t *testing.T) {
+	repo := testRepo(t)
+	other := filepath.Join(t.TempDir(), "other")
+	if out, err := exec.Command("git", "init", "-q", other).CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
+	v := startRoom(t, repo, "same", "claude", "codex")
+	startRoom(t, other, "same", "claude", "codex")
+	counts := map[string]int{}
+	if _, err := listEntries(counts); err != nil || len(counts) != 0 {
+		t.Fatalf("active counts were cached: %v, %v", counts, err)
+	}
+	if _, err := invoke(repo, "last words", "send", v.ID, "--as", "claude"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := invoke(repo, "", "end", v.ID, "--as", "claude"); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := listEntries(counts)
+	if err != nil || len(entries) != 2 || entries[1].count != 1 || len(counts) != 1 {
+		t.Fatalf("the ended room's count is not its last: %+v, %v", entries, err)
+	}
+	s, err := openStore(repo)
 	if err != nil {
 		t.Fatal(err)
 	}
-	entries, err := listEntries(local)
-	if err != nil || len(entries) != 3 || entries[0].v.ID != "two" || entries[1].v.ID != "one" || entries[2].v.ID != "done" || entries[2].v.EndedAt == "" {
-		t.Fatalf("want both active rooms in other, then the ended one here: %+v, %v", entries, err)
+	f, err := os.OpenFile(filepath.Join(s.dir, "sessions", v.ID, "messages.jsonl"), os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if entries, err := listEntries(nil); err != nil || len(entries) != 2 {
-		t.Fatalf("outside a checkout, want only active rooms: %+v, %v", entries, err)
+	if _, err := f.WriteString("{}\n"); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	if entries, err = listEntries(counts); err != nil || entries[1].count != 1 || entries[0].count != 0 {
+		t.Fatalf("an ended count was reread, or leaked to the other room named same: %+v, %v", entries, err)
 	}
 }

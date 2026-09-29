@@ -27,9 +27,8 @@ import (
 )
 
 const (
-	recentLimit = 10
-	pollEvery   = 250 * time.Millisecond
-	roomsEvery  = time.Second
+	pollEvery  = 250 * time.Millisecond
+	roomsEvery = time.Second
 )
 
 // themes are the glamour styles T cycles through; auto follows the
@@ -42,6 +41,8 @@ var (
 	title        = lipgloss.NewStyle().Foreground(accent)
 	writerStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6"))
 	readerStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("5"))
+	activeMark   = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
+	failedMark   = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
 	selected     = lipgloss.NewStyle().Background(accent).Foreground(lipgloss.Color("0"))
 	statusBar    = lipgloss.NewStyle().Background(accent).Foreground(lipgloss.Color("0"))
 	matchStyle   = lipgloss.NewStyle().Reverse(true)
@@ -49,18 +50,18 @@ var (
 	border       = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("8"))
 )
 
-// entry is a session with the store that holds it and its one-line summary.
+// entry is a session with the store that holds it and its message count.
 type entry struct {
-	s   *store
-	v   session
-	sum string
+	s     *store
+	v     session
+	count int
 }
 
 // key identifies a room across checkouts, whose IDs may repeat.
 func (e entry) key() string { return e.s.dir + "\x00" + e.v.ID }
 
-// picker shows every active room and this checkout's recent ones beside
-// the selected room's transcript, with the headless reader's log below.
+// picker lists every room, active ones first, beside the selected
+// room's transcript, with the headless reader's log below.
 func picker(in io.Reader, out io.Writer, cwd string) error {
 	fin, ok := in.(*os.File)
 	fout, ok2 := out.(*os.File)
@@ -74,10 +75,12 @@ func picker(in io.Reader, out io.Writer, cwd string) error {
 	return err
 }
 
-// listEntries returns active rooms across checkouts, newest first,
-// followed by the latest ended rooms in local, if any. Unreadable
-// stores are skipped so one bad entry does not hide the rest.
-func listEntries(local *store) ([]entry, error) {
+// listEntries returns every room across checkouts: active ones first,
+// then ended ones, each newest first. counts caches the message counts
+// of ended rooms by key, which cannot change: send appends under the
+// store lock and refuses once the room has ended. Unreadable stores are
+// skipped so one bad entry does not hide the rest.
+func listEntries(counts map[string]int) ([]entry, error) {
 	repos, err := reposDir()
 	if err != nil {
 		return nil, err
@@ -91,25 +94,25 @@ func listEntries(local *store) ([]entry, error) {
 		s := &store{dir: filepath.Join(repos, d.Name())}
 		sessions, _ := s.sessions()
 		for _, v := range sessions {
-			if v.EndedAt == "" {
-				entries = append(entries, entry{s: &store{dir: s.dir, repo: v.Repo}, v: v})
+			e := entry{s: &store{dir: s.dir, repo: v.Repo}, v: v}
+			if n, ok := counts[e.key()]; ok && v.EndedAt != "" {
+				e.count = n
+			} else {
+				e.count = e.s.count(v.ID)
+				if v.EndedAt != "" {
+					counts[e.key()] = e.count
+				}
 			}
+			entries = append(entries, e)
 		}
 	}
-	sort.Slice(entries, func(i, j int) bool { return entries[i].v.StartedAt > entries[j].v.StartedAt })
-	if local != nil {
-		sessions, _ := local.sessions()
-		n := 0
-		for _, v := range sessions {
-			if v.EndedAt != "" && n < recentLimit {
-				entries = append(entries, entry{s: local, v: v})
-				n++
-			}
+	sort.Slice(entries, func(i, j int) bool {
+		a, b := entries[i].v, entries[j].v
+		if (a.EndedAt == "") != (b.EndedAt == "") {
+			return a.EndedAt == ""
 		}
-	}
-	for i := range entries {
-		entries[i].sum = entries[i].s.summary(entries[i].v)
-	}
+		return a.StartedAt > b.StartedAt
+	})
 	return entries, nil
 }
 
@@ -306,6 +309,7 @@ type model struct {
 	topH      int
 	logH      int
 	rooms     []entry
+	counts    map[string]int // ended rooms' message counts; only polls touch it
 	sel       int
 	gen       int // bumped on each room switch, so late reads are dropped
 	room      room
@@ -331,7 +335,7 @@ func newModel(local *store) *model {
 	return &model{
 		local: local, zones: zone.New(), keys: newKeyMap(), help: help.New(), input: in,
 		chat: newPane(), log: newPane(), showLog: true, showRooms: true, markdown: true, dark: true,
-		rendered: map[string]string{},
+		rendered: map[string]string{}, counts: map[string]int{},
 	}
 }
 
@@ -357,7 +361,7 @@ func (m *model) Init() tea.Cmd {
 // whatever the selected room gained since the last read. Only one poll
 // runs at a time: the next tick is scheduled when its result arrives.
 func (m *model) poll() tea.Cmd {
-	gen, local, listRooms := m.gen, m.local, time.Since(m.lastRooms) >= roomsEvery
+	gen, counts, listRooms := m.gen, m.counts, time.Since(m.lastRooms) >= roomsEvery
 	var r *room
 	if m.room.pending || m.room.loaded {
 		c := m.room
@@ -366,7 +370,7 @@ func (m *model) poll() tea.Cmd {
 	return func() tea.Msg {
 		msg := pollMsg{gen: gen, polled: time.Now()}
 		if listRooms {
-			if msg.rooms, msg.err = listEntries(local); msg.err != nil {
+			if msg.rooms, msg.err = listEntries(counts); msg.err != nil {
 				return msg
 			}
 			msg.listed = true
@@ -484,7 +488,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case pollMsg:
 		m.err = msg.err
 		// Apply the room before the list, which may no longer have it: a
-		// room from another checkout leaves the list once it ends.
+		// room leaves the list when its session directory is removed.
 		cmds := []tea.Cmd{tea.Tick(pollEvery, func(time.Time) tea.Msg { return tickMsg{} })}
 		if msg.room != nil && msg.gen == m.gen && msg.room.e.key() == m.room.e.key() {
 			cmds = append(cmds, m.apply(msg.room))
@@ -953,33 +957,63 @@ func (m *model) roomList() string {
 	add := func(i int, line string) {
 		lines, owner = append(lines, line), append(owner, i)
 	}
+	now := time.Now()
+	active := 0
+	for _, e := range m.rooms {
+		if e.v.EndedAt == "" {
+			active++
+		}
+	}
 	at, section := 0, ""
 	for i, e := range m.rooms {
-		t := "Active"
+		start, _ := time.Parse(time.RFC3339Nano, e.v.StartedAt)
+		start = start.Local()
+		t := fmt.Sprintf("Active · %d", active)
 		if e.v.EndedAt != "" {
-			t = "Recent in " + filepath.Base(m.local.repo)
+			t = dayLabel(start, now)
 		}
 		if t != section {
 			section = t
 			if len(lines) > 0 {
 				add(-1, "")
 			}
-			add(-1, title.Render(t))
+			add(-1, title.Render(t)+" "+dim.Render(strings.Repeat("─", max(w-ansi.StringWidth(t)-1, 0))))
 		}
-		name := e.v.ID
-		if e.v.EndedAt == "" {
-			name = filepath.Base(e.v.Repo) + " · " + name
-		}
-		row := pad(ansi.Truncate(" "+name, w, "…"), w)
-		if i == m.sel {
-			row, at = selected.Render(row), len(lines)
-		}
-		detail := e.sum
+		// The room ID gets the room; the repo takes at most what is left,
+		// but never less than a third, so it stays recognizable.
+		mark, markStyle := "●", activeMark
 		if e.v.EndedReason != "" {
-			detail = e.v.EndedReason + " · " + detail
+			mark, markStyle = "✕", failedMark
+		} else if e.v.EndedAt != "" {
+			mark, markStyle = "○", dim
 		}
+		repo, avail := filepath.Base(e.v.Repo), max(w-4, 2)
+		rw := min(ansi.StringWidth(repo), max(avail-ansi.StringWidth(e.v.ID)-1, avail/3))
+		id := pad(ansi.Truncate(e.v.ID, avail-rw-1, "…"), avail-rw-1)
+		repo = ansi.Truncate(repo, rw, "…")
+		repoStyle := dim
+		if m.local != nil && e.v.Repo == m.local.repo {
+			repoStyle = title
+		}
+		row := " " + markStyle.Render(mark) + " " + id + " " + repoStyle.Render(repo)
+		if i == m.sel {
+			row, at = selected.Render(pad(" "+mark+" "+id+" "+repo, w)), len(lines)
+		}
+		// Short fields first, so a narrow list keeps them; the pair is
+		// usually the same and goes last. An ended room's day is in its
+		// header; an active one's age is its duration, so it has no time.
+		end, when := now, ""
+		if e.v.EndedAt != "" {
+			end, _ = time.Parse(time.RFC3339Nano, e.v.EndedAt)
+			when = start.Format("15:04") + " · "
+		}
+		detail := dim.Render(fmt.Sprintf("   %s%d msgs · %s · ", when, e.count, humanDuration(end.Sub(start))))
+		if e.v.EndedReason != "" {
+			detail += failedMark.Render(e.v.EndedReason) + dim.Render(" · ")
+		}
+		detail += dim.Render(e.v.Writer + "→" + e.v.Reader)
 		add(i, row)
-		add(i, dim.Render(ansi.Truncate("  "+detail, w, "…")))
+		add(i, ansi.Truncate(detail, w, "…"))
 	}
 	if len(m.rooms) == 0 {
 		add(-1, dim.Render("No rooms. Start one with /peer in an agent chat."))
@@ -1002,6 +1036,25 @@ func (m *model) roomList() string {
 		j = k
 	}
 	return strings.Join(out, "\n")
+}
+
+// dayLabel names t's local calendar day relative to now: Today,
+// Yesterday, or its date, with the year when it is not now's.
+func dayLabel(t, now time.Time) string {
+	same := func(a, b time.Time) bool {
+		ay, am, ad := a.Date()
+		by, bm, bd := b.Date()
+		return ay == by && am == bm && ad == bd
+	}
+	switch {
+	case same(t, now):
+		return "Today"
+	case same(t, now.AddDate(0, 0, -1)):
+		return "Yesterday"
+	case t.Year() == now.Year():
+		return t.Format("Mon _2 Jan")
+	}
+	return t.Format("Mon _2 Jan 2006")
 }
 
 func (m *model) statusLine() string {
