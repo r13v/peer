@@ -1,0 +1,53 @@
+version: 2
+
+project_name: peer
+
+builds:
+  - id: peer
+    binary: peer
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+
+archives:
+  - id: default
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    formats: [tar.gz]
+    files:
+      - README.md
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+changelog:
+  use: github
+
+homebrew_casks:
+  - name: peer
+    binaries: [peer]
+    repository:
+      owner: r13v
+      name: homebrew-apps
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    directory: Casks
+    homepage: "https://github.com/r13v/peer"
+    description: "Local CLI for two coding agents pairing on one Git checkout"
+    hooks:
+      post:
+        install: |
+          system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/peer"]
+
+release:
+  github:
+    owner: r13v
+    name: peer
+  replace_existing_artifacts: true
