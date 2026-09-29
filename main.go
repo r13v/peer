@@ -106,6 +106,7 @@ func run(args []string, in io.Reader, out io.Writer, cwd string) error {
 	actor := fs.String("as", "", "participant name")
 	writer := fs.String("writer", "", "writer name for start")
 	reader := fs.String("reader", "", "reader name for start")
+	headed := fs.Bool("headed", false, "open the reader's desktop app for start")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
 	}
@@ -129,12 +130,28 @@ func run(args []string, in io.Reader, out io.Writer, cwd string) error {
 		if *writer == *reader {
 			return errors.New("writer and reader must be different participants")
 		}
-		if err := s.start(*writer, *reader, out); err != nil || *reader != "codex" && *reader != "claude" {
+		if err := s.start(*writer, *reader, out); err != nil || appBundles[*reader] == "" {
 			return err
 		}
-		link := readerLink(s.repo, *writer, *reader)
-		if err := openURL(link); err != nil {
-			return fmt.Errorf("session started, but opening %s failed: %v; open this link: %s", *reader, err, link)
+		if *headed && appRunning(*reader) {
+			link := readerLink(s.repo, *writer, *reader)
+			if err := openURL(link); err != nil {
+				return fmt.Errorf("session started, but opening %s failed: %v; open this link: %s", *reader, err, link)
+			}
+			return nil
+		}
+		if *headed {
+			fmt.Fprintf(os.Stderr, "peer: %s is not open, so it runs headless\n", *reader)
+		}
+		v, err := s.active()
+		if err == nil {
+			logPath := filepath.Join(s.dir, "sessions", v.ID, "reader.log")
+			if err = startReader(readerArgs(s, *writer, *reader), s.repo, logPath, v.ID); err == nil {
+				fmt.Fprintf(os.Stderr, "peer: %s runs headless; press Tab in peer to watch it, or read %s\n", *reader, logPath)
+			}
+		}
+		if err != nil {
+			return fmt.Errorf("session started, but launching %s failed: %v; open %s in this checkout and send: %s", *reader, err, *reader, readerPrompt(*writer, *reader, false))
 		}
 		return nil
 	case "status":
@@ -207,10 +224,68 @@ func update(in io.Reader, out io.Writer) error {
 	return cmd.Run()
 }
 
+// readerPrompt starts the reader's chat. A headless reader has nobody to
+// ask, so it is told to keep waiting on its own.
+func readerPrompt(writer, reader string, headless bool) string {
+	prompt := fmt.Sprintf("Use the peer skill. You are participant %s, the reader in %s's peer session in this checkout. Discuss the approach through peer, then review the diff and send concrete findings through peer. Do not edit files. Keep waiting for replies until the review is closed.", reader, writer)
+	if headless {
+		prompt += " Nobody reads this chat: do not ask the user anything, run peer and git directly rather than through wrapper commands, and keep calling peer wait until the writer ends the session. Once peer reports that the session has ended, stop."
+	}
+	return prompt
+}
+
+// appBundles maps each reader with a desktop app to its macOS bundle ID.
+var appBundles = map[string]string{"codex": "com.openai.codex", "claude": "com.anthropic.claudefordesktop"}
+
+// appRunning reports whether reader's desktop app is open without
+// launching it; it is replaced in tests. Only macOS can tell, so other
+// systems report true and --headed opens the link as before.
+var appRunning = func(reader string) bool {
+	if runtime.GOOS != "darwin" {
+		return true
+	}
+	out, err := exec.Command("osascript", "-e", `application id "`+appBundles[reader]+`" is running`).Output()
+	return err == nil && strings.TrimSpace(string(out)) == "true"
+}
+
+// readerArgs runs the reader's CLI without a chat window. Codex's sandbox
+// also lets it write the peer store outside the checkout; Claude gets no
+// edit tools and only peer and read-only git in Bash.
+func readerArgs(s *store, writer, reader string) []string {
+	prompt := readerPrompt(writer, reader, true)
+	if reader == "codex" {
+		return []string{"codex", "exec", "-C", s.repo, "-s", "workspace-write", "--add-dir", s.dir, "-c", "approval_policy=never", prompt}
+	}
+	return []string{"claude", "-p", "--verbose", "--output-format", "stream-json", "--permission-mode", "dontAsk", "--permission-prompts", "none", "--tools", "Bash", "Read", "Grep", "Glob", "Skill", "--allowedTools", "Skill", "Bash(peer:*)", "Bash(git diff:*)", "Bash(git status:*)", "Bash(git log:*)", "Bash(git show:*)", "Read", "Grep", "Glob", "--", prompt}
+}
+
+// startReader runs argv in dir in its own process session, so it outlives
+// the writer's command, pins it to peer session id, and appends its output
+// and exit status to logPath; it is replaced in tests.
+var startReader = func(argv []string, dir, logPath, id string) error {
+	if _, err := exec.LookPath(argv[0]); err != nil {
+		return err
+	}
+	log, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+	if err != nil {
+		return err
+	}
+	defer log.Close()
+	cmd := exec.Command("sh", append([]string{"-c", `"$@"; echo "[peer] reader exited with status $?"`, "sh"}, argv...)...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "PEER_SESSION="+id)
+	cmd.Stdout, cmd.Stderr = log, log
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	return cmd.Process.Release()
+}
+
 // readerLink builds a desktop deep link that opens a new codex or claude
 // chat in repo with the reader prompt prefilled. Neither app submits the prompt by itself.
 func readerLink(repo, writer, reader string) string {
-	prompt := fmt.Sprintf("Use the peer skill. You are participant %s, the reader in %s's peer session in this checkout. Discuss the approach through peer, then review the diff and send concrete findings through peer. Do not edit files. Keep waiting for replies until the review is closed.", reader, writer)
+	prompt := readerPrompt(writer, reader, false)
 	if reader == "codex" {
 		return (&url.URL{Scheme: "codex", Host: "threads", Path: "/new", RawQuery: url.Values{"path": {repo}, "prompt": {prompt}}.Encode()}).String()
 	}
@@ -376,7 +451,18 @@ func (s *store) session(id string) (session, error) {
 	return v, err
 }
 
+// current returns the active session, or the one PEER_SESSION names. A
+// headless reader is pinned this way, so once its session ends it cannot
+// join the next one and take messages meant for another participant.
 func (s *store) current() (session, error) {
+	if id := os.Getenv("PEER_SESSION"); id != "" {
+		return s.session(id)
+	}
+	return s.active()
+}
+
+// active returns the active session regardless of PEER_SESSION.
+func (s *store) active() (session, error) {
 	id, err := s.activeID()
 	if err != nil {
 		return session{}, err
@@ -386,7 +472,7 @@ func (s *store) current() (session, error) {
 
 func (s *store) start(writer, reader string, out io.Writer) error {
 	return s.locked(func() error {
-		old, err := s.current()
+		old, err := s.active() // PEER_SESSION may pin an older session
 		if err == nil && old.EndedAt == "" {
 			return fmt.Errorf("session %s is active; end it before starting another", old.ID)
 		}
