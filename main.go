@@ -1,3 +1,5 @@
+// Command peer lets two coding agents pair on one Git checkout through a
+// shared message store, and shows their rooms in a terminal UI.
 package main
 
 import (
@@ -24,6 +26,8 @@ import (
 	"syscall"
 	"time"
 	"unicode/utf8"
+
+	"github.com/charmbracelet/x/term"
 )
 
 type session struct {
@@ -59,7 +63,7 @@ var readerInstructions []byte
 //go:embed instructions/writer.md
 var writerInstructions []byte
 
-const usage = "usage: peer, peer skills flow|writer|reader, peer update, peer start NAME, peer send|wait|end ID --as NAME, peer status|follow [ID], peer history, or peer log ID"
+const usage = "usage: peer, peer skills flow|writer|reader, peer update, peer start NAME, peer send|wait|end ID --as NAME, peer status [ID], peer history, or peer log ID"
 
 // openURL is replaced in tests.
 var openURL = func(link string) error { return exec.Command("open", link).Run() }
@@ -130,7 +134,7 @@ func run(args []string, in io.Reader, out io.Writer, cwd string) error {
 		if err := needID("log"); err != nil {
 			return err
 		}
-		return s.log(id, false, newPrinter(out, s.repo, false), nil)
+		return s.log(id, newPrinter(out, s.repo))
 	case "start":
 		if !roomName.MatchString(id) {
 			return errors.New("usage: peer start NAME --writer NAME --reader NAME; the room NAME is 1-40 characters: a-z, 0-9 or -, starting with a letter")
@@ -151,7 +155,7 @@ func run(args []string, in io.Reader, out io.Writer, cwd string) error {
 		if *headed && appRunning(*reader) {
 			link := readerLink(s.repo, v)
 			if err := openURL(link); err != nil {
-				return fmt.Errorf("session started, but opening %s failed: %v; open this link: %s", *reader, err, link)
+				return fmt.Errorf("session started, but opening %s failed: %w; open this link: %s", *reader, err, link)
 			}
 			return nil
 		}
@@ -160,9 +164,9 @@ func run(args []string, in io.Reader, out io.Writer, cwd string) error {
 		}
 		logPath := filepath.Join(s.dir, "sessions", v.ID, "reader.log")
 		if err := startReader(readerArgs(s, v), s.repo, logPath); err != nil {
-			return fmt.Errorf("session started, but launching %s failed: %v; open %s in this checkout and send: %s", *reader, err, *reader, readerPrompt(v, false))
+			return fmt.Errorf("session started, but launching %s failed: %w; open %s in this checkout and send: %s", *reader, err, *reader, readerPrompt(v, false))
 		}
-		fmt.Fprintf(os.Stderr, "peer: %s runs headless; press Tab in peer to watch it, or read %s\n", *reader, logPath)
+		fmt.Fprintf(os.Stderr, "peer: %s runs headless; watch it in peer, or read %s\n", *reader, logPath)
 		return nil
 	case "status":
 		return s.status(id, out)
@@ -201,15 +205,6 @@ func run(args []string, in io.Reader, out io.Writer, cwd string) error {
 			return err
 		}
 		return s.end(id, *actor, out)
-	case "follow":
-		p := newPrinter(out, s.repo, true)
-		if id == "" {
-			var err error
-			if id, err = s.awaitSession(p); err != nil {
-				return err
-			}
-		}
-		return s.log(id, true, p, nil)
 	case "history":
 		return s.history(out)
 	default:
@@ -407,7 +402,7 @@ func withLock(path string, fn func() error) error {
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
 		return err
 	}
-	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	defer func() { _ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN) }()
 	return fn()
 }
 
@@ -720,102 +715,36 @@ func endedError(v session) error {
 	return errors.New("session has ended")
 }
 
-// log prints session id's transcript. When following, it streams new
-// messages until the session ends or stop is closed.
-func (s *store) log(id string, follow bool, p *printer, stop <-chan struct{}) error {
-	if _, err := s.session(id); err != nil {
+// log prints session id's transcript.
+func (s *store) log(id string, p *printer) error {
+	v, err := s.refresh(id)
+	if err != nil {
 		return err
 	}
-	dir := filepath.Join(s.dir, "sessions", id)
-	var offset int64
+	f, err := os.Open(filepath.Join(s.dir, "sessions", id, "messages.jsonl"))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	r := bufio.NewReader(f)
 	for {
-		// Read the session before the transcript: send refuses after end,
-		// so an ended session has no messages beyond what we drain next.
-		v, err := s.refresh(id)
-		if err != nil {
-			return err
-		}
-		f, err := os.Open(filepath.Join(dir, "messages.jsonl"))
-		if err != nil && !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
-		if err == nil {
-			if _, err := f.Seek(offset, io.SeekStart); err != nil {
-				f.Close()
-				return err
-			}
-			r := bufio.NewReader(f)
-			for {
-				line, err := r.ReadBytes('\n')
-				if err == io.EOF {
-					break
-				}
-				if err != nil {
-					f.Close()
-					return err
-				}
-				offset += int64(len(line))
-				var m message
-				if err := json.Unmarshal(line, &m); err != nil {
-					f.Close()
-					return err
-				}
-				if err := p.message(v, m); err != nil {
-					f.Close()
-					return err
-				}
-			}
-			f.Close()
-		}
-		if !follow {
+		line, err := r.ReadBytes('\n')
+		if err == io.EOF {
 			return nil
 		}
-		if v.EndedAt != "" {
-			return p.ended(v)
-		}
-		p.status(v, dir)
-		select {
-		case <-stop:
-			return p.clearStatus()
-		case <-time.After(200 * time.Millisecond):
-		}
-	}
-}
-
-// awaitSession returns the newest active room's ID. With none, it waits
-// for a new room instead of replaying an ended one; a room started after
-// the call counts even if it ended between polls.
-func (s *store) awaitSession(p *printer) (string, error) {
-	var known map[string]bool
-	notified := false
-	for {
-		sessions, err := s.sessions()
 		if err != nil {
-			return "", err
+			return err
 		}
-		for _, v := range sessions {
-			if v.EndedAt == "" {
-				return v.ID, nil
-			}
+		var m message
+		if err := json.Unmarshal(line, &m); err != nil {
+			return err
 		}
-		for _, v := range sessions {
-			if known != nil && !known[v.ID] {
-				return v.ID, nil
-			}
+		if err := p.message(v, m); err != nil {
+			return err
 		}
-		if known == nil {
-			known = map[string]bool{}
-			for _, v := range sessions {
-				known[v.ID] = true
-			}
-		}
-		if !notified {
-			notified = true
-			if _, err := fmt.Fprintf(p.out, "%s\n\n", p.paint(ansiDim, "waiting for a session to start…")); err != nil {
-				return "", err
-			}
-		}
-		time.Sleep(200 * time.Millisecond)
 	}
 }
 
@@ -825,8 +754,6 @@ const (
 	ansiWriter  = "\x1b[1;36m"
 	ansiReader  = "\x1b[1;35m"
 	ansiLinkEnd = "\x1b]8;;\x1b\\"
-	clearLine   = "\r\x1b[K"
-	idleNotice  = 10 * time.Minute
 )
 
 var (
@@ -843,30 +770,23 @@ var notify = func(title, text string) {
 		return
 	}
 	// Pass text as arguments so it is never parsed as AppleScript.
-	exec.Command("osascript", "-e", "on run argv", "-e", "display notification (item 2 of argv) with title (item 1 of argv)", "-e", "end run", title, text).Run()
+	_ = exec.Command("osascript", "-e", "on run argv", "-e", "display notification (item 2 of argv) with title (item 1 of argv)", "-e", "end run", title, text).Run()
 }
 
-// printer renders the transcript for people. Colors, links, the status
-// line and notifications need a terminal, so redirected logs stay plain;
-// NO_COLOR turns off the ANSI parts but keeps notifications.
+// printer renders the transcript for people. Colors and links need a
+// terminal, so redirected logs stay plain; NO_COLOR turns them off.
 type printer struct {
-	out      io.Writer
-	repo     string
-	color    bool
-	live     bool
-	day      string
-	counts   map[string]int
-	lastAt   time.Time
-	idleSent bool
-	statusOn bool
-	watched  bool // saw the session active, so its end is news
+	out   io.Writer
+	repo  string
+	color bool
+	day   string
 }
 
-func newPrinter(out io.Writer, repo string, follow bool) *printer {
+func newPrinter(out io.Writer, repo string) *printer {
 	f, ok := out.(*os.File)
-	tty := ok && isTerminal(f.Fd())
+	tty := ok && term.IsTerminal(f.Fd())
 	color := tty && os.Getenv("NO_COLOR") == "" && os.Getenv("TERM") != "dumb"
-	return &printer{out: out, repo: repo, color: color, live: tty && follow, counts: map[string]int{}}
+	return &printer{out: out, repo: repo, color: color}
 }
 
 func (p *printer) paint(code, text string) string {
@@ -876,25 +796,11 @@ func (p *printer) paint(code, text string) string {
 	return code + text + ansiReset
 }
 
-func (p *printer) clearStatus() error {
-	if !p.statusOn {
-		return nil
-	}
-	p.statusOn = false
-	_, err := io.WriteString(p.out, clearLine)
-	return err
-}
-
 func (p *printer) message(v session, m message) error {
 	at, err := time.Parse(time.RFC3339Nano, m.At)
 	if err != nil {
 		return err
 	}
-	if err := p.clearStatus(); err != nil {
-		return err
-	}
-	p.counts[m.From]++
-	p.lastAt, p.idleSent = at, false
 	at = at.Local()
 	if day := at.Format("Mon, 2 Jan 2006"); day != p.day {
 		p.day = day
@@ -929,68 +835,6 @@ func (p *printer) body(text string) string {
 		lines[i] = "  " + p.links(line)
 	}
 	return strings.Join(lines, "\n")
-}
-
-// status redraws a bottom line inferred from wait polling: a participant
-// whose cursor was touched in the last 2s is waiting; otherwise it is busy.
-func (p *printer) status(v session, dir string) {
-	if !p.live {
-		return
-	}
-	p.watched = true
-	if p.lastAt.IsZero() {
-		p.lastAt, _ = time.Parse(time.RFC3339Nano, v.StartedAt)
-	}
-	if quiet := time.Since(p.lastAt); quiet >= idleNotice && !p.idleSent {
-		p.idleSent = true
-		notify("peer", "No messages for "+humanDuration(quiet))
-	}
-	if !p.color {
-		return
-	}
-	var parts []string
-	for _, name := range []string{v.Writer, v.Reader} {
-		since, _ := time.Parse(time.RFC3339Nano, v.StartedAt)
-		if st, err := os.Stat(filepath.Join(dir, "cursor-"+name)); err == nil {
-			if time.Since(st.ModTime()) < 2*time.Second {
-				parts = append(parts, p.author(v, name)+" waiting")
-				continue
-			}
-			since = st.ModTime()
-		}
-		parts = append(parts, p.author(v, name)+" busy "+humanDuration(time.Since(since)))
-	}
-	p.statusOn = true
-	fmt.Fprint(p.out, clearLine+p.paint(ansiDim, "… ")+strings.Join(parts, p.paint(ansiDim, " · ")))
-}
-
-func (p *printer) ended(v session) error {
-	start, err := time.Parse(time.RFC3339Nano, v.StartedAt)
-	if err != nil {
-		return err
-	}
-	end, err := time.Parse(time.RFC3339Nano, v.EndedAt)
-	if err != nil {
-		return err
-	}
-	if err := p.clearStatus(); err != nil {
-		return err
-	}
-	total := p.counts[v.Writer] + p.counts[v.Reader]
-	noun := "messages"
-	if total == 1 {
-		noun = "message"
-	}
-	summary := fmt.Sprintf("%d %s (%s %d, %s %d) in %s", total, noun, v.Writer, p.counts[v.Writer], v.Reader, p.counts[v.Reader], humanDuration(end.Sub(start)))
-	if p.watched {
-		notify("peer", "Session ended: "+summary)
-	}
-	title := "── session ended at " + end.Local().Format("15:04:05")
-	if v.EndedReason != "" {
-		title += ": " + v.EndedReason
-	}
-	_, err = fmt.Fprintf(p.out, "%s\n%s\n", p.paint(ansiDim, title+" ──"), summary)
-	return err
 }
 
 func humanDuration(d time.Duration) string {

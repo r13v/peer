@@ -8,103 +8,70 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
-)
 
-type key int
-
-const (
-	keyOther key = iota
-	keyUp
-	keyDown
-	keyEnter
-	keyEsc
-	keyQuit
-	keyTab
-	keyClose
+	"charm.land/bubbles/v2/help"
+	"charm.land/bubbles/v2/key"
+	"charm.land/bubbles/v2/textinput"
+	"charm.land/bubbles/v2/viewport"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/glamour/v2"
+	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
+	"github.com/charmbracelet/x/term"
+	zone "github.com/lrstanley/bubblezone/v2"
 )
 
 const (
-	altScreenOn  = "\x1b[?1049h\x1b[?25l"
-	altScreenOff = "\x1b[?25h\x1b[?1049l"
-	clearScreen  = "\x1b[H\x1b[2J"
-	recentLimit  = 10
+	recentLimit = 10
+	pollEvery   = 250 * time.Millisecond
+	roomsEvery  = time.Second
 )
 
-var errQuit = errors.New("quit")
+// themes are the glamour styles T cycles through; auto follows the
+// terminal's background.
+var themes = []string{"auto", "dracula", "tokyo-night", "pink"}
 
-// entry is a session with the store that holds it.
+var (
+	accent       = lipgloss.Color("#d19a66")
+	dim          = lipgloss.NewStyle().Faint(true)
+	title        = lipgloss.NewStyle().Foreground(accent)
+	writerStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6"))
+	readerStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("5"))
+	selected     = lipgloss.NewStyle().Background(accent).Foreground(lipgloss.Color("0"))
+	statusBar    = lipgloss.NewStyle().Background(accent).Foreground(lipgloss.Color("0"))
+	matchStyle   = lipgloss.NewStyle().Reverse(true)
+	currentMatch = lipgloss.NewStyle().Background(lipgloss.Color("3")).Foreground(lipgloss.Color("0"))
+	border       = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("8"))
+)
+
+// entry is a session with the store that holds it and its one-line summary.
 type entry struct {
-	s *store
-	v session
+	s   *store
+	v   session
+	sum string
 }
 
-// picker lists active sessions in every checkout, then recent ones in
-// this checkout. Enter follows the selected session on the normal screen,
-// so its transcript stays in the terminal's scrollback; Esc returns here.
+// key identifies a room across checkouts, whose IDs may repeat.
+func (e entry) key() string { return e.s.dir + "\x00" + e.v.ID }
+
+// picker shows every active room and this checkout's recent ones beside
+// the selected room's transcript, with the headless reader's log below.
 func picker(in io.Reader, out io.Writer, cwd string) error {
 	fin, ok := in.(*os.File)
 	fout, ok2 := out.(*os.File)
-	if !ok || !ok2 || !isTerminal(fin.Fd()) || !isTerminal(fout.Fd()) {
+	if !ok || !ok2 || !term.IsTerminal(fin.Fd()) || !term.IsTerminal(fout.Fd()) {
 		return errors.New(usage)
 	}
 	local, _ := openStore(cwd) // nil outside a Git checkout
-	restore, err := makeRaw(fin.Fd())
-	if err != nil {
-		return err
-	}
-	defer restore()
-	keys := readKeys(fin)
-	fmt.Fprint(out, altScreenOn)
-	defer func() { fmt.Fprint(out, altScreenOff) }()
-	tick := time.NewTicker(time.Second)
-	defer tick.Stop()
-	selected := ""
-	for {
-		entries, err := listEntries(local)
-		if err != nil {
-			return err
-		}
-		i := 0
-		for j, e := range entries {
-			if e.v.ID+e.s.dir == selected {
-				i = j
-			}
-		}
-		width, height := termSize(fout.Fd())
-		render(out, entries, i, local, width, height)
-		select {
-		case <-tick.C:
-		case k, ok := <-keys:
-			switch {
-			case !ok || k == keyQuit:
-				return nil
-			case k == keyUp && i > 0:
-				i--
-			case k == keyDown && i < len(entries)-1:
-				i++
-			case k == keyClose && len(entries) > 0 && entries[i].v.EndedAt == "":
-				if err := entries[i].s.close(entries[i].v.ID); err != nil {
-					return err
-				}
-			case k == keyEnter && len(entries) > 0:
-				fmt.Fprint(out, altScreenOff)
-				err := view(entries[i], keys, out)
-				fmt.Fprint(out, altScreenOn)
-				if errors.Is(err, errQuit) {
-					return nil
-				}
-				if err != nil {
-					return err
-				}
-			}
-			if len(entries) > 0 {
-				selected = entries[i].v.ID + entries[i].s.dir
-			}
-		}
-	}
+	m := newModel(local)
+	defer m.zones.Close()
+	_, err := tea.NewProgram(m, tea.WithInput(in), tea.WithOutput(out)).Run()
+	return err
 }
 
 // listEntries returns active rooms across checkouts, newest first,
@@ -125,173 +92,960 @@ func listEntries(local *store) ([]entry, error) {
 		sessions, _ := s.sessions()
 		for _, v := range sessions {
 			if v.EndedAt == "" {
-				entries = append(entries, entry{&store{dir: s.dir, repo: v.Repo}, v})
+				entries = append(entries, entry{s: &store{dir: s.dir, repo: v.Repo}, v: v})
 			}
 		}
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].v.StartedAt > entries[j].v.StartedAt })
-	if local == nil {
-		return entries, nil
-	}
-	sessions, _ := local.sessions()
-	n := 0
-	for _, v := range sessions {
-		if v.EndedAt != "" && n < recentLimit {
-			entries = append(entries, entry{local, v})
-			n++
+	if local != nil {
+		sessions, _ := local.sessions()
+		n := 0
+		for _, v := range sessions {
+			if v.EndedAt != "" && n < recentLimit {
+				entries = append(entries, entry{s: local, v: v})
+				n++
+			}
 		}
+	}
+	for i := range entries {
+		entries[i].sum = entries[i].s.summary(entries[i].v)
 	}
 	return entries, nil
 }
 
-// render draws the list, scrolled so the selected row stays on screen.
-// Lines are cut to the width so none wraps and shifts the rows.
-func render(out io.Writer, entries []entry, selected int, local *store, width, height int) {
-	var lines []string
-	at, section := 0, ""
-	for i, e := range entries {
-		title := "Active"
-		if e.v.EndedAt != "" {
-			title = "Recent in " + filepath.Base(local.repo)
-		}
-		if title != section {
-			section = title
-			lines = append(lines, "", title)
-		}
-		marker := "  "
-		if i == selected {
-			marker, at = "› ", len(lines)
-		}
-		// Ended rows are all in local, whose name is in the section title,
-		// so they show why the room ended instead, before the summary
-		// that cut() may shorten.
-		line := marker
-		if e.v.EndedAt == "" {
-			line += fmt.Sprintf("%-16.16s  ", filepath.Base(e.v.Repo))
-		}
-		line += fmt.Sprintf("%-24s  ", e.v.ID)
-		if e.v.EndedReason != "" {
-			line += e.v.EndedReason + "  "
-		}
-		lines = append(lines, line+e.s.summary(e.v))
-	}
-	if len(entries) == 0 {
-		lines = append(lines, "", "No sessions. Start one with /peer in an agent chat.")
-	}
-	rows := max(height-1, 1) // the first line is the key help
-	first := min(max(at-rows+1, 0), max(len(lines)-rows, 0))
-	var b strings.Builder
-	b.WriteString(clearScreen + cut("peer  ↑/↓ select · Enter open · x close room · Esc back · q quit", width))
-	for _, line := range lines[first:min(first+rows, len(lines))] {
-		b.WriteString("\n" + cut(line, width))
-	}
-	io.WriteString(out, b.String())
+type focus int
+
+const (
+	focusRooms focus = iota
+	focusChat
+	focusLog
+)
+
+type keyMap struct {
+	Up, Down, Tab, Open, Log, Rooms, Markdown, Theme, NextMsg, PrevMsg, Top, Bottom,
+	Page, Sideways, Search, Next, Prev, Close, Esc, Help, Quit key.Binding
 }
 
-// cut shortens s to fit in width columns, counting one per rune.
-func cut(s string, width int) string {
-	if r := []rune(s); len(r) >= width {
-		return string(r[:max(width-1, 0)])
+func newKeyMap() keyMap {
+	b := func(keys []string, k, h string) key.Binding {
+		return key.NewBinding(key.WithKeys(keys...), key.WithHelp(k, h))
+	}
+	return keyMap{
+		Up:       b([]string{"k", "up"}, "k/↑", "up"),
+		Down:     b([]string{"j", "down"}, "j/↓", "down"),
+		Tab:      b([]string{"tab"}, "Tab", "next pane"),
+		Open:     b([]string{"enter"}, "Enter", "open room"),
+		Log:      b([]string{"l"}, "l", "toggle reader log"),
+		Rooms:    b([]string{"s"}, "s", "toggle rooms"),
+		Markdown: b([]string{"m"}, "m", "markdown / plain"),
+		Theme:    b([]string{"T"}, "T", "next theme"),
+		NextMsg:  b([]string{"]"}, "]", "next message"),
+		PrevMsg:  b([]string{"["}, "[", "previous message"),
+		Top:      b([]string{"g", "home"}, "g", "top"),
+		Bottom:   b([]string{"G", "end"}, "G", "bottom"),
+		Page:     b([]string{"pgup", "pgdown"}, "PgUp/PgDn ^u/^d", "scroll"),
+		Sideways: b([]string{"left", "right"}, "←/→", "scroll sideways"),
+		Search:   b([]string{"/"}, "/", "search pane"),
+		Next:     b([]string{"n"}, "n", "next match"),
+		Prev:     b([]string{"N"}, "N", "previous match"),
+		Close:    b([]string{"x"}, "x", "close room"),
+		Esc:      b([]string{"esc"}, "Esc", "clear search / back"),
+		Help:     b([]string{"?"}, "?", "help"),
+		Quit:     b([]string{"q", "ctrl+c"}, "q", "quit"),
+	}
+}
+
+func (k keyMap) FullHelp() [][]key.Binding {
+	return [][]key.Binding{
+		{k.Up, k.Down, k.Page, k.Sideways, k.Top, k.Bottom, k.NextMsg, k.PrevMsg},
+		{k.Tab, k.Open, k.Log, k.Rooms, k.Markdown, k.Theme},
+		{k.Search, k.Next, k.Prev, k.Esc, k.Close, k.Help, k.Quit},
+	}
+}
+
+// match is a search hit in a pane, in terminal cells on one line.
+type match struct{ line, start, end int }
+
+// pane is a scrollable view with vim-like search. Lines are wrapped
+// before they get here, so each one is one screen row.
+type pane struct {
+	vp      viewport.Model
+	lines   []string
+	query   string
+	matches []match
+	cur     int
+	unread  bool // content grew while scrolled up
+}
+
+func newPane() pane {
+	vp := viewport.New()
+	// h and l are taken, so only the arrows scroll code wider than the pane.
+	vp.KeyMap.Left = key.NewBinding(key.WithKeys("left"))
+	vp.KeyMap.Right = key.NewBinding(key.WithKeys("right"))
+	vp.MouseWheelEnabled = true
+	vp.FillHeight = true
+	return pane{vp: vp, cur: -1}
+}
+
+// setLines replaces the content and stays at the bottom if it was there,
+// so a live room scrolls while one being read does not.
+func (p *pane) setLines(lines []string) {
+	follow := p.vp.AtBottom() || len(p.lines) == 0
+	grew := len(lines) > len(p.lines)
+	p.lines = lines
+	p.find()
+	p.paint()
+	if follow {
+		p.vp.GotoBottom()
+	} else if grew {
+		p.unread = true
+	}
+}
+
+// find collects the query's hits; a lowercase query ignores case.
+func (p *pane) find() {
+	p.matches = nil
+	if p.query == "" {
+		p.cur = -1
+		return
+	}
+	q, fold := p.query, strings.ToLower(p.query) == p.query
+	for i, line := range p.lines {
+		plain := ansi.Strip(line)
+		if fold {
+			plain = strings.ToLower(plain)
+		}
+		for off := 0; ; {
+			j := strings.Index(plain[off:], q)
+			if j < 0 {
+				break
+			}
+			b := off + j
+			p.matches = append(p.matches, match{i, ansi.StringWidth(plain[:b]), ansi.StringWidth(plain[:b+len(q)])})
+			off = b + len(q)
+		}
+	}
+	p.cur = min(p.cur, len(p.matches)-1)
+}
+
+func (p *pane) paint() {
+	lines := p.lines
+	if len(p.matches) > 0 {
+		lines = slices.Clone(p.lines)
+		ranges := map[int][]lipgloss.Range{}
+		for i, m := range p.matches {
+			st := matchStyle
+			if i == p.cur {
+				st = currentMatch
+			}
+			ranges[m.line] = append(ranges[m.line], lipgloss.NewRange(m.start, m.end, st))
+		}
+		for i, r := range ranges {
+			lines[i] = lipgloss.StyleRanges(lines[i], r...)
+		}
+	}
+	p.vp.SetContentLines(lines)
+}
+
+func (p *pane) search(q string) {
+	p.query, p.cur = q, -1
+	p.find()
+	p.paint()
+	p.jump(1)
+}
+
+// jump moves to the next hit in dir, starting from the top of the view
+// when none is current yet.
+func (p *pane) jump(dir int) {
+	n := len(p.matches)
+	if n == 0 {
+		return
+	}
+	if p.cur < 0 {
+		p.cur = 0
+		for i, m := range p.matches {
+			if m.line >= p.vp.YOffset() {
+				p.cur = i
+				break
+			}
+		}
+		if dir < 0 {
+			p.cur = (p.cur - 1 + n) % n
+		}
+	} else {
+		p.cur = (p.cur + dir + n) % n
+	}
+	p.paint()
+	m := p.matches[p.cur]
+	p.vp.EnsureVisible(m.line, m.start, m.end)
+}
+
+// room is what the TUI has read of the selected room so far.
+type room struct {
+	e       entry
+	loaded  bool
+	msgs    []message
+	msgOff  int64
+	logs    []string
+	logOff  int64
+	hasLog  bool
+	status  string
+	starts  []int // first chat line of each message
+	pending bool  // a room is selected but not read yet
+}
+
+type model struct {
+	local     *store
+	zones     *zone.Manager
+	keys      keyMap
+	help      help.Model
+	input     textinput.Model
+	width     int
+	height    int
+	sideW     int
+	topH      int
+	logH      int
+	rooms     []entry
+	sel       int
+	gen       int // bumped on each room switch, so late reads are dropped
+	room      room
+	chat, log pane
+	focus     focus
+	showLog   bool
+	showRooms bool
+	showHelp  bool
+	markdown  bool
+	searching bool
+	searchIn  focus
+	theme     int
+	dark      bool
+	lastRooms time.Time
+	renderer  *glamour.TermRenderer
+	rendered  map[string]string // glamour output by message ID
+	err       error
+}
+
+func newModel(local *store) *model {
+	in := textinput.New()
+	in.Prompt = "/"
+	return &model{
+		local: local, zones: zone.New(), keys: newKeyMap(), help: help.New(), input: in,
+		chat: newPane(), log: newPane(), showLog: true, showRooms: true, markdown: true, dark: true,
+		rendered: map[string]string{},
+	}
+}
+
+type tickMsg struct{}
+
+// pollMsg carries what one poll read; rooms is only set when listed.
+type pollMsg struct {
+	gen    int
+	listed bool
+	rooms  []entry
+	room   *room
+	err    error
+	polled time.Time
+}
+
+type closedMsg struct{ err error }
+
+func (m *model) Init() tea.Cmd {
+	return tea.Batch(tea.RequestBackgroundColor, m.poll())
+}
+
+// poll reads, off the update loop, the rooms list once a second and
+// whatever the selected room gained since the last read. Only one poll
+// runs at a time: the next tick is scheduled when its result arrives.
+func (m *model) poll() tea.Cmd {
+	gen, local, listRooms := m.gen, m.local, time.Since(m.lastRooms) >= roomsEvery
+	var r *room
+	if m.room.pending || m.room.loaded {
+		c := m.room
+		r = &c
+	}
+	return func() tea.Msg {
+		msg := pollMsg{gen: gen, polled: time.Now()}
+		if listRooms {
+			if msg.rooms, msg.err = listEntries(local); msg.err != nil {
+				return msg
+			}
+			msg.listed = true
+		}
+		if r != nil {
+			msg.room, msg.err = readRoom(*r)
+		}
+		return msg
+	}
+}
+
+// readRoom returns r with the messages and reader log lines written
+// since it was last read.
+func readRoom(r room) (*room, error) {
+	v, err := r.e.s.refresh(r.e.v.ID)
+	if err != nil {
+		return nil, err
+	}
+	dir := filepath.Join(r.e.s.dir, "sessions", v.ID)
+	// Read the session before the transcript: send refuses after end,
+	// so an ended session has no messages beyond what is read next.
+	lines, off, _, err := readLines(filepath.Join(dir, "messages.jsonl"), r.msgOff)
+	if err != nil {
+		return nil, err
+	}
+	r.msgs = slices.Clone(r.msgs)
+	for _, line := range lines {
+		var msg message
+		if err := json.Unmarshal(line, &msg); err != nil {
+			return nil, err
+		}
+		r.msgs = append(r.msgs, msg)
+	}
+	r.msgOff = off
+	lines, off, exists, err := readLines(filepath.Join(dir, "reader.log"), r.logOff)
+	if err != nil {
+		return nil, err
+	}
+	r.logs = slices.Clone(r.logs)
+	links := &printer{repo: v.Repo, color: true}
+	for _, line := range lines {
+		if text := readerLogLine(line); text != "" {
+			r.logs = append(r.logs, links.links(text))
+		}
+	}
+	r.logOff, r.hasLog = off, exists
+	r.e.v, r.status, r.loaded, r.pending = v, roomStatus(v, dir), true, false
+	return &r, nil
+}
+
+// readLines returns path's complete lines from offset on and the offset
+// after them. A partly written last line is left for the next call, and
+// a missing file reads as empty, since both files appear later.
+func readLines(path string, offset int64) (lines [][]byte, next int64, exists bool, err error) {
+	f, err := os.Open(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, offset, false, nil
+	}
+	if err != nil {
+		return nil, offset, false, err
+	}
+	defer f.Close()
+	if _, err := f.Seek(offset, io.SeekStart); err != nil {
+		return nil, offset, true, err
+	}
+	r := bufio.NewReader(f)
+	for {
+		line, err := r.ReadBytes('\n')
+		if err == io.EOF {
+			return lines, offset, true, nil
+		}
+		if err != nil {
+			return lines, offset, true, err
+		}
+		offset += int64(len(line))
+		lines = append(lines, line)
+	}
+}
+
+// roomStatus says what each participant of an active room is doing,
+// inferred from wait polling: a cursor touched in the last 2s means
+// waiting; otherwise the participant is busy.
+func roomStatus(v session, dir string) string {
+	if v.EndedAt != "" {
+		if v.EndedReason != "" {
+			return "ended: " + v.EndedReason
+		}
+		return "ended"
+	}
+	var parts []string
+	for _, name := range []string{v.Writer, v.Reader} {
+		since, _ := time.Parse(time.RFC3339Nano, v.StartedAt)
+		if st, err := os.Stat(filepath.Join(dir, "cursor-"+name)); err == nil {
+			if time.Since(st.ModTime()) < 2*time.Second {
+				parts = append(parts, name+" waiting")
+				continue
+			}
+			since = st.ModTime()
+		}
+		parts = append(parts, name+" busy "+humanDuration(time.Since(since)))
+	}
+	return strings.Join(parts, " · ")
+}
+
+func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width, m.height = msg.Width, msg.Height
+		m.layout()
+	case tea.BackgroundColorMsg:
+		m.dark = msg.IsDark()
+		m.restyle()
+	case tickMsg:
+		return m, m.poll()
+	case pollMsg:
+		m.err = msg.err
+		// Apply the room before the list, which may no longer have it: a
+		// room from another checkout leaves the list once it ends.
+		cmds := []tea.Cmd{tea.Tick(pollEvery, func(time.Time) tea.Msg { return tickMsg{} })}
+		if msg.room != nil && msg.gen == m.gen && msg.room.e.key() == m.room.e.key() {
+			cmds = append(cmds, m.apply(msg.room))
+		}
+		if msg.listed {
+			m.lastRooms = msg.polled
+			m.setRooms(msg.rooms)
+		}
+		return m, tea.Batch(cmds...)
+	case closedMsg:
+		m.err, m.lastRooms = msg.err, time.Time{}
+	case tea.MouseWheelMsg:
+		m.wheel(msg)
+	case tea.MouseClickMsg:
+		m.click(msg)
+	case tea.KeyPressMsg:
+		return m, m.press(msg)
+	}
+	return m, nil
+}
+
+// setRooms replaces the list and keeps the selected room selected. A
+// room that left the list stays shown, unselected, until another is
+// chosen; before any room is read, the first one is chosen.
+func (m *model) setRooms(rooms []entry) {
+	m.rooms = rooms
+	for i, e := range rooms {
+		if m.room.e.s != nil && e.key() == m.room.e.key() {
+			m.sel = i
+			return
+		}
+	}
+	if m.room.loaded {
+		m.sel = -1
+	} else if len(rooms) > 0 {
+		m.choose(min(max(m.sel, 0), len(rooms)-1))
+	}
+}
+
+// choose selects room i and starts reading it from the beginning.
+func (m *model) choose(i int) {
+	m.sel = i
+	if m.room.e.s != nil && m.rooms[i].key() == m.room.e.key() {
+		return
+	}
+	m.gen++
+	m.room = room{e: m.rooms[i], pending: true}
+	m.chat, m.log = newPane(), newPane()
+	m.layout()
+}
+
+// apply shows what a poll read of the selected room; it returns a
+// notification when the room is seen to end.
+func (m *model) apply(r *room) tea.Cmd {
+	wasActive := m.room.loaded && m.room.e.v.EndedAt == ""
+	grew := len(r.msgs) != len(m.room.msgs) || r.e.v.EndedAt != m.room.e.v.EndedAt || !m.room.loaded
+	logGrew := len(r.logs) != len(m.room.logs) || r.hasLog != m.room.hasLog || !m.room.loaded
+	r.starts = m.room.starts // a render since the poll may have moved them
+	m.room = *r
+	if grew {
+		m.renderChat()
+	}
+	if logGrew {
+		m.renderLog()
+	}
+	if wasActive && r.e.v.EndedAt != "" {
+		text := "Session ended: " + m.tally()
+		return func() tea.Msg { notify("peer", text); return nil }
+	}
+	return nil
+}
+
+// tally counts the room's messages by author, e.g.
+// "3 messages (claude 2, codex 1) in 4m".
+func (m *model) tally() string {
+	v := m.room.e.v
+	counts := map[string]int{}
+	for _, msg := range m.room.msgs {
+		counts[msg.From]++
+	}
+	noun := "messages"
+	if len(m.room.msgs) == 1 {
+		noun = "message"
+	}
+	start, _ := time.Parse(time.RFC3339Nano, v.StartedAt)
+	end := time.Now()
+	if v.EndedAt != "" {
+		end, _ = time.Parse(time.RFC3339Nano, v.EndedAt)
+	}
+	return fmt.Sprintf("%d %s (%s %d, %s %d) in %s", len(m.room.msgs), noun, v.Writer, counts[v.Writer], v.Reader, counts[v.Reader], humanDuration(end.Sub(start)))
+}
+
+// layout sizes the panes: rooms on the left, the transcript on the right,
+// the reader log across the bottom and a status bar below everything.
+func (m *model) layout() {
+	if m.width == 0 {
+		return
+	}
+	h := m.height - 1
+	m.logH = 0
+	if m.showLog && h >= 12 { // too short for both, the log gives way
+		m.logH = max(h/3, 6)
+	}
+	if m.logH == 0 && m.focus == focusLog {
+		m.focus = focusChat
+	}
+	m.topH = h - m.logH
+	m.sideW = 0
+	if m.showRooms {
+		m.sideW = min(max(m.width/4, 28), 44)
+	}
+	chatW := m.width - m.sideW
+	resized := m.chat.vp.Width() != chatW-2 || m.log.vp.Width() != m.width-2
+	m.chat.vp.SetWidth(chatW - 2)
+	m.chat.vp.SetHeight(max(m.topH-3, 1))
+	m.log.vp.SetWidth(m.width - 2)
+	m.log.vp.SetHeight(max(m.logH-3, 1))
+	if resized {
+		m.renderer, m.rendered = nil, map[string]string{}
+		m.renderChat()
+		m.renderLog()
+	}
+}
+
+// restyle drops rendered markdown after a theme or background change.
+func (m *model) restyle() {
+	m.renderer, m.rendered = nil, map[string]string{}
+	m.renderChat()
+}
+
+func (m *model) author(v session, name string) string {
+	if name == v.Writer {
+		return writerStyle.Render(name)
+	}
+	return readerStyle.Render(name)
+}
+
+func (m *model) renderChat() {
+	if !m.room.loaded {
+		return
+	}
+	v, w := m.room.e.v, m.chat.vp.Width()
+	var lines []string
+	m.room.starts = m.room.starts[:0]
+	day := ""
+	for _, msg := range m.room.msgs {
+		at, _ := time.Parse(time.RFC3339Nano, msg.At)
+		at = at.Local()
+		if d := at.Format("Mon, 2 Jan 2006"); d != day {
+			day = d
+			lines = append(lines, dim.Render("── "+d+" ──"), "")
+		}
+		m.room.starts = append(m.room.starts, len(lines))
+		lines = append(lines, dim.Render(at.Format("15:04:05"))+"  "+m.author(v, msg.From)+dim.Render(" → ")+m.author(v, msg.To))
+		lines = append(lines, strings.Split(m.body(msg, w), "\n")...)
+		lines = append(lines, "")
+	}
+	if len(m.room.msgs) == 0 {
+		lines = append(lines, dim.Render("No messages yet."))
+	}
+	if v.EndedAt != "" {
+		end, _ := time.Parse(time.RFC3339Nano, v.EndedAt)
+		t := "── session ended at " + end.Local().Format("15:04:05")
+		if v.EndedReason != "" {
+			t += ": " + v.EndedReason
+		}
+		lines = append(lines, dim.Render(t+" ──"), m.tally())
+	}
+	m.chat.setLines(lines)
+}
+
+// body renders a message as markdown, with code highlighted, or as plain
+// wrapped text.
+func (m *model) body(msg message, width int) string {
+	if !m.markdown {
+		text := "  " + strings.ReplaceAll(ansi.Wrap(msg.Text, max(width-2, 10), ""), "\n", "\n  ")
+		return (&printer{repo: m.room.e.v.Repo, color: true}).links(text)
+	}
+	if out, ok := m.rendered[msg.ID]; ok {
+		return out
+	}
+	if m.renderer == nil {
+		style := themes[m.theme]
+		if style == "auto" {
+			style = "light"
+			if m.dark {
+				style = "dark"
+			}
+		}
+		r, err := glamour.NewTermRenderer(glamour.WithStandardStyle(style), glamour.WithWordWrap(max(width-4, 10)))
+		if err != nil {
+			m.err = err
+			m.markdown = false
+			return m.body(msg, width)
+		}
+		m.renderer = r
+	}
+	out, err := m.renderer.Render(msg.Text)
+	if err != nil {
+		out = msg.Text
+	}
+	out = (&printer{repo: m.room.e.v.Repo, color: true}).links(strings.Trim(out, "\n"))
+	m.rendered[msg.ID] = out
+	return out
+}
+
+func (m *model) renderLog() {
+	if !m.room.loaded {
+		return
+	}
+	w := max(m.log.vp.Width(), 10)
+	var lines []string
+	for _, text := range m.room.logs {
+		lines = append(lines, strings.Split(ansi.Wrap(text, w, ""), "\n")...)
+	}
+	if !m.room.hasLog {
+		lines = []string{dim.Render("The reader is not headless, so it has no log here.")}
+	}
+	m.log.setLines(lines)
+}
+
+// active is the pane that scrolling and search keys act on.
+func (m *model) active() *pane {
+	if m.focus == focusLog {
+		return &m.log
+	}
+	return &m.chat
+}
+
+func (m *model) press(msg tea.KeyPressMsg) tea.Cmd {
+	if m.searching && msg.String() != "ctrl+c" {
+		switch msg.String() {
+		case "esc":
+			m.searching = false
+			m.input.Blur()
+		case "enter":
+			m.searching = false
+			m.input.Blur()
+			p := &m.chat
+			if m.searchIn == focusLog {
+				p = &m.log
+			}
+			p.search(m.input.Value())
+		default:
+			var cmd tea.Cmd
+			m.input, cmd = m.input.Update(msg)
+			return cmd
+		}
+		return nil
+	}
+	if m.showHelp {
+		m.showHelp = false
+		if !key.Matches(msg, m.keys.Quit) {
+			return nil
+		}
+	}
+	k := m.keys
+	switch {
+	case key.Matches(msg, k.Quit):
+		return tea.Quit
+	case key.Matches(msg, k.Help):
+		m.showHelp = true
+	case key.Matches(msg, k.Tab):
+		m.cycleFocus()
+	case key.Matches(msg, k.Log):
+		m.showLog = !m.showLog
+		if !m.showLog && m.focus == focusLog {
+			m.focus = focusChat
+		}
+		m.layout()
+	case key.Matches(msg, k.Rooms):
+		m.showRooms = !m.showRooms
+		if !m.showRooms && m.focus == focusRooms {
+			m.focus = focusChat
+		}
+		m.layout()
+	case key.Matches(msg, k.Markdown):
+		m.markdown = !m.markdown
+		m.renderChat()
+	case key.Matches(msg, k.Theme):
+		m.theme = (m.theme + 1) % len(themes)
+		m.restyle()
+	case key.Matches(msg, k.Search):
+		if m.focus == focusRooms {
+			m.focus = focusChat
+		}
+		m.searching, m.searchIn = true, m.focus
+		m.input.SetValue("")
+		return m.input.Focus()
+	case key.Matches(msg, k.Next):
+		m.active().jump(1)
+	case key.Matches(msg, k.Prev):
+		m.active().jump(-1)
+	case key.Matches(msg, k.Esc):
+		if p := m.active(); p.query != "" {
+			p.search("")
+		} else if m.showRooms {
+			m.focus = focusRooms
+		}
+	case key.Matches(msg, k.NextMsg, k.PrevMsg):
+		m.focus = focusChat
+		m.stepMessage(key.Matches(msg, k.NextMsg))
+	case key.Matches(msg, k.Top):
+		m.active().vp.GotoTop()
+	case key.Matches(msg, k.Bottom):
+		p := m.active()
+		p.vp.GotoBottom()
+		p.unread = false
+	case m.focus == focusRooms:
+		return m.pressRooms(msg)
+	default:
+		p := m.active()
+		p.vp, _ = p.vp.Update(msg)
+		if p.vp.AtBottom() {
+			p.unread = false
+		}
+	}
+	return nil
+}
+
+func (m *model) pressRooms(msg tea.KeyPressMsg) tea.Cmd {
+	k := m.keys
+	switch {
+	case key.Matches(msg, k.Up) && m.sel > 0:
+		m.choose(m.sel - 1)
+	case key.Matches(msg, k.Down) && m.sel < len(m.rooms)-1:
+		m.choose(m.sel + 1)
+	case key.Matches(msg, k.Open):
+		m.focus = focusChat
+	case key.Matches(msg, k.Close) && m.sel >= 0 && m.sel < len(m.rooms) && m.rooms[m.sel].v.EndedAt == "":
+		e := m.rooms[m.sel]
+		return func() tea.Msg { return closedMsg{e.s.close(e.v.ID)} }
+	}
+	return nil
+}
+
+func (m *model) cycleFocus() {
+	order := []focus{focusChat}
+	if m.showRooms {
+		order = append([]focus{focusRooms}, order...)
+	}
+	if m.logH > 0 {
+		order = append(order, focusLog)
+	}
+	i := slices.Index(order, m.focus)
+	m.focus = order[(i+1)%len(order)]
+}
+
+// stepMessage scrolls the transcript to the start of the next or
+// previous message.
+func (m *model) stepMessage(next bool) {
+	y := m.chat.vp.YOffset()
+	starts := m.room.starts
+	if next {
+		for _, s := range starts {
+			if s > y {
+				m.chat.vp.SetYOffset(s)
+				return
+			}
+		}
+		return
+	}
+	for i := len(starts) - 1; i >= 0; i-- {
+		if starts[i] < y {
+			m.chat.vp.SetYOffset(starts[i])
+			return
+		}
+	}
+}
+
+// wheel scrolls whichever pane is under the pointer, not the focused one.
+func (m *model) wheel(msg tea.MouseWheelMsg) {
+	switch {
+	case m.zones.Get("chat").InBounds(msg):
+		m.chat.vp, _ = m.chat.vp.Update(msg)
+	case m.zones.Get("log").InBounds(msg):
+		m.log.vp, _ = m.log.vp.Update(msg)
+	case m.zones.Get("rooms").InBounds(msg):
+		if msg.Button == tea.MouseWheelUp && m.sel > 0 {
+			m.choose(m.sel - 1)
+		} else if msg.Button == tea.MouseWheelDown && m.sel < len(m.rooms)-1 {
+			m.choose(m.sel + 1)
+		}
+	}
+}
+
+func (m *model) click(msg tea.MouseClickMsg) {
+	for i := range m.rooms {
+		if m.zones.Get("room" + strconv.Itoa(i)).InBounds(msg) {
+			m.choose(i)
+			m.focus = focusRooms
+			return
+		}
+	}
+	switch {
+	case m.zones.Get("chat").InBounds(msg):
+		m.focus = focusChat
+	case m.zones.Get("log").InBounds(msg):
+		m.focus = focusLog
+	case m.zones.Get("rooms").InBounds(msg):
+		m.focus = focusRooms
+	}
+}
+
+func (m *model) View() tea.View {
+	v := tea.NewView(m.zones.Scan(m.render()))
+	v.AltScreen = true
+	v.MouseMode = tea.MouseModeCellMotion
+	return v
+}
+
+func (m *model) render() string {
+	if m.width == 0 {
+		return ""
+	}
+	chatW := m.width - m.sideW
+	var chat string
+	if m.showHelp {
+		m.help.SetWidth(chatW - 2)
+		chat = box(title.Render("Keys")+"\n\n"+m.help.FullHelpView(m.keys.FullHelp()), chatW, m.topH, true)
+	} else {
+		chat = box(m.chatTitle()+"\n"+m.chat.vp.View(), chatW, m.topH, m.focus == focusChat)
+	}
+	top := m.zones.Mark("chat", chat)
+	if m.showRooms {
+		top = lipgloss.JoinHorizontal(lipgloss.Top, m.zones.Mark("rooms", box(m.roomList(), m.sideW, m.topH, m.focus == focusRooms)), top)
+	}
+	parts := []string{top}
+	if m.logH > 0 {
+		name := "reader"
+		if m.room.e.s != nil {
+			name = m.room.e.v.Reader
+		}
+		head := title.Render(name+" log") + paneState(&m.log)
+		parts = append(parts, m.zones.Mark("log", box(head+"\n"+m.log.vp.View(), m.width, m.logH, m.focus == focusLog)))
+	}
+	parts = append(parts, m.statusLine())
+	return lipgloss.JoinVertical(lipgloss.Left, parts...)
+}
+
+func (m *model) chatTitle() string {
+	if m.room.e.s == nil {
+		return title.Render("peer")
+	}
+	v := m.room.e.v
+	return title.Render(filepath.Base(v.Repo)+" · "+v.ID) + "  " + dim.Render(m.room.status) + paneState(&m.chat)
+}
+
+// paneState shows a pane's search and whether it has news below.
+func paneState(p *pane) string {
+	s := ""
+	if p.query != "" {
+		s += fmt.Sprintf("  /%s %d/%d", p.query, p.cur+1, len(p.matches))
+	}
+	if p.unread {
+		s += "  ↓ new"
 	}
 	return s
 }
 
-// view follows one session until Esc. An ended session shows its
-// transcript and summary and stays until Esc too. When the reader runs
-// headless, Tab switches between the transcript and the reader's log.
-func view(e entry, keys <-chan key, out io.Writer) error {
-	p := newPrinter(out, e.s.repo, true)
-	readerLog := filepath.Join(e.s.dir, "sessions", e.v.ID, "reader.log")
-	_, err := os.Stat(readerLog)
-	headless, help := err == nil, " · Esc back ──"
-	if headless {
-		help = " · Tab reader log · Esc back ──"
+// roomList renders the rooms, scrolled so the selected one stays visible.
+func (m *model) roomList() string {
+	w, h := m.sideW-2, max(m.topH-2, 1)
+	var lines []string
+	var owner []int // the room each line belongs to, or -1
+	add := func(i int, line string) {
+		lines, owner = append(lines, line), append(owner, i)
 	}
-	fmt.Fprintf(out, "\n%s\n\n", p.paint(ansiDim, "── "+filepath.Base(e.v.Repo)+" "+e.v.ID+help))
-	showLog := false
-	var stop chan struct{}
-	var done chan error
-	follow := func() {
-		stop, done = make(chan struct{}), make(chan error, 1)
-		p := newPrinter(out, e.s.repo, true) // replays start over, so counts do too
-		if showLog {
-			go func(stop <-chan struct{}, done chan<- error) { done <- followReaderLog(readerLog, p, stop) }(stop, done)
-		} else {
-			go func(stop <-chan struct{}, done chan<- error) { done <- e.s.log(e.v.ID, true, p, stop) }(stop, done)
+	at, section := 0, ""
+	for i, e := range m.rooms {
+		t := "Active"
+		if e.v.EndedAt != "" {
+			t = "Recent in " + filepath.Base(m.local.repo)
 		}
-	}
-	halt := func() {
-		close(stop)
-		if done != nil {
-			<-done
+		if t != section {
+			section = t
+			if len(lines) > 0 {
+				add(-1, "")
+			}
+			add(-1, title.Render(t))
 		}
-	}
-	follow()
-	for {
-		select {
-		case err := <-done:
-			if err != nil {
-				return err
-			}
-			done = nil // the session ended; keep showing it until Esc
-		case k, ok := <-keys:
-			if ok && k == keyTab && headless {
-				halt()
-				showLog = !showLog
-				title := "transcript"
-				if showLog {
-					title = e.v.Reader + " log"
-				}
-				// Both streams replay from the start, so clear the screen
-				// rather than stack them; earlier scrollback stays.
-				fmt.Fprintf(out, "%s%s\n\n", clearScreen, p.paint(ansiDim, "── "+title+" · Tab switch · Esc back ──"))
-				follow()
-				continue
-			}
-			if ok && k != keyEsc && k != keyQuit {
-				continue
-			}
-			halt()
-			fmt.Fprintln(out)
-			if !ok || k == keyQuit {
-				return errQuit
-			}
-			return nil
+		name := e.v.ID
+		if e.v.EndedAt == "" {
+			name = filepath.Base(e.v.Repo) + " · " + name
 		}
+		row := pad(ansi.Truncate(" "+name, w, "…"), w)
+		if i == m.sel {
+			row, at = selected.Render(row), len(lines)
+		}
+		detail := e.sum
+		if e.v.EndedReason != "" {
+			detail = e.v.EndedReason + " · " + detail
+		}
+		add(i, row)
+		add(i, dim.Render(ansi.Truncate("  "+detail, w, "…")))
 	}
+	if len(m.rooms) == 0 {
+		add(-1, dim.Render("No rooms. Start one with /peer in an agent chat."))
+	}
+	// Keep both lines of the selected room on screen, then mark the
+	// visible lines of each room as one zone.
+	first := min(max(at-h+2, 0), max(len(lines)-h, 0))
+	last := min(first+h, len(lines))
+	var out []string
+	for j := first; j < last; {
+		k := j + 1
+		for k < last && owner[j] >= 0 && owner[k] == owner[j] {
+			k++
+		}
+		block := strings.Join(lines[j:k], "\n")
+		if owner[j] >= 0 {
+			block = m.zones.Mark("room"+strconv.Itoa(owner[j]), block)
+		}
+		out = append(out, block)
+		j = k
+	}
+	return strings.Join(out, "\n")
 }
 
-// followReaderLog prints the headless reader's log as it grows until
-// stop is closed. Only complete lines are printed.
-func followReaderLog(path string, p *printer, stop <-chan struct{}) error {
-	var offset int64
-	for {
-		f, err := os.Open(path)
-		if err != nil {
-			return err
-		}
-		if _, err := f.Seek(offset, io.SeekStart); err != nil {
-			f.Close()
-			return err
-		}
-		r := bufio.NewReader(f)
-		for {
-			line, err := r.ReadBytes('\n')
-			if err != nil {
-				break
-			}
-			offset += int64(len(line))
-			if text := readerLogLine(line); text != "" {
-				fmt.Fprintln(p.out, p.links(text))
-			}
-		}
-		f.Close()
-		select {
-		case <-stop:
-			return nil
-		case <-time.After(200 * time.Millisecond):
-		}
+func (m *model) statusLine() string {
+	if m.searching {
+		m.input.SetWidth(m.width - 2)
+		return m.input.View()
 	}
+	left := " peer"
+	if m.room.e.s != nil {
+		left = " " + m.room.e.v.ID + fmt.Sprintf(" · %d msgs", len(m.room.msgs))
+	}
+	if m.err != nil {
+		left += " · " + m.err.Error()
+	}
+	flags := "plain"
+	if m.markdown {
+		flags = "md " + themes[m.theme]
+	}
+	right := flags + " │ ? help "
+	gap := max(m.width-ansi.StringWidth(left)-ansi.StringWidth(right), 1)
+	return statusBar.Render(ansi.Truncate(left+strings.Repeat(" ", gap)+right, m.width, ""))
+}
+
+// box frames content of width by height cells, cutting or padding each
+// line so that panes line up whatever they hold.
+func box(content string, width, height int, focused bool) string {
+	w, h := max(width-2, 1), max(height-2, 1)
+	lines := strings.Split(content, "\n")
+	lines = lines[:min(len(lines), h)]
+	for len(lines) < h {
+		lines = append(lines, "")
+	}
+	for i, line := range lines {
+		lines[i] = pad(ansi.Truncate(line, w, ""), w)
+	}
+	st := border
+	if focused {
+		st = st.BorderForeground(accent)
+	}
+	return st.Render(strings.Join(lines, "\n"))
+}
+
+func pad(s string, w int) string {
+	return s + strings.Repeat(" ", max(w-ansi.StringWidth(s), 0))
 }
 
 // readerLogLine turns one log line into display text. Codex writes plain
@@ -328,7 +1082,7 @@ func readerLogLine(line []byte) string {
 				if json.Unmarshal(c.Input, &in) == nil && in.Command != "" {
 					arg = in.Command
 				}
-				parts = append(parts, "→ "+c.Name+" "+cut(arg, 200))
+				parts = append(parts, "→ "+c.Name+" "+ansi.Truncate(arg, 200, "…"))
 			}
 		}
 		return strings.Join(parts, "\n")
@@ -336,66 +1090,4 @@ func readerLogLine(line []byte) string {
 		return "result: " + ev.Result
 	}
 	return ""
-}
-
-// readKeys decodes key presses from a raw terminal. A lone Esc is told
-// apart from arrow sequences (ESC [ A, ESC O A) by a short pause.
-func readKeys(f *os.File) <-chan key {
-	raw := make(chan byte)
-	go func() {
-		b := make([]byte, 1)
-		for {
-			if _, err := f.Read(b); err != nil {
-				close(raw)
-				return
-			}
-			raw <- b[0]
-		}
-	}()
-	keys := make(chan key)
-	go func() {
-		defer close(keys)
-		for b := range raw {
-			k := keyOther
-			switch b {
-			case 'k':
-				k = keyUp
-			case 'j':
-				k = keyDown
-			case '\r', '\n':
-				k = keyEnter
-			case '\t':
-				k = keyTab
-			case 'x':
-				k = keyClose
-			case 'q', 3: // 3 is Ctrl-C
-				k = keyQuit
-			case 0x1b:
-				k = keyEsc
-				select {
-				case b, ok := <-raw:
-					if !ok {
-						return
-					}
-					k = keyOther
-					if b == '[' || b == 'O' {
-						// Give up on a truncated sequence instead of
-						// swallowing the next key press.
-						select {
-						case c := <-raw:
-							if c == 'A' {
-								k = keyUp
-							} else if c == 'B' {
-								k = keyDown
-							}
-						case <-time.After(50 * time.Millisecond):
-						}
-					}
-				case <-time.After(50 * time.Millisecond):
-				}
-			}
-			keys <- k
-		}
-	}()
-	return keys
 }

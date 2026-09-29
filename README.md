@@ -20,7 +20,7 @@ npx skills add r13v/peer --skill peer -g -a claude-code -a codex -a github-copil
 
 This command installs only the skill; `peer` must also be on `PATH`. Restart the apps after installation. `peer update` updates only the CLI; update the skill with `npx skills update peer -g`.
 
-To build the CLI from source instead, use Go 1.22 or newer: create `~/.local/bin` and run `go build -o "$HOME/.local/bin/peer" .`.
+To build the CLI from source instead, use Go 1.27 or newer: create `~/.local/bin` and run `go build -o "$HOME/.local/bin/peer" .`. `make` formats, lints (with [golangci-lint](https://golangci-lint.run) v2), tests and builds `./peer`; `make test`, `make lint` and `make build` run one step.
 
 ## Pair on a task
 
@@ -30,7 +30,7 @@ Open one **local** chat in Claude Code Desktop's Code tab in the Git checkout, w
 /peer add CSV export to the reports page
 ```
 
-Claude becomes the writer and starts a room named after the task with `peer start csv-export --writer claude --reader codex`, which runs Codex headless (`codex exec`) in the same checkout. Ask for a headed reader (`peer start --headed`) to open a new Codex Desktop chat instead, with the reader prompt filled in; press Enter there, since neither app sends a deep-linked prompt by itself. The agents then discuss the approach through `peer send` and `peer wait`, Claude implements it, Codex reviews the diff, and Claude ends the session. To watch their conversation, run `peer follow` in a terminal in the checkout, or run `peer` to pick a room. Several rooms can be active in one checkout at once, each with its own writer and reader.
+Claude becomes the writer and starts a room named after the task with `peer start csv-export --writer claude --reader codex`, which runs Codex headless (`codex exec`) in the same checkout. Ask for a headed reader (`peer start --headed`) to open a new Codex Desktop chat instead, with the reader prompt filled in; press Enter there, since neither app sends a deep-linked prompt by itself. The agents then discuss the approach through `peer send` and `peer wait`, Claude implements it, Codex reviews the diff, and Claude ends the session. To watch their conversation, run `peer` in a terminal. Several rooms can be active in one checkout at once, each with its own writer and reader.
 
 To start from Codex instead, send `$peer <task>` in a local Codex chat. Codex becomes the writer and runs Claude Code headless (`claude -p`) as the reader, or opens a Claude Code Desktop chat with `--headed`. The agent you send the task to is always the writer.
 
@@ -40,7 +40,21 @@ Both agents must use the same checkout and be able to run `peer`.
 
 ## CLI
 
-Run `peer` with no arguments in a terminal to pick a room: it lists active rooms in every checkout, then the 10 latest ended rooms of the current checkout, each with its checkout, room name and, once ended other than by `end`, the reason. Use ↑/↓ (or j/k) to select and Enter to open; x closes the selected active room, for example after you stopped its writer. An active session streams live, and an ended one shows its transcript and summary. In a session with a headless reader, Tab switches between the transcript and the reader's log, redrawing the screen each time. Esc returns to the list, and q or Ctrl-C quits. The list works outside a checkout too; then it shows only active sessions. An opened transcript is printed on the normal screen, so it stays in the terminal's scrollback after you return to the list.
+Run `peer` with no arguments in a terminal to watch rooms. The left pane lists active rooms in every checkout, then the 10 latest ended rooms of the current checkout, each with its checkout, room name, summary and, once ended other than by `end`, the reason. The right pane shows the selected room's transcript, live while the room is active and with a message count and duration once it ends; its title shows each participant as `waiting` (it called `peer wait` in the last 2 seconds) or `busy` with the time since it last waited, which is inferred from polling, not a report of actual work. The bottom pane shows the headless reader's log. Messages are rendered as Markdown with highlighted code; a pane that you scrolled up stays put while new lines arrive and shows `↓ new`. The list works outside a checkout too; then it shows only active rooms. On macOS, `peer` sends a notification when the room you are watching ends.
+
+| Key | Action |
+| --- | --- |
+| j/k, ↑/↓ | select a room, or scroll the focused pane |
+| Tab, Enter | move focus between the rooms, transcript and log; Enter opens the selected room |
+| PgUp/PgDn, Ctrl-U/Ctrl-D, g/G, ←/→ | scroll by page, half page, to the top or bottom, or sideways |
+| ] / [ | jump to the next or previous message |
+| / then n/N | search the focused transcript or log, like in vim; a lowercase query ignores case, Esc clears it |
+| l, s | hide or show the reader log or the room list |
+| m, T | switch between Markdown and plain text, or cycle the Markdown theme |
+| x | close the selected active room, for example after you stopped its writer |
+| ?, q | show all keys, or quit (also Ctrl-C) |
+
+The mouse selects rooms and panes, and the wheel scrolls the pane under the pointer.
 
 Other commands run from anywhere inside the shared Git checkout:
 
@@ -56,20 +70,18 @@ peer send csv-export --as codex <<'MESSAGE'
 Please challenge this approach before I edit.
 MESSAGE
 peer wait csv-export --as copilot
-peer follow
-peer follow csv-export
 peer end csv-export --as codex
 peer history
 peer log csv-export
 peer log csv-export > transcript.txt
 ```
 
-The skill only runs `peer skills flow`, so the workflow always matches the installed CLI. If an agent reports that `peer` or `skills flow` is unknown, install or update the CLI. When the reader is `codex` or `claude`, `start` runs its CLI headless in the checkout: Codex runs in its `workspace-write` sandbox with the session store added, Claude gets only Read, Grep, Glob, Skill and Bash limited to `peer` and read-only `git` commands, with any other request denied instead of prompting, and both are told not to edit files. A headless reader gets the room ID in its prompt and stops once that room ends. Its output and exit status go to `reader.log` in the session directory; when it exits for any reason, the room ends too, with a reason such as `codex exited with status 1`, so the writer's `wait` stops instead of waiting on a reader that is gone. A room otherwise ends only by `peer end` or x in `peer`: stopping or closing the writer's chat does not end it. in `peer`, press Tab in a session to switch between the transcript and that log. `start --headed` opens a new desktop chat with the prompt filled in instead, but only when the reader's app is already open (checked by bundle ID on macOS); a closed app is not launched and the reader runs headless. For other readers, the flow tells the writer to give you the prompt.
+The skill only runs `peer skills flow`, so the workflow always matches the installed CLI. If an agent reports that `peer` or `skills flow` is unknown, install or update the CLI. When the reader is `codex` or `claude`, `start` runs its CLI headless in the checkout: Codex runs in its `workspace-write` sandbox with the session store added, Claude gets only Read, Grep, Glob, Skill and Bash limited to `peer` and read-only `git` commands, with any other request denied instead of prompting, and both are told not to edit files. A headless reader gets the room ID in its prompt and stops once that room ends. Its output and exit status go to `reader.log` in the session directory; when it exits for any reason, the room ends too, with a reason such as `codex exited with status 1`, so the writer's `wait` stops instead of waiting on a reader that is gone. A room otherwise ends only by `peer end` or x in `peer`: stopping or closing the writer's chat does not end it. `peer` shows that log below the transcript. `start --headed` opens a new desktop chat with the prompt filled in instead, but only when the reader's app is already open (checked by bundle ID on macOS); a closed app is not launched and the reader runs headless. For other readers, the flow tells the writer to give you the prompt.
 
 Participant names are distinct lowercase IDs starting with a letter and containing only `a-z`, `0-9`, `-`, or `_` (up to 64 characters). You can pair two sessions of the same app by naming them `codex-main` and `codex-review`. `wait` returns one JSON message and marks it delivered, or `{"status":"timeout"}` after 90 seconds, below Claude Code's two-minute Bash limit. An ended room cannot be sent to; start a new room for the next task. `status` without an ID prints each active room in the checkout as one JSON line.
 
 The CLI stores private session files and an append-only `messages.jsonl` transcript under `~/.peer/repos/CHECKOUT-HASH/sessions/SESSION_ID/`, for example `~/.peer/repos/peer-chat-42bda30d37ea509a/sessions/csv-export/`. The checkout name is lowercased and the hash keeps checkouts with the same name apart. A room ID is the name given to `start` (1–40 characters: `a-z`, `0-9` or `-`, starting with a letter), with `-2`, `-3` and so on appended if the checkout already had a room with that name; `started_at` in `session.json` is in UTC. Set `PEER_HOME` to use another local directory; both agents must use the same value.
 
-`history` prints one line per session: ID, start time, writer→reader, message count, duration, and `active` or `ended`. `log ID` prints one transcript and exits. `follow` displays the dialogue live, prints a message count and duration when the room ends, and exits. Without an ID it follows the newest active room, or waits for the next room if none is active, so you can open it before `peer start`. In a terminal, transcripts color authors, times, `code`, **bold** and list markers, and turn paths to existing files into clickable links; set `NO_COLOR=1` to disable this. While following, a bottom line shows each participant as `waiting` (it called `peer wait` in the last 2 seconds) or `busy` with the time since it last waited; this is inferred from polling, not a report of actual work. On macOS, following also sends a notification when a session you watched ends or when no message arrives for 10 minutes. Links open `file://PATH` by default; set `PEER_EDITOR_URL` to jump to the line in an editor, for example `vscode://file/{path}:{line}`. The transcript contains messages sent through this CLI, not the agents' private reasoning or tool output. You can give a saved session ID to an agent later and ask it to review the conversation and suggest specific changes to the workflow or skills.
+`history` prints one line per session: ID, start time, writer→reader, message count, duration, and `active` or `ended`. `log ID` prints one transcript and exits. In a terminal, it colors authors, times, `code`, **bold** and list markers, and turns paths to existing files into clickable links; set `NO_COLOR=1` to disable this. Links open `file://PATH` by default; set `PEER_EDITOR_URL` to jump to the line in an editor, for example `vscode://file/{path}:{line}`. The transcript contains messages sent through this CLI, not the agents' private reasoning or tool output. You can give a saved session ID to an agent later and ask it to review the conversation and suggest specific changes to the workflow or skills.
 
 This CLI does not inject prompts into idle desktop chats. Each participating agent must keep calling `wait` while a reply is needed. The reviewer role is an instruction and session record, not an operating-system restriction on file writes; use the app's read-only or Plan permission mode if that guarantee matters.
