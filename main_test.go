@@ -292,3 +292,219 @@ func TestWaitReceivesLaterMessage(t *testing.T) {
 		t.Fatalf("wait did not wake: %s, %v", result.text, result.err)
 	}
 }
+
+func TestFollowStopsWhenSessionEnds(t *testing.T) {
+	repo := testRepo(t)
+	if _, err := invoke(repo, "", "start", "--writer", "claude", "--reader", "codex"); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan string)
+	go func() {
+		got, err := invoke(repo, "", "log", "--follow")
+		if err != nil {
+			t.Error(err)
+		}
+		done <- got
+	}()
+	time.Sleep(300 * time.Millisecond)
+	if _, err := invoke(repo, "see main.go:3", "send", "--as", "claude"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := invoke(repo, "", "end", "--as", "claude"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-done:
+		if !strings.Contains(got, "claude → codex\nsee main.go:3\n") || !strings.Contains(got, "session ended") || !strings.Contains(got, "1 message (claude 1, codex 0) in ") || strings.Contains(got, "\x1b") {
+			t.Fatalf("unexpected follow output: %q", got)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("log --follow kept running after the session ended")
+	}
+}
+
+func TestLinks(t *testing.T) {
+	repo := filepath.Join(t.TempDir(), "my #repo")
+	if err := os.Mkdir(repo, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "main.go"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PEER_EDITOR_URL", "vscode://file/{path}:{line}")
+	p := &printer{repo: repo, color: true}
+	got := p.links("see main.go:12, not missing.go or https://example.com/x")
+	want := "see \x1b]8;;vscode://file/" + strings.ReplaceAll(strings.ReplaceAll(filepath.Join(repo, "main.go"), " ", "%20"), "#", "%23") + ":12\x1b\\main.go:12\x1b]8;;\x1b\\, not missing.go or https://example.com/x"
+	if got != want {
+		t.Fatalf("links:\n got %q\nwant %q", got, want)
+	}
+}
+
+func TestFollowWaitsForNextSession(t *testing.T) {
+	repo := testRepo(t)
+	started, err := invoke(repo, "", "start", "--writer", "claude", "--reader", "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var old session
+	if err := json.Unmarshal([]byte(started), &old); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := invoke(repo, "old task", "send", "--as", "claude"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := invoke(repo, "", "end", "--as", "claude"); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := invoke(repo, "", "log", "--follow", "--session", old.ID); err != nil || !strings.Contains(got, "old task") {
+		t.Fatalf("pinned follow of an ended session: %q, %v", got, err)
+	}
+	done := make(chan string)
+	go func() {
+		got, err := invoke(repo, "", "log", "--follow")
+		if err != nil {
+			t.Error(err)
+		}
+		done <- got
+	}()
+	time.Sleep(300 * time.Millisecond)
+	if _, err := invoke(repo, "", "start", "--writer", "codex", "--reader", "claude"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := invoke(repo, "new task", "send", "--as", "codex"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := invoke(repo, "", "end", "--as", "codex"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-done:
+		if !strings.HasPrefix(got, "waiting for a session to start") || !strings.Contains(got, "new task") || strings.Contains(got, "old task") {
+			t.Fatalf("unexpected follow output: %q", got)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("log --follow did not pick up the next session")
+	}
+}
+
+func TestWaitMarksCursorBeforeFirstMessage(t *testing.T) {
+	repo := testRepo(t)
+	started, err := invoke(repo, "", "start", "--writer", "claude", "--reader", "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var v session
+	if err := json.Unmarshal([]byte(started), &v); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := invoke(repo, "", "wait", "--as", "codex", "--timeout", "0s"); err != nil {
+		t.Fatal(err)
+	}
+	s, err := openStore(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(s.dir, "sessions", v.ID, "cursor-codex")); err != nil {
+		t.Fatalf("wait before the first message left no cursor: %v", err)
+	}
+}
+
+func TestNewPrinterIgnoresDevNull(t *testing.T) {
+	f, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if p := newPrinter(f, t.TempDir(), true); p.color || p.live {
+		t.Fatal("/dev/null was treated as a terminal")
+	}
+}
+
+func TestBodyMarkdown(t *testing.T) {
+	p := &printer{repo: t.TempDir(), color: true}
+	got := p.body("1. use `peer` **now**\n- done")
+	want := "  \x1b[2m1.\x1b[22m use \x1b[33m`peer`\x1b[39m \x1b[1mnow\x1b[22m\n  \x1b[2m-\x1b[22m done"
+	if got != want {
+		t.Fatalf("body:\n got %q\nwant %q", got, want)
+	}
+}
+
+func TestLegacyStoreMigrates(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "data")
+	parent := t.TempDir()
+	repo := filepath.Join(parent, "My App")
+	if out, err := exec.Command("git", "init", "-q", repo).CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
+	t.Setenv("PEER_HOME", home)
+	real, err := filepath.EvalSymlinks(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := sha256.Sum256([]byte(real))
+	legacy := filepath.Join(home, "repos", fmt.Sprintf("%x", key[:8]))
+	old := session{ID: "0123456789abcdef", Repo: real, Writer: "claude", Reader: "codex", StartedAt: "2026-09-01T10:00:00Z", EndedAt: "2026-09-01T10:30:00Z"}
+	if err := os.MkdirAll(filepath.Join(legacy, "sessions", old.ID), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJSON(filepath.Join(legacy, "sessions", old.ID, "session.json"), old); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(legacy, "sessions", old.ID, "messages.jsonl"), []byte(`{"id":"1","at":"2026-09-01T10:01:00Z","from":"claude","to":"codex","text":"legacy hello"}`+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(legacy, "active"), []byte(old.ID+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := invoke(repo, "", "log", "--session", old.ID)
+	if err != nil || !strings.Contains(got, "legacy hello") {
+		t.Fatalf("legacy session unreachable: %q, %v", got, err)
+	}
+	want := filepath.Join(home, "repos", fmt.Sprintf("my-app-%x", key[:8]))
+	if _, err := os.Stat(want); err != nil {
+		t.Fatalf("store not renamed to %s: %v", want, err)
+	}
+	if _, err := os.Stat(legacy); !os.IsNotExist(err) {
+		t.Fatalf("legacy store still present: %v", err)
+	}
+	started, err := invoke(repo, "", "start", "--writer", "claude", "--reader", "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var v session
+	if err := json.Unmarshal([]byte(started), &v); err != nil || !sessionID.MatchString(v.ID) {
+		t.Fatalf("new session ID %q is not time-based: %v", v.ID, err)
+	}
+	history, err := invoke(repo, "", "history")
+	if err != nil || !strings.Contains(history, old.ID) || !strings.Contains(history, v.ID) {
+		t.Fatalf("history lost a session: %s, %v", history, err)
+	}
+	if err := os.MkdirAll(legacy, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := invoke(repo, "", "status"); err == nil || !strings.Contains(err.Error(), "both") {
+		t.Fatalf("conflicting legacy and new stores were not reported: %v", err)
+	}
+}
+
+func TestSessionIDsInSameSecond(t *testing.T) {
+	repo := testRepo(t)
+	var ids []string
+	for i := 0; i < 2; i++ {
+		started, err := invoke(repo, "", "start", "--writer", "claude", "--reader", "codex")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var v session
+		if err := json.Unmarshal([]byte(started), &v); err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, v.ID)
+		if _, err := invoke(repo, "", "end", "--as", "claude"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if ids[0] == ids[1] || !validID(ids[0]) || !validID(ids[1]) || validID("../x") {
+		t.Fatalf("session IDs %q are not distinct and valid", ids)
+	}
+}

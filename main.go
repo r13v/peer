@@ -15,6 +15,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -252,16 +254,66 @@ func openStore(cwd string) (*store, error) {
 		}
 		home = filepath.Join(userHome, ".peer")
 	}
+	repos := filepath.Join(home, "repos")
+	if err := os.MkdirAll(repos, 0700); err != nil {
+		return nil, err
+	}
 	key := sha256.Sum256([]byte(repo))
-	dir := filepath.Join(home, "repos", hex.EncodeToString(key[:8]))
+	dir := filepath.Join(repos, repoSlug(repo)+"-"+hex.EncodeToString(key[:8]))
+	if err := migrateRepo(repos, filepath.Join(repos, hex.EncodeToString(key[:8])), dir); err != nil {
+		return nil, err
+	}
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return nil, err
 	}
 	return &store{dir: dir, repo: repo}, nil
 }
 
+// repoSlug turns the checkout's directory name into a readable,
+// filesystem-safe prefix for its store directory.
+func repoSlug(repo string) string {
+	slug := strings.Map(func(r rune) rune {
+		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '.' || r == '_' || r == '-' {
+			return r
+		}
+		return '-'
+	}, strings.ToLower(filepath.Base(repo)))
+	if len(slug) > 40 {
+		slug = slug[:40]
+	}
+	if slug = strings.Trim(slug, ".-"); slug == "" {
+		return "repo"
+	}
+	return slug
+}
+
+// migrateRepo renames a store directory named by the legacy bare hash.
+// The repos lock keeps concurrent first runs from racing on the rename.
+func migrateRepo(repos, legacy, dir string) error {
+	if _, err := os.Stat(legacy); errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return withLock(filepath.Join(repos, ".lock"), func() error {
+		if _, err := os.Stat(legacy); errors.Is(err, os.ErrNotExist) {
+			return nil
+		} else if err != nil {
+			return err
+		}
+		if _, err := os.Stat(dir); err == nil {
+			return fmt.Errorf("both %s and %s exist; move the sessions you need from the first into the second, then remove the first", legacy, dir)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		return os.Rename(legacy, dir)
+	})
+}
+
 func (s *store) locked(fn func() error) error {
-	f, err := os.OpenFile(filepath.Join(s.dir, ".lock"), os.O_CREATE|os.O_RDWR, 0600)
+	return withLock(filepath.Join(s.dir, ".lock"), fn)
+}
+
+func withLock(path string, fn func() error) error {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {
 		return err
 	}
@@ -318,12 +370,17 @@ func (s *store) activeID() (string, error) {
 	return strings.TrimSpace(string(b)), nil
 }
 
+// sessionID matches IDs made from the local start time, such as
+// 20260929-120911 or 20260929-120911-2 for a second session in that second.
+var sessionID = regexp.MustCompile(`^\d{8}-\d{6}(-\d+)?$`)
+
 func validID(id string) bool {
-	if len(id) != 16 {
-		return false
+	if sessionID.MatchString(id) {
+		return true
 	}
+	// Legacy sessions used 16 random hex characters.
 	_, err := hex.DecodeString(id)
-	return err == nil
+	return len(id) == 16 && err == nil
 }
 
 func (s *store) session(id string) (session, error) {
@@ -356,15 +413,24 @@ func (s *store) start(writer, reader string, out io.Writer) error {
 		if err != nil && !errors.Is(err, errNoSession) {
 			return err
 		}
-		id, err := newID()
-		if err != nil {
+		now := time.Now()
+		if err := os.MkdirAll(filepath.Join(s.dir, "sessions"), 0700); err != nil {
 			return err
 		}
-		v := session{ID: id, Repo: s.repo, Writer: writer, Reader: reader, StartedAt: time.Now().UTC().Format(time.RFC3339Nano)}
-		dir := filepath.Join(s.dir, "sessions", id)
-		if err := os.MkdirAll(dir, 0700); err != nil {
-			return err
+		base := now.Format("20060102-150405")
+		id, dir := base, ""
+		for n := 2; ; n++ {
+			dir = filepath.Join(s.dir, "sessions", id)
+			err := os.Mkdir(dir, 0700)
+			if err == nil {
+				break
+			}
+			if !errors.Is(err, os.ErrExist) {
+				return err
+			}
+			id = fmt.Sprintf("%s-%d", base, n)
 		}
+		v := session{ID: id, Repo: s.repo, Writer: writer, Reader: reader, StartedAt: now.UTC().Format(time.RFC3339Nano)}
 		if err := writeJSON(filepath.Join(dir, "session.json"), v); err != nil {
 			return err
 		}
@@ -451,7 +517,8 @@ func (s *store) nextMessage(as string) (*message, error) {
 			if v.EndedAt != "" {
 				return errors.New("session has ended")
 			}
-			return nil
+			// Record the poll so log can show this participant as waiting.
+			return writeAtomic(cursorPath, []byte("0\n"))
 		}
 		if err != nil {
 			return err
@@ -528,20 +595,26 @@ func (s *store) end(as string, out io.Writer) error {
 }
 
 func (s *store) log(id string, follow bool, out io.Writer) error {
+	p := newPrinter(out, s.repo, follow)
 	if id == "" {
 		var err error
-		id, err = s.activeID()
-		if err != nil {
+		if id, err = s.awaitSession(follow, p); err != nil {
 			return err
 		}
 	}
 	if _, err := s.session(id); err != nil {
 		return err
 	}
-	path := filepath.Join(s.dir, "sessions", id, "messages.jsonl")
+	dir := filepath.Join(s.dir, "sessions", id)
 	var offset int64
 	for {
-		f, err := os.Open(path)
+		// Read the session before the transcript: send refuses after end,
+		// so an ended session has no messages beyond what we drain next.
+		v, err := s.session(id)
+		if err != nil {
+			return err
+		}
+		f, err := os.Open(filepath.Join(dir, "messages.jsonl"))
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
@@ -566,7 +639,7 @@ func (s *store) log(id string, follow bool, out io.Writer) error {
 					f.Close()
 					return err
 				}
-				if _, err := fmt.Fprintf(out, "[%s] %s -> %s\n%s\n\n", m.At, m.From, m.To, m.Text); err != nil {
+				if err := p.message(v, m); err != nil {
 					f.Close()
 					return err
 				}
@@ -576,8 +649,247 @@ func (s *store) log(id string, follow bool, out io.Writer) error {
 		if !follow {
 			return nil
 		}
+		if v.EndedAt != "" {
+			return p.ended(v)
+		}
+		p.status(v, dir)
 		time.Sleep(200 * time.Millisecond)
 	}
+}
+
+// awaitSession returns the active session ID. When following, it waits
+// for a new session instead of failing or replaying an ended one. Any
+// session that replaces the stale one counts, even if it ended between polls.
+func (s *store) awaitSession(follow bool, p *printer) (string, error) {
+	if !follow {
+		return s.activeID()
+	}
+	stale, first, notified := "", true, false
+	for {
+		v, err := s.current()
+		if err != nil && !errors.Is(err, errNoSession) {
+			return "", err
+		}
+		if first {
+			stale, first = v.ID, false
+		}
+		if err == nil && (v.EndedAt == "" || v.ID != stale) {
+			return v.ID, nil
+		}
+		if !notified {
+			notified = true
+			if _, err := fmt.Fprintf(p.out, "%s\n\n", p.paint(ansiDim, "waiting for a session to start…")); err != nil {
+				return "", err
+			}
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
+const (
+	ansiReset   = "\x1b[0m"
+	ansiDim     = "\x1b[2m"
+	ansiWriter  = "\x1b[1;36m"
+	ansiReader  = "\x1b[1;35m"
+	ansiLinkEnd = "\x1b]8;;\x1b\\"
+	clearLine   = "\r\x1b[K"
+	idleNotice  = 10 * time.Minute
+)
+
+var (
+	// pathRef matches file-like tokens such as main.go, ui/src/a.ts:42 or /abs/b.go:3:7.
+	pathRef    = regexp.MustCompile(`(?:/|\.{1,2}/)?(?:[\w.@-]+/)*[\w@-][\w.@-]*\.[A-Za-z]\w*(?::(\d+))?(?::\d+)?`)
+	codeSpan   = regexp.MustCompile("`[^`\n]+`")
+	boldSpan   = regexp.MustCompile(`\*\*([^*\n]+)\*\*`)
+	listMarker = regexp.MustCompile(`^(\s*)([-*]|\d+\.)(\s)`)
+)
+
+// notify shows a desktop notification; it is replaced in tests.
+var notify = func(title, text string) {
+	if runtime.GOOS != "darwin" {
+		return
+	}
+	// Pass text as arguments so it is never parsed as AppleScript.
+	exec.Command("osascript", "-e", "on run argv", "-e", "display notification (item 2 of argv) with title (item 1 of argv)", "-e", "end run", title, text).Run()
+}
+
+// printer renders the transcript for people. Colors, links, the status
+// line and notifications need a terminal, so redirected logs stay plain;
+// NO_COLOR turns off the ANSI parts but keeps notifications.
+type printer struct {
+	out      io.Writer
+	repo     string
+	color    bool
+	live     bool
+	day      string
+	counts   map[string]int
+	lastAt   time.Time
+	idleSent bool
+	statusOn bool
+}
+
+func newPrinter(out io.Writer, repo string, follow bool) *printer {
+	f, ok := out.(*os.File)
+	tty := ok && isTerminal(f.Fd())
+	color := tty && os.Getenv("NO_COLOR") == "" && os.Getenv("TERM") != "dumb"
+	return &printer{out: out, repo: repo, color: color, live: tty && follow, counts: map[string]int{}}
+}
+
+func (p *printer) paint(code, text string) string {
+	if !p.color {
+		return text
+	}
+	return code + text + ansiReset
+}
+
+func (p *printer) clearStatus() error {
+	if !p.statusOn {
+		return nil
+	}
+	p.statusOn = false
+	_, err := io.WriteString(p.out, clearLine)
+	return err
+}
+
+func (p *printer) message(v session, m message) error {
+	at, err := time.Parse(time.RFC3339Nano, m.At)
+	if err != nil {
+		return err
+	}
+	if err := p.clearStatus(); err != nil {
+		return err
+	}
+	p.counts[m.From]++
+	p.lastAt, p.idleSent = at, false
+	at = at.Local()
+	if day := at.Format("Mon, 2 Jan 2006"); day != p.day {
+		p.day = day
+		if _, err := fmt.Fprintf(p.out, "%s\n\n", p.paint(ansiDim, "── "+day+" ──")); err != nil {
+			return err
+		}
+	}
+	_, err = fmt.Fprintf(p.out, "%s  %s %s %s\n%s\n\n",
+		p.paint(ansiDim, at.Format("15:04:05")),
+		p.author(v, m.From), p.paint(ansiDim, "→"), p.author(v, m.To),
+		p.body(m.Text))
+	return err
+}
+
+func (p *printer) author(v session, name string) string {
+	if name == v.Writer {
+		return p.paint(ansiWriter, name)
+	}
+	return p.paint(ansiReader, name)
+}
+
+// body indents the text and highlights `code`, **bold** and list markers.
+func (p *printer) body(text string) string {
+	if !p.color {
+		return text
+	}
+	lines := strings.Split(text, "\n")
+	for i, line := range lines {
+		line = listMarker.ReplaceAllString(line, "$1\x1b[2m$2\x1b[22m$3")
+		line = codeSpan.ReplaceAllStringFunc(line, func(c string) string { return "\x1b[33m" + c + "\x1b[39m" })
+		line = boldSpan.ReplaceAllString(line, "\x1b[1m$1\x1b[22m")
+		lines[i] = "  " + p.links(line)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// status redraws a bottom line inferred from wait polling: a participant
+// whose cursor was touched in the last 2s is waiting; otherwise it is busy.
+func (p *printer) status(v session, dir string) {
+	if !p.live {
+		return
+	}
+	if p.lastAt.IsZero() {
+		p.lastAt, _ = time.Parse(time.RFC3339Nano, v.StartedAt)
+	}
+	if quiet := time.Since(p.lastAt); quiet >= idleNotice && !p.idleSent {
+		p.idleSent = true
+		notify("peer", "No messages for "+humanDuration(quiet))
+	}
+	if !p.color {
+		return
+	}
+	var parts []string
+	for _, name := range []string{v.Writer, v.Reader} {
+		since, _ := time.Parse(time.RFC3339Nano, v.StartedAt)
+		if st, err := os.Stat(filepath.Join(dir, "cursor-"+name)); err == nil {
+			if time.Since(st.ModTime()) < 2*time.Second {
+				parts = append(parts, p.author(v, name)+" waiting")
+				continue
+			}
+			since = st.ModTime()
+		}
+		parts = append(parts, p.author(v, name)+" busy "+humanDuration(time.Since(since)))
+	}
+	p.statusOn = true
+	fmt.Fprint(p.out, clearLine+p.paint(ansiDim, "… ")+strings.Join(parts, p.paint(ansiDim, " · ")))
+}
+
+func (p *printer) ended(v session) error {
+	start, err := time.Parse(time.RFC3339Nano, v.StartedAt)
+	if err != nil {
+		return err
+	}
+	end, err := time.Parse(time.RFC3339Nano, v.EndedAt)
+	if err != nil {
+		return err
+	}
+	if err := p.clearStatus(); err != nil {
+		return err
+	}
+	total := p.counts[v.Writer] + p.counts[v.Reader]
+	noun := "messages"
+	if total == 1 {
+		noun = "message"
+	}
+	summary := fmt.Sprintf("%d %s (%s %d, %s %d) in %s", total, noun, v.Writer, p.counts[v.Writer], v.Reader, p.counts[v.Reader], humanDuration(end.Sub(start)))
+	if p.live {
+		notify("peer", "Session ended: "+summary)
+	}
+	_, err = fmt.Fprintf(p.out, "%s\n%s\n", p.paint(ansiDim, "── session ended at "+end.Local().Format("15:04:05")+" ──"), summary)
+	return err
+}
+
+func humanDuration(d time.Duration) string {
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	default:
+		return fmt.Sprintf("%dh %dm", int(d.Hours()), int(d.Minutes())%60)
+	}
+}
+
+// links wraps paths to existing files in OSC 8 hyperlinks. PEER_EDITOR_URL
+// sets the target, e.g. vscode://file/{path}:{line}; the default is file://{path}.
+func (p *printer) links(text string) string {
+	if !p.color {
+		return text
+	}
+	tmpl := os.Getenv("PEER_EDITOR_URL")
+	if tmpl == "" {
+		tmpl = "file://{path}"
+	}
+	return pathRef.ReplaceAllStringFunc(text, func(ref string) string {
+		file, line, _ := strings.Cut(ref, ":")
+		line, _, _ = strings.Cut(line, ":")
+		if !filepath.IsAbs(file) {
+			file = filepath.Join(p.repo, file)
+		}
+		if st, err := os.Stat(file); err != nil || st.IsDir() {
+			return ref
+		}
+		if line == "" {
+			line = "1"
+		}
+		target := strings.NewReplacer("{path}", (&url.URL{Path: file}).EscapedPath(), "{line}", line).Replace(tmpl)
+		return "\x1b]8;;" + target + "\x1b\\" + ref + ansiLinkEnd
+	})
 }
 
 func (s *store) history(out io.Writer) error {
