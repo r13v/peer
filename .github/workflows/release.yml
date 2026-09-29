@@ -1,4 +1,4 @@
-name: Publish latest
+name: Release
 
 on:
   push:
@@ -9,47 +9,61 @@ permissions:
   contents: write
 
 concurrency:
-  group: peer-latest
+  group: peer-release
   cancel-in-progress: false
 
 jobs:
   release:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache: false
       - name: Lint
-        uses: golangci/golangci-lint-action@v8
+        uses: golangci/golangci-lint-action@v9
         with:
-          version: v2.13.2
+          version: v2.14.0
       - name: Test
         run: make test
-      - name: Build macOS archives
-        run: |
-          mkdir -p dist
-          for arch in amd64 arm64; do
-            mkdir -p "dist/$arch"
-            GOOS=darwin GOARCH="$arch" CGO_ENABLED=0 go build -trimpath -o "dist/$arch/peer" .
-            tar -czf "dist/peer-darwin-$arch.tar.gz" -C "dist/$arch" peer
-          done
-          (cd dist && sha256sum peer-darwin-*.tar.gz > checksums.txt)
-          cp scripts/install.sh dist/install.sh
-      - name: Publish rolling release
+      - name: Pick version tag
+        id: tag
         env:
-          GH_TOKEN: ${{ github.token }}
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
-          git tag -f latest "$GITHUB_SHA"
-          git push origin refs/tags/latest --force
-          if gh release view latest >/dev/null 2>&1; then
-            gh release upload latest dist/peer-darwin-*.tar.gz --clobber
-            gh release upload latest dist/checksums.txt dist/install.sh --clobber
-            gh release edit latest --title latest --notes "Current main: $GITHUB_SHA" --target "$GITHUB_SHA" --latest
-          else
-            gh release create latest dist/peer-darwin-*.tar.gz dist/checksums.txt dist/install.sh \
-              --title latest --notes "Current main: $GITHUB_SHA" --verify-tag --latest
+          [ -n "$HOMEBREW_TAP_TOKEN" ] || { echo "HOMEBREW_TAP_TOKEN is not set" >&2; exit 1; }
+          git fetch --force --tags origin main
+          # A queued run for an older commit must not publish over a newer release.
+          if [ "$(git rev-parse FETCH_HEAD)" != "$GITHUB_SHA" ]; then
+            echo "main moved past $GITHUB_SHA; skipping release"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+          semver='^v[0-9]+\.[0-9]+\.[0-9]+$'
+          # A rerun reuses the tag already on this commit.
+          tag="$(git tag --points-at "$GITHUB_SHA" | grep -E "$semver" | sort -V | tail -n 1 || true)"
+          if [ -z "$tag" ]; then
+            last="$(git tag --list 'v*' | grep -E "$semver" | sort -V | tail -n 1 || true)"
+            if [ -z "$last" ]; then
+              tag=v0.1.0
+            else
+              IFS=. read -r major minor patch <<< "${last#v}"
+              tag="v$major.$minor.$((patch + 1))"
+            fi
+            git tag "$tag" "$GITHUB_SHA"
+            git push origin "refs/tags/$tag"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+      - name: Release
+        if: steps.tag.outputs.skip != 'true'
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GORELEASER_CURRENT_TAG: ${{ steps.tag.outputs.tag }}
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}

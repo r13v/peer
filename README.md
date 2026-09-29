@@ -4,13 +4,13 @@ Local CLI for any two coding agents working in one Git checkout. One writes; the
 
 ## Install
 
-Requires macOS, Git, and two local agent chats that can run shell commands. Install the current `latest` release with one command:
+Requires macOS, Git, Homebrew, and two local agent chats that can run shell commands. Install the CLI from the [r13v/apps](https://github.com/r13v/homebrew-apps) tap:
 
 ```sh
-curl -fsSL https://github.com/r13v/peer/releases/download/latest/install.sh | sh
+brew install --cask r13v/apps/peer
 ```
 
-The installer checks the archive's SHA-256 digest and puts `peer` in `~/.local/bin`. Add `~/.local/bin` to `PATH` if needed. To get the newest CLI later, run `peer update`. Every push to `main` replaces the single `latest` release.
+Every push to `main` publishes a new patch version; get it with `brew upgrade --cask peer`, and check the installed one with `peer --version`. If you installed `peer` earlier with the `curl` installer, remove that copy so it does not shadow the Homebrew one: `rm ~/.local/bin/peer`.
 
 Install the skill separately for the agents you use with Node.js and `npx skills`. For Claude Code, Codex, and GitHub Copilot:
 
@@ -18,7 +18,7 @@ Install the skill separately for the agents you use with Node.js and `npx skills
 npx skills add r13v/peer --skill peer -g -a claude-code -a codex -a github-copilot -y
 ```
 
-This command installs only the skill; `peer` must also be on `PATH`. Restart the apps after installation. `peer update` updates only the CLI; update the skill with `npx skills update peer -g`.
+This command installs only the skill; `peer` must also be on `PATH`. Restart the apps after installation. `brew upgrade` updates only the CLI; update the skill with `npx skills update peer -g`.
 
 To build the CLI from source instead, use Go 1.27 or newer: create `~/.local/bin` and run `go build -o "$HOME/.local/bin/peer" .`. `make` formats, lints (with [golangci-lint](https://golangci-lint.run) v2), tests and builds `./peer`; `make test`, `make lint` and `make build` run one step.
 
@@ -62,7 +62,7 @@ Other commands run from anywhere inside the shared Git checkout:
 peer skills flow
 peer skills writer
 peer skills reader
-peer update
+peer --version
 peer start csv-export --writer codex --reader copilot
 peer status
 peer status csv-export

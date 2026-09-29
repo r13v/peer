@@ -63,7 +63,10 @@ var readerInstructions []byte
 //go:embed instructions/writer.md
 var writerInstructions []byte
 
-const usage = "usage: peer, peer skills flow|writer|reader, peer update, peer start NAME, peer send|wait|end ID --as NAME, peer status [ID], peer history, or peer log ID"
+const usage = "usage: peer, peer --version, peer skills flow|writer|reader, peer start NAME, peer send|wait|end ID --as NAME, peer status [ID], peer history, or peer log ID"
+
+// version is set at release build time.
+var version = "dev"
 
 // openURL is replaced in tests.
 var openURL = func(link string) error { return exec.Command("open", link).Run() }
@@ -87,11 +90,12 @@ func run(args []string, in io.Reader, out io.Writer, cwd string) error {
 	if len(args) == 0 {
 		return picker(in, out, cwd)
 	}
-	if args[0] == "update" {
+	if args[0] == "--version" || args[0] == "version" {
 		if len(args) != 1 {
-			return errors.New("usage: peer update")
+			return errors.New("usage: peer --version")
 		}
-		return update(in, out)
+		_, err := fmt.Fprintln(out, version)
+		return err
 	}
 	if args[0] == "skills" {
 		docs := map[string][]byte{"flow": flowInstructions, "writer": writerInstructions, "reader": readerInstructions}
@@ -210,34 +214,6 @@ func run(args []string, in io.Reader, out io.Writer, cwd string) error {
 	default:
 		return errors.New(usage)
 	}
-}
-
-func update(in io.Reader, out io.Writer) error {
-	dir, err := os.MkdirTemp("", "peer-update-*")
-	if err != nil {
-		return err
-	}
-	defer os.RemoveAll(dir)
-	script := filepath.Join(dir, "install.sh")
-	cmd := exec.Command("curl", "-fsSL", "https://github.com/r13v/peer/releases/download/latest/install.sh", "-o", script)
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("download latest installer: %w", err)
-	}
-	cmd = exec.Command("sh", script)
-	cmd.Stdin = in
-	cmd.Stdout = out
-	cmd.Stderr = os.Stderr
-	executable, err := os.Executable()
-	if err != nil {
-		return err
-	}
-	executable, err = filepath.EvalSymlinks(executable)
-	if err != nil {
-		return err
-	}
-	cmd.Env = append(os.Environ(), "PEER_INSTALL_DIR="+filepath.Dir(executable))
-	return cmd.Run()
 }
 
 // readerPrompt starts the reader's chat. A headless reader has nobody to
