@@ -41,10 +41,12 @@ homebrew_casks:
     directory: Casks
     homepage: "https://github.com/r13v/peer"
     description: "Local CLI for two coding agents pairing on one Git checkout"
-    hooks:
-      post:
-        install: |
-          system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/peer"]
+    # Homebrew 7 deprecates `postflight do` blocks, which is how GoReleaser
+    # renders `hooks`, so emit declarative install steps instead.
+    custom_block: |
+      postflight_steps do
+        run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{ "{{" }}staged_path{{ "}}" }}/peer"]
+      end
 
 release:
   github:
