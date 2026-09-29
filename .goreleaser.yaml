@@ -3,26 +3,39 @@ version: 2
 project_name: peer
 
 builds:
-  - id: peer
+  - id: darwin
     binary: peer
-    env:
+    env: &env
       - CGO_ENABLED=0
-    goos:
-      - darwin
-    goarch:
-      - amd64
-      - arm64
-    flags:
+    goos: [darwin]
+    goarch: &goarch [amd64, arm64]
+    flags: &flags
       - -trimpath
-    ldflags:
+    ldflags: &ldflags
       - -s -w -X main.version={{.Version}}
+  - id: linux
+    binary: peer
+    env: *env
+    goos: [linux]
+    goarch: *goarch
+    flags: *flags
+    ldflags: *ldflags
 
+# The cask takes only the darwin archive: its xattr postflight is macOS-only,
+# and Linux installs with scripts/install.sh instead.
 archives:
-  - id: default
-    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
-    formats: [tar.gz]
-    files:
+  - id: darwin
+    ids: [darwin]
+    # No version in the name, so releases/latest/download/ always finds it.
+    name_template: &archive_name "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
+    formats: &formats [tar.gz]
+    files: &files
       - README.md
+  - id: linux
+    ids: [linux]
+    name_template: *archive_name
+    formats: *formats
+    files: *files
 
 checksum:
   name_template: checksums.txt
@@ -33,6 +46,7 @@ changelog:
 
 homebrew_casks:
   - name: peer
+    ids: [darwin]
     binaries: [peer]
     repository:
       owner: r13v
@@ -53,3 +67,5 @@ release:
     owner: r13v
     name: peer
   replace_existing_artifacts: true
+  extra_files:
+    - glob: scripts/install.sh
