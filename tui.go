@@ -23,6 +23,7 @@ const (
 	keyEsc
 	keyQuit
 	keyTab
+	keyClose
 )
 
 const (
@@ -84,6 +85,10 @@ func picker(in io.Reader, out io.Writer, cwd string) error {
 				i--
 			case k == keyDown && i < len(entries)-1:
 				i++
+			case k == keyClose && len(entries) > 0 && entries[i].v.EndedAt == "":
+				if err := entries[i].s.close(entries[i].v.ID); err != nil {
+					return err
+				}
 			case k == keyEnter && len(entries) > 0:
 				fmt.Fprint(out, altScreenOff)
 				err := view(entries[i], keys, out)
@@ -102,8 +107,8 @@ func picker(in io.Reader, out io.Writer, cwd string) error {
 	}
 }
 
-// listEntries returns active sessions across checkouts, newest first,
-// followed by the latest ended sessions in local, if any. Unreadable
+// listEntries returns active rooms across checkouts, newest first,
+// followed by the latest ended rooms in local, if any. Unreadable
 // stores are skipped so one bad entry does not hide the rest.
 func listEntries(local *store) ([]entry, error) {
 	repos, err := reposDir()
@@ -117,9 +122,11 @@ func listEntries(local *store) ([]entry, error) {
 	var entries []entry
 	for _, d := range dirs {
 		s := &store{dir: filepath.Join(repos, d.Name())}
-		if v, err := s.current(); err == nil && v.EndedAt == "" {
-			s.repo = v.Repo
-			entries = append(entries, entry{s, v})
+		sessions, _ := s.sessions()
+		for _, v := range sessions {
+			if v.EndedAt == "" {
+				entries = append(entries, entry{&store{dir: s.dir, repo: v.Repo}, v})
+			}
 		}
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].v.StartedAt > entries[j].v.StartedAt })
@@ -155,7 +162,18 @@ func render(out io.Writer, entries []entry, selected int, local *store, width, h
 		if i == selected {
 			marker, at = "› ", len(lines)
 		}
-		lines = append(lines, marker+fmt.Sprintf("%-20.20s  ", filepath.Base(e.v.Repo))+e.s.summary(e.v))
+		// Ended rows are all in local, whose name is in the section title,
+		// so they show why the room ended instead, before the summary
+		// that cut() may shorten.
+		line := marker
+		if e.v.EndedAt == "" {
+			line += fmt.Sprintf("%-16.16s  ", filepath.Base(e.v.Repo))
+		}
+		line += fmt.Sprintf("%-24s  ", e.v.ID)
+		if e.v.EndedReason != "" {
+			line += e.v.EndedReason + "  "
+		}
+		lines = append(lines, line+e.s.summary(e.v))
 	}
 	if len(entries) == 0 {
 		lines = append(lines, "", "No sessions. Start one with /peer in an agent chat.")
@@ -163,7 +181,7 @@ func render(out io.Writer, entries []entry, selected int, local *store, width, h
 	rows := max(height-1, 1) // the first line is the key help
 	first := min(max(at-rows+1, 0), max(len(lines)-rows, 0))
 	var b strings.Builder
-	b.WriteString(clearScreen + cut("peer  ↑/↓ select · Enter open · Esc back · q quit", width))
+	b.WriteString(clearScreen + cut("peer  ↑/↓ select · Enter open · x close room · Esc back · q quit", width))
 	for _, line := range lines[first:min(first+rows, len(lines))] {
 		b.WriteString("\n" + cut(line, width))
 	}
@@ -195,6 +213,7 @@ func view(e entry, keys <-chan key, out io.Writer) error {
 	var done chan error
 	follow := func() {
 		stop, done = make(chan struct{}), make(chan error, 1)
+		p := newPrinter(out, e.s.repo, true) // replays start over, so counts do too
 		if showLog {
 			go func(stop <-chan struct{}, done chan<- error) { done <- followReaderLog(readerLog, p, stop) }(stop, done)
 		} else {
@@ -223,7 +242,9 @@ func view(e entry, keys <-chan key, out io.Writer) error {
 				if showLog {
 					title = e.v.Reader + " log"
 				}
-				fmt.Fprintf(out, "\n%s\n\n", p.paint(ansiDim, "── "+title+" · Tab switch · Esc back ──"))
+				// Both streams replay from the start, so clear the screen
+				// rather than stack them; earlier scrollback stays.
+				fmt.Fprintf(out, "%s%s\n\n", clearScreen, p.paint(ansiDim, "── "+title+" · Tab switch · Esc back ──"))
 				follow()
 				continue
 			}
@@ -345,6 +366,8 @@ func readKeys(f *os.File) <-chan key {
 				k = keyEnter
 			case '\t':
 				k = keyTab
+			case 'x':
+				k = keyClose
 			case 'q', 3: // 3 is Ctrl-C
 				k = keyQuit
 			case 0x1b:

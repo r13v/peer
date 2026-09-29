@@ -33,6 +33,8 @@ type session struct {
 	Reader    string `json:"reader"`
 	StartedAt string `json:"started_at"`
 	EndedAt   string `json:"ended_at,omitempty"`
+	// EndedReason says why a session ended other than by its writer's end.
+	EndedReason string `json:"ended_reason,omitempty"`
 }
 
 type message struct {
@@ -57,9 +59,7 @@ var readerInstructions []byte
 //go:embed instructions/writer.md
 var writerInstructions []byte
 
-var errNoSession = errors.New("no session; the writer must run peer start")
-
-const usage = "usage: peer, peer skills flow|writer|reader, peer update, peer start|status|send|wait|end|follow|history, or peer log ID"
+const usage = "usage: peer, peer skills flow|writer|reader, peer update, peer start NAME, peer send|wait|end ID --as NAME, peer status|follow [ID], peer history, or peer log ID"
 
 // openURL is replaced in tests.
 var openURL = func(link string) error { return exec.Command("open", link).Run() }
@@ -107,20 +107,34 @@ func run(args []string, in io.Reader, out io.Writer, cwd string) error {
 	writer := fs.String("writer", "", "writer name for start")
 	reader := fs.String("reader", "", "reader name for start")
 	headed := fs.Bool("headed", false, "open the reader's desktop app for start")
-	if err := fs.Parse(args[1:]); err != nil {
-		return err
+	// The room name or ID comes first, as in peer send ID --as NAME; Go's
+	// flag parsing would stop at it, so it is taken off before the flags.
+	rest, id := args[1:], ""
+	if len(rest) > 0 && !strings.HasPrefix(rest[0], "-") {
+		id, rest = rest[0], rest[1:]
 	}
-	if args[0] == "log" {
-		if fs.NArg() != 1 {
-			return errors.New("usage: peer log ID; list IDs with peer history")
-		}
-		return s.log(fs.Arg(0), false, newPrinter(out, s.repo, false), nil)
+	if err := fs.Parse(rest); err != nil {
+		return err
 	}
 	if fs.NArg() != 0 {
 		return fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " "))
 	}
+	needID := func(cmd string) error {
+		if id == "" {
+			return fmt.Errorf("usage: peer %s ID; list active rooms with peer status", cmd)
+		}
+		return nil
+	}
 	switch args[0] {
+	case "log":
+		if err := needID("log"); err != nil {
+			return err
+		}
+		return s.log(id, false, newPrinter(out, s.repo, false), nil)
 	case "start":
+		if !roomName.MatchString(id) {
+			return errors.New("usage: peer start NAME --writer NAME --reader NAME; the room NAME is 1-40 characters: a-z, 0-9 or -, starting with a letter")
+		}
 		if err := checkName(*writer); err != nil {
 			return err
 		}
@@ -130,11 +144,12 @@ func run(args []string, in io.Reader, out io.Writer, cwd string) error {
 		if *writer == *reader {
 			return errors.New("writer and reader must be different participants")
 		}
-		if err := s.start(*writer, *reader, out); err != nil || appBundles[*reader] == "" {
+		v, err := s.start(id, *writer, *reader, out)
+		if err != nil || appBundles[*reader] == "" {
 			return err
 		}
 		if *headed && appRunning(*reader) {
-			link := readerLink(s.repo, *writer, *reader)
+			link := readerLink(s.repo, v)
 			if err := openURL(link); err != nil {
 				return fmt.Errorf("session started, but opening %s failed: %v; open this link: %s", *reader, err, link)
 			}
@@ -143,20 +158,18 @@ func run(args []string, in io.Reader, out io.Writer, cwd string) error {
 		if *headed {
 			fmt.Fprintf(os.Stderr, "peer: %s is not open, so it runs headless\n", *reader)
 		}
-		v, err := s.active()
-		if err == nil {
-			logPath := filepath.Join(s.dir, "sessions", v.ID, "reader.log")
-			if err = startReader(readerArgs(s, *writer, *reader), s.repo, logPath, v.ID); err == nil {
-				fmt.Fprintf(os.Stderr, "peer: %s runs headless; press Tab in peer to watch it, or read %s\n", *reader, logPath)
-			}
+		logPath := filepath.Join(s.dir, "sessions", v.ID, "reader.log")
+		if err := startReader(readerArgs(s, v), s.repo, logPath); err != nil {
+			return fmt.Errorf("session started, but launching %s failed: %v; open %s in this checkout and send: %s", *reader, err, *reader, readerPrompt(v, false))
 		}
-		if err != nil {
-			return fmt.Errorf("session started, but launching %s failed: %v; open %s in this checkout and send: %s", *reader, err, *reader, readerPrompt(*writer, *reader, false))
-		}
+		fmt.Fprintf(os.Stderr, "peer: %s runs headless; press Tab in peer to watch it, or read %s\n", *reader, logPath)
 		return nil
 	case "status":
-		return s.status(out)
+		return s.status(id, out)
 	case "send":
+		if err := needID("send"); err != nil {
+			return err
+		}
 		if err := checkName(*actor); err != nil {
 			return err
 		}
@@ -171,22 +184,30 @@ func run(args []string, in io.Reader, out io.Writer, cwd string) error {
 		if text == "" {
 			return errors.New("message is empty; pipe its text to stdin")
 		}
-		return s.send(*actor, text, out)
+		return s.send(id, *actor, text, out)
 	case "wait":
+		if err := needID("wait"); err != nil {
+			return err
+		}
 		if err := checkName(*actor); err != nil {
 			return err
 		}
-		return s.wait(*actor, waitTimeout, out)
+		return s.wait(id, *actor, waitTimeout, out)
 	case "end":
+		if err := needID("end"); err != nil {
+			return err
+		}
 		if err := checkName(*actor); err != nil {
 			return err
 		}
-		return s.end(*actor, out)
+		return s.end(id, *actor, out)
 	case "follow":
 		p := newPrinter(out, s.repo, true)
-		id, err := s.awaitSession(p)
-		if err != nil {
-			return err
+		if id == "" {
+			var err error
+			if id, err = s.awaitSession(p); err != nil {
+				return err
+			}
 		}
 		return s.log(id, true, p, nil)
 	case "history":
@@ -226,8 +247,8 @@ func update(in io.Reader, out io.Writer) error {
 
 // readerPrompt starts the reader's chat. A headless reader has nobody to
 // ask, so it is told to keep waiting on its own.
-func readerPrompt(writer, reader string, headless bool) string {
-	prompt := fmt.Sprintf("Use the peer skill. You are participant %s, the reader in %s's peer session in this checkout. Discuss the approach through peer, then review the diff and send concrete findings through peer. Do not edit files. Keep waiting for replies until the review is closed.", reader, writer)
+func readerPrompt(v session, headless bool) string {
+	prompt := fmt.Sprintf("Use the peer skill. You are participant %s, the reader in %s's peer room %s in this checkout. Discuss the approach through peer, then review the diff and send concrete findings through peer. Do not edit files. Keep waiting for replies until the review is closed.", v.Reader, v.Writer, v.ID)
 	if headless {
 		prompt += " Nobody reads this chat: do not ask the user anything, run peer and git directly rather than through wrapper commands, and keep calling peer wait until the writer ends the session. Once peer reports that the session has ended, stop."
 	}
@@ -251,18 +272,19 @@ var appRunning = func(reader string) bool {
 // readerArgs runs the reader's CLI without a chat window. Codex's sandbox
 // also lets it write the peer store outside the checkout; Claude gets no
 // edit tools and only peer and read-only git in Bash.
-func readerArgs(s *store, writer, reader string) []string {
-	prompt := readerPrompt(writer, reader, true)
-	if reader == "codex" {
+func readerArgs(s *store, v session) []string {
+	prompt := readerPrompt(v, true)
+	if v.Reader == "codex" {
 		return []string{"codex", "exec", "-C", s.repo, "-s", "workspace-write", "--add-dir", s.dir, "-c", "approval_policy=never", prompt}
 	}
 	return []string{"claude", "-p", "--verbose", "--output-format", "stream-json", "--permission-mode", "dontAsk", "--permission-prompts", "none", "--tools", "Bash", "Read", "Grep", "Glob", "Skill", "--allowedTools", "Skill", "Bash(peer:*)", "Bash(git diff:*)", "Bash(git status:*)", "Bash(git log:*)", "Bash(git show:*)", "Read", "Grep", "Glob", "--", prompt}
 }
 
 // startReader runs argv in dir in its own process session, so it outlives
-// the writer's command, pins it to peer session id, and appends its output
-// and exit status to logPath; it is replaced in tests.
-var startReader = func(argv []string, dir, logPath, id string) error {
+// the writer's command, and appends its output and exit status to logPath.
+// The status also goes to reader.exit next to it, which ends the room; it
+// is replaced in tests.
+var startReader = func(argv []string, dir, logPath string) error {
 	if _, err := exec.LookPath(argv[0]); err != nil {
 		return err
 	}
@@ -271,9 +293,9 @@ var startReader = func(argv []string, dir, logPath, id string) error {
 		return err
 	}
 	defer log.Close()
-	cmd := exec.Command("sh", append([]string{"-c", `"$@"; echo "[peer] reader exited with status $?"`, "sh"}, argv...)...)
+	exit := filepath.Join(filepath.Dir(logPath), readerExit)
+	cmd := exec.Command("sh", append([]string{"-c", `exit_file=$1; shift; "$@"; status=$?; echo "[peer] reader exited with status $status"; echo "$status" > "$exit_file"`, "sh", exit}, argv...)...)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "PEER_SESSION="+id)
 	cmd.Stdout, cmd.Stderr = log, log
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := cmd.Start(); err != nil {
@@ -284,9 +306,9 @@ var startReader = func(argv []string, dir, logPath, id string) error {
 
 // readerLink builds a desktop deep link that opens a new codex or claude
 // chat in repo with the reader prompt prefilled. Neither app submits the prompt by itself.
-func readerLink(repo, writer, reader string) string {
-	prompt := readerPrompt(writer, reader, false)
-	if reader == "codex" {
+func readerLink(repo string, v session) string {
+	prompt := readerPrompt(v, false)
+	if v.Reader == "codex" {
 		return (&url.URL{Scheme: "codex", Host: "threads", Path: "/new", RawQuery: url.Values{"path": {repo}, "prompt": {prompt}}.Encode()}).String()
 	}
 	return (&url.URL{Scheme: "claude", Host: "code", Path: "/new", RawQuery: url.Values{"folder": {repo}, "q": {prompt}}.Encode()}).String()
@@ -423,26 +445,25 @@ func writeJSON(path string, v any) error {
 	return writeAtomic(path, append(b, '\n'))
 }
 
-func (s *store) activeID() (string, error) {
-	b, err := os.ReadFile(filepath.Join(s.dir, "active"))
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return "", errNoSession
-		}
-		return "", err
-	}
-	return strings.TrimSpace(string(b)), nil
-}
+var (
+	// roomName is the name the writer gives a room at start.
+	roomName = regexp.MustCompile(`^[a-z][a-z0-9-]{0,39}$`)
+	// sessionID is a room name, with -2, -3… if the name was taken.
+	sessionID = regexp.MustCompile(`^[a-z][a-z0-9-]{0,39}(-\d+)?$`)
+)
 
-// sessionID matches IDs made from the local start time, such as
-// 20260929-120911 or 20260929-120911-2 for a second session in that second.
-var sessionID = regexp.MustCompile(`^\d{8}-\d{6}(-\d+)?$`)
+// readerExit holds the headless reader's exit status once it stops.
+const readerExit = "reader.exit"
 
+// session reads session id without ending it; participants use refresh.
 func (s *store) session(id string) (session, error) {
 	if !sessionID.MatchString(id) {
 		return session{}, errors.New("invalid session ID")
 	}
 	b, err := os.ReadFile(filepath.Join(s.dir, "sessions", id, "session.json"))
+	if errors.Is(err, os.ErrNotExist) {
+		return session{}, fmt.Errorf("no session %s; list active rooms with peer status", id)
+	}
 	if err != nil {
 		return session{}, err
 	}
@@ -451,40 +472,51 @@ func (s *store) session(id string) (session, error) {
 	return v, err
 }
 
-// current returns the active session, or the one PEER_SESSION names. A
-// headless reader is pinned this way, so once its session ends it cannot
-// join the next one and take messages meant for another participant.
-func (s *store) current() (session, error) {
-	if id := os.Getenv("PEER_SESSION"); id != "" {
-		return s.session(id)
+// load reads session id under the store lock and ends it once its
+// headless reader has exited, so nobody waits on a reader that is gone.
+func (s *store) load(id string) (session, error) {
+	v, err := s.session(id)
+	if err != nil || v.EndedAt != "" {
+		return v, err
 	}
-	return s.active()
-}
-
-// active returns the active session regardless of PEER_SESSION.
-func (s *store) active() (session, error) {
-	id, err := s.activeID()
+	b, err := os.ReadFile(filepath.Join(s.dir, "sessions", id, readerExit))
+	if errors.Is(err, os.ErrNotExist) {
+		return v, nil
+	}
 	if err != nil {
-		return session{}, err
+		return v, err
 	}
-	return s.session(id)
+	status, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil {
+		return v, nil // the wrapper is still writing it
+	}
+	return v, s.finish(&v, fmt.Sprintf("%s exited with status %d", v.Reader, status))
 }
 
-func (s *store) start(writer, reader string, out io.Writer) error {
-	return s.locked(func() error {
-		old, err := s.active() // PEER_SESSION may pin an older session
-		if err == nil && old.EndedAt == "" {
-			return fmt.Errorf("session %s is active; end it before starting another", old.ID)
-		}
-		if err != nil && !errors.Is(err, errNoSession) {
-			return err
-		}
-		now := time.Now()
+// refresh is load for callers that do not hold the store lock.
+func (s *store) refresh(id string) (session, error) {
+	var v session
+	err := s.locked(func() error {
+		var err error
+		v, err = s.load(id)
+		return err
+	})
+	return v, err
+}
+
+// finish ends active session v; the caller holds the store lock.
+func (s *store) finish(v *session, reason string) error {
+	v.EndedAt, v.EndedReason = time.Now().UTC().Format(time.RFC3339Nano), reason
+	return writeJSON(filepath.Join(s.dir, "sessions", v.ID, "session.json"), v)
+}
+
+func (s *store) start(name, writer, reader string, out io.Writer) (session, error) {
+	var v session
+	err := s.locked(func() error {
 		if err := os.MkdirAll(filepath.Join(s.dir, "sessions"), 0700); err != nil {
 			return err
 		}
-		base := now.Format("20060102-150405")
-		id, dir := base, ""
+		id, dir := name, ""
 		for n := 2; ; n++ {
 			dir = filepath.Join(s.dir, "sessions", id)
 			err := os.Mkdir(dir, 0700)
@@ -494,37 +526,48 @@ func (s *store) start(writer, reader string, out io.Writer) error {
 			if !errors.Is(err, os.ErrExist) {
 				return err
 			}
-			id = fmt.Sprintf("%s-%d", base, n)
+			id = fmt.Sprintf("%s-%d", name, n)
 		}
-		v := session{ID: id, Repo: s.repo, Writer: writer, Reader: reader, StartedAt: now.UTC().Format(time.RFC3339Nano)}
+		v = session{ID: id, Repo: s.repo, Writer: writer, Reader: reader, StartedAt: time.Now().UTC().Format(time.RFC3339Nano)}
 		if err := writeJSON(filepath.Join(dir, "session.json"), v); err != nil {
-			return err
-		}
-		if err := writeAtomic(filepath.Join(s.dir, "active"), []byte(id+"\n")); err != nil {
 			return err
 		}
 		return json.NewEncoder(out).Encode(v)
 	})
+	return v, err
 }
 
-func (s *store) status(out io.Writer) error {
-	return s.locked(func() error {
-		v, err := s.current()
+// status prints room id, or every active room in this checkout.
+func (s *store) status(id string, out io.Writer) error {
+	if id != "" {
+		v, err := s.refresh(id)
 		if err != nil {
 			return err
 		}
 		return json.NewEncoder(out).Encode(v)
-	})
+	}
+	sessions, err := s.sessions()
+	if err != nil {
+		return err
+	}
+	for _, v := range sessions {
+		if v.EndedAt == "" {
+			if err := json.NewEncoder(out).Encode(v); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
-func (s *store) send(from, text string, out io.Writer) error {
+func (s *store) send(sid, from, text string, out io.Writer) error {
 	return s.locked(func() error {
-		v, err := s.current()
+		v, err := s.load(sid)
 		if err != nil {
 			return err
 		}
 		if v.EndedAt != "" {
-			return errors.New("session has ended")
+			return endedError(v)
 		}
 		to, err := v.other(from)
 		if err != nil {
@@ -557,10 +600,10 @@ func (s *store) send(from, text string, out io.Writer) error {
 	})
 }
 
-func (s *store) nextMessage(as string) (*message, error) {
+func (s *store) nextMessage(sid, as string) (*message, error) {
 	var found *message
 	err := s.locked(func() error {
-		v, err := s.current()
+		v, err := s.load(sid)
 		if err != nil {
 			return err
 		}
@@ -581,7 +624,7 @@ func (s *store) nextMessage(as string) (*message, error) {
 		f, err := os.Open(filepath.Join(dir, "messages.jsonl"))
 		if errors.Is(err, os.ErrNotExist) {
 			if v.EndedAt != "" {
-				return errors.New("session has ended")
+				return endedError(v)
 			}
 			// Record the poll so log can show this participant as waiting.
 			return writeAtomic(cursorPath, []byte("0\n"))
@@ -613,17 +656,17 @@ func (s *store) nextMessage(as string) (*message, error) {
 			}
 		}
 		if found == nil && v.EndedAt != "" {
-			return errors.New("session has ended")
+			return endedError(v)
 		}
 		return writeAtomic(cursorPath, []byte(strconv.FormatInt(offset, 10)+"\n"))
 	})
 	return found, err
 }
 
-func (s *store) wait(as string, timeout time.Duration, out io.Writer) error {
+func (s *store) wait(sid, as string, timeout time.Duration, out io.Writer) error {
 	deadline := time.Now().Add(timeout)
 	for {
-		m, err := s.nextMessage(as)
+		m, err := s.nextMessage(sid, as)
 		if err != nil {
 			return err
 		}
@@ -640,9 +683,9 @@ func (s *store) wait(as string, timeout time.Duration, out io.Writer) error {
 	}
 }
 
-func (s *store) end(as string, out io.Writer) error {
+func (s *store) end(sid, as string, out io.Writer) error {
 	return s.locked(func() error {
-		v, err := s.current()
+		v, err := s.load(sid)
 		if err != nil {
 			return err
 		}
@@ -652,12 +695,29 @@ func (s *store) end(as string, out io.Writer) error {
 		if v.EndedAt != "" {
 			return errors.New("session has already ended")
 		}
-		v.EndedAt = time.Now().UTC().Format(time.RFC3339Nano)
-		if err := writeJSON(filepath.Join(s.dir, "sessions", v.ID, "session.json"), v); err != nil {
+		if err := s.finish(&v, ""); err != nil {
 			return err
 		}
 		return json.NewEncoder(out).Encode(v)
 	})
+}
+
+// close ends room id without a participant, as x in the picker does.
+func (s *store) close(id string) error {
+	return s.locked(func() error {
+		v, err := s.load(id)
+		if err != nil || v.EndedAt != "" {
+			return err
+		}
+		return s.finish(&v, "closed in peer")
+	})
+}
+
+func endedError(v session) error {
+	if v.EndedReason != "" {
+		return errors.New("session has ended: " + v.EndedReason)
+	}
+	return errors.New("session has ended")
 }
 
 // log prints session id's transcript. When following, it streams new
@@ -671,7 +731,7 @@ func (s *store) log(id string, follow bool, p *printer, stop <-chan struct{}) er
 	for {
 		// Read the session before the transcript: send refuses after end,
 		// so an ended session has no messages beyond what we drain next.
-		v, err := s.session(id)
+		v, err := s.refresh(id)
 		if err != nil {
 			return err
 		}
@@ -722,21 +782,32 @@ func (s *store) log(id string, follow bool, p *printer, stop <-chan struct{}) er
 	}
 }
 
-// awaitSession returns the active session ID. It waits for a new session
-// instead of failing or replaying an ended one. Any session that replaces
-// the stale one counts, even if it ended between polls.
+// awaitSession returns the newest active room's ID. With none, it waits
+// for a new room instead of replaying an ended one; a room started after
+// the call counts even if it ended between polls.
 func (s *store) awaitSession(p *printer) (string, error) {
-	stale, first, notified := "", true, false
+	var known map[string]bool
+	notified := false
 	for {
-		v, err := s.current()
-		if err != nil && !errors.Is(err, errNoSession) {
+		sessions, err := s.sessions()
+		if err != nil {
 			return "", err
 		}
-		if first {
-			stale, first = v.ID, false
+		for _, v := range sessions {
+			if v.EndedAt == "" {
+				return v.ID, nil
+			}
 		}
-		if err == nil && (v.EndedAt == "" || v.ID != stale) {
-			return v.ID, nil
+		for _, v := range sessions {
+			if known != nil && !known[v.ID] {
+				return v.ID, nil
+			}
+		}
+		if known == nil {
+			known = map[string]bool{}
+			for _, v := range sessions {
+				known[v.ID] = true
+			}
 		}
 		if !notified {
 			notified = true
@@ -914,7 +985,11 @@ func (p *printer) ended(v session) error {
 	if p.watched {
 		notify("peer", "Session ended: "+summary)
 	}
-	_, err = fmt.Fprintf(p.out, "%s\n%s\n", p.paint(ansiDim, "── session ended at "+end.Local().Format("15:04:05")+" ──"), summary)
+	title := "── session ended at " + end.Local().Format("15:04:05")
+	if v.EndedReason != "" {
+		title += ": " + v.EndedReason
+	}
+	_, err = fmt.Fprintf(p.out, "%s\n%s\n", p.paint(ansiDim, title+" ──"), summary)
 	return err
 }
 
@@ -973,6 +1048,9 @@ func (s *store) sessions() ([]session, error) {
 			continue
 		}
 		v, err := s.session(d.Name())
+		if err == nil && v.EndedAt == "" {
+			v, err = s.refresh(d.Name())
+		}
 		if err != nil {
 			continue
 		}
@@ -1008,8 +1086,10 @@ func (s *store) history(out io.Writer) error {
 		state := "ended"
 		if v.EndedAt == "" {
 			state = "active"
+		} else if v.EndedReason != "" {
+			state += ": " + v.EndedReason
 		}
-		if _, err := fmt.Fprintf(out, "%-17s  %s  %s\n", v.ID, s.summary(v), state); err != nil {
+		if _, err := fmt.Fprintf(out, "%-24s  %s  %s\n", v.ID, s.summary(v), state); err != nil {
 			return err
 		}
 	}
