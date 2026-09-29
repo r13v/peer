@@ -14,6 +14,12 @@ import (
 	"time"
 )
 
+func TestMain(m *testing.M) {
+	openURL = func(string) error { return nil }
+	waitTimeout = 0
+	os.Exit(m.Run())
+}
+
 func testRepo(t *testing.T) string {
 	t.Helper()
 	repo := t.TempDir()
@@ -33,9 +39,9 @@ func invoke(repo, input string, args ...string) (string, error) {
 
 func TestRoleInstructions(t *testing.T) {
 	cwd := t.TempDir() // Skill docs must work before a checkout or session exists.
-	for _, role := range []string{"reader", "writer"} {
+	for role, want := range map[string]string{"flow": "peer skills writer", "reader": "peer wait --as YOUR_NAME", "writer": "peer wait --as YOUR_NAME"} {
 		got, err := invoke(cwd, "", "skills", role)
-		if err != nil || !strings.HasPrefix(got, "# ") || !strings.Contains(got, "peer wait --as YOUR_NAME") {
+		if err != nil || !strings.HasPrefix(got, "# ") || !strings.Contains(got, want) {
 			t.Fatalf("%s instructions unavailable: %s, %v", role, got, err)
 		}
 	}
@@ -143,26 +149,29 @@ func TestPairSession(t *testing.T) {
 	if _, err := invoke(repo, "intrusion", "send", "--as", "codex"); err == nil {
 		t.Fatal("nonparticipant sent a message")
 	}
-	if _, err := invoke(repo, "", "wait", "--as", "codex", "--timeout", "0s"); err == nil {
+	if _, err := invoke(repo, "", "wait", "--as", "codex"); err == nil {
 		t.Fatal("nonparticipant read a message")
 	}
-	if got, err := invoke(repo, "", "wait", "--as", "claude", "--timeout", "0s"); err != nil || !strings.Contains(got, `"status":"timeout"`) {
+	if got, err := invoke(repo, "", "wait", "--as", "claude"); err != nil || !strings.Contains(got, `"status":"timeout"`) {
 		t.Fatalf("writer consumed its own message: %s, %v", got, err)
 	}
-	got, err := invoke(repo, "", "wait", "--as", "copilot", "--timeout", "0s")
+	got, err := invoke(repo, "", "wait", "--as", "copilot")
 	if err != nil || !strings.Contains(got, `"text":"proposal"`) {
 		t.Fatalf("reviewer missed proposal: %s, %v", got, err)
 	}
-	if got, err := invoke(repo, "", "wait", "--as", "copilot", "--timeout", "0s"); err != nil || !strings.Contains(got, `"status":"timeout"`) {
+	if got, err := invoke(repo, "", "wait", "--as", "copilot"); err != nil || !strings.Contains(got, `"status":"timeout"`) {
 		t.Fatalf("message delivered twice: %s, %v", got, err)
 	}
 	if _, err := invoke(repo, "check line 12", "send", "--as", "copilot"); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := invoke(repo, "", "wait", "--as", "claude", "--timeout", "0s"); err != nil || !strings.Contains(got, `"text":"check line 12"`) {
+	if got, err := invoke(repo, "", "wait", "--as", "claude"); err != nil || !strings.Contains(got, `"text":"check line 12"`) {
 		t.Fatalf("writer missed review: %s, %v", got, err)
 	}
-	log, err := invoke(repo, "", "log")
+	if _, err := invoke(repo, "", "log"); err == nil {
+		t.Fatal("log without an ID accepted")
+	}
+	log, err := invoke(repo, "", "log", first.ID)
 	if err != nil || !strings.Contains(log, "proposal") || !strings.Contains(log, "check line 12") {
 		t.Fatalf("transcript incomplete: %s, %v", log, err)
 	}
@@ -175,7 +184,7 @@ func TestPairSession(t *testing.T) {
 	if _, err := invoke(repo, "", "end", "--as", "claude"); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := invoke(repo, "", "wait", "--as", "copilot", "--timeout", "0s"); err != nil || !strings.Contains(got, `"text":"review complete"`) {
+	if got, err := invoke(repo, "", "wait", "--as", "copilot"); err != nil || !strings.Contains(got, `"text":"review complete"`) {
 		t.Fatalf("closing message lost when session ended: %s, %v", got, err)
 	}
 	if _, err := invoke(repo, "too late", "send", "--as", "copilot"); err == nil {
@@ -188,11 +197,11 @@ func TestPairSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var sessions []session
-	if err := json.Unmarshal([]byte(history), &sessions); err != nil || len(sessions) != 2 {
-		t.Fatalf("old session missing: %s, %v", history, err)
+	rows := strings.Split(strings.TrimSpace(history), "\n")
+	if len(rows) != 2 || !strings.HasSuffix(rows[0], "active") || !strings.HasPrefix(rows[1], first.ID+" ") || !strings.Contains(rows[1], "claude→copilot    3 msgs") || !strings.HasSuffix(rows[1], "ended") {
+		t.Fatalf("unexpected history:\n%s", history)
 	}
-	oldLog, err := invoke(repo, "", "log", "--session", first.ID)
+	oldLog, err := invoke(repo, "", "log", first.ID)
 	if err != nil || !strings.Contains(oldLog, "proposal") {
 		t.Fatalf("old transcript missing: %s, %v", oldLog, err)
 	}
@@ -201,10 +210,11 @@ func TestPairSession(t *testing.T) {
 func TestOpenReader(t *testing.T) {
 	var links []string
 	openURL = func(link string) error { links = append(links, link); return nil }
-	t.Cleanup(func() { openURL = func(link string) error { return exec.Command("open", link).Run() } })
-	for _, tc := range []struct{ app, host, pathKey, promptKey string }{
-		{"codex", "threads", "path", "prompt"},
-		{"claude", "code", "folder", "q"},
+	t.Cleanup(func() { openURL = func(string) error { return nil } })
+	for _, tc := range []struct{ writer, reader, host, pathKey, promptKey string }{
+		{"claude", "codex", "threads", "path", "prompt"},
+		{"codex", "claude", "code", "folder", "q"},
+		{"claude", "copilot", "", "", ""},
 	} {
 		links = nil
 		repo := filepath.Join(t.TempDir(), "my repo & co")
@@ -212,28 +222,28 @@ func TestOpenReader(t *testing.T) {
 			t.Fatalf("git init: %v: %s", err, out)
 		}
 		t.Setenv("PEER_HOME", filepath.Join(t.TempDir(), "data"))
-		if _, err := invoke(repo, "", "start", "--writer", "claude", "--reader", "codex", "--open-reader", "slack"); err == nil || len(links) != 0 {
-			t.Fatal("unknown app accepted")
-		}
-		if _, err := invoke(repo, "", "status"); err == nil {
-			t.Fatal("session started despite an unknown app")
-		}
-		started, err := invoke(repo, "", "start", "--writer", "claude", "--reader", "codex", "--open-reader", tc.app)
+		started, err := invoke(repo, "", "start", "--writer", tc.writer, "--reader", tc.reader)
 		var v session
 		if err != nil || json.Unmarshal([]byte(started), &v) != nil {
 			t.Fatalf("start output is not one session: %q, %v", started, err)
 		}
+		if tc.host == "" {
+			if len(links) != 0 {
+				t.Fatalf("opened a link for %s: %q", tc.reader, links)
+			}
+			continue
+		}
 		if len(links) != 1 {
-			t.Fatalf("want one %s link, got %q", tc.app, links)
+			t.Fatalf("want one %s link, got %q", tc.reader, links)
 		}
 		u, err := url.Parse(links[0])
-		if err != nil || u.Scheme != tc.app || u.Host != tc.host || u.Path != "/new" {
-			t.Fatalf("wrong %s link: %s, %v", tc.app, links[0], err)
+		if err != nil || u.Scheme != tc.reader || u.Host != tc.host || u.Path != "/new" {
+			t.Fatalf("wrong %s link: %s, %v", tc.reader, links[0], err)
 		}
 		resolved, _ := filepath.EvalSymlinks(repo)
 		prompt := u.Query().Get(tc.promptKey)
-		if u.Query().Get(tc.pathKey) != resolved || !strings.Contains(prompt, "participant codex") || strings.HasPrefix(prompt, "/") {
-			t.Fatalf("wrong %s query: %v", tc.app, u.Query())
+		if u.Query().Get(tc.pathKey) != resolved || !strings.Contains(prompt, "participant "+tc.reader) || strings.HasPrefix(prompt, "/") {
+			t.Fatalf("wrong %s query: %v", tc.reader, u.Query())
 		}
 	}
 }
@@ -248,7 +258,7 @@ func TestParticipantNames(t *testing.T) {
 	if _, err := invoke(repo, "", "start", "--writer", "claude", "--reader", "copilot"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := invoke(repo, "", "wait", "--as", "../copilot", "--timeout", "0s"); err == nil {
+	if _, err := invoke(repo, "", "wait", "--as", "../copilot"); err == nil {
 		t.Fatal("unsafe participant name accepted")
 	}
 }
@@ -272,12 +282,14 @@ func TestWaitReceivesLaterMessage(t *testing.T) {
 	if _, err := invoke(repo, "", "start", "--writer", "codex-main", "--reader", "codex-review"); err != nil {
 		t.Fatal(err)
 	}
+	waitTimeout = 2 * time.Second
+	t.Cleanup(func() { waitTimeout = 0 })
 	done := make(chan struct {
 		text string
 		err  error
 	}, 1)
 	go func() {
-		text, err := invoke(repo, "", "wait", "--as", "codex-review", "--timeout", "2s")
+		text, err := invoke(repo, "", "wait", "--as", "codex-review")
 		done <- struct {
 			text string
 			err  error
@@ -300,7 +312,7 @@ func TestFollowStopsWhenSessionEnds(t *testing.T) {
 	}
 	done := make(chan string)
 	go func() {
-		got, err := invoke(repo, "", "log", "--follow")
+		got, err := invoke(repo, "", "follow")
 		if err != nil {
 			t.Error(err)
 		}
@@ -319,7 +331,7 @@ func TestFollowStopsWhenSessionEnds(t *testing.T) {
 			t.Fatalf("unexpected follow output: %q", got)
 		}
 	case <-time.After(3 * time.Second):
-		t.Fatal("log --follow kept running after the session ended")
+		t.Fatal("follow kept running after the session ended")
 	}
 }
 
@@ -356,12 +368,12 @@ func TestFollowWaitsForNextSession(t *testing.T) {
 	if _, err := invoke(repo, "", "end", "--as", "claude"); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := invoke(repo, "", "log", "--follow", "--session", old.ID); err != nil || !strings.Contains(got, "old task") {
-		t.Fatalf("pinned follow of an ended session: %q, %v", got, err)
+	if got, err := invoke(repo, "", "log", old.ID); err != nil || !strings.Contains(got, "old task") {
+		t.Fatalf("log of an ended session: %q, %v", got, err)
 	}
 	done := make(chan string)
 	go func() {
-		got, err := invoke(repo, "", "log", "--follow")
+		got, err := invoke(repo, "", "follow")
 		if err != nil {
 			t.Error(err)
 		}
@@ -383,7 +395,7 @@ func TestFollowWaitsForNextSession(t *testing.T) {
 			t.Fatalf("unexpected follow output: %q", got)
 		}
 	case <-time.After(3 * time.Second):
-		t.Fatal("log --follow did not pick up the next session")
+		t.Fatal("follow did not pick up the next session")
 	}
 }
 
@@ -397,7 +409,7 @@ func TestWaitMarksCursorBeforeFirstMessage(t *testing.T) {
 	if err := json.Unmarshal([]byte(started), &v); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := invoke(repo, "", "wait", "--as", "codex", "--timeout", "0s"); err != nil {
+	if _, err := invoke(repo, "", "wait", "--as", "codex"); err != nil {
 		t.Fatal(err)
 	}
 	s, err := openStore(repo)
@@ -429,64 +441,6 @@ func TestBodyMarkdown(t *testing.T) {
 	}
 }
 
-func TestLegacyStoreMigrates(t *testing.T) {
-	home := filepath.Join(t.TempDir(), "data")
-	parent := t.TempDir()
-	repo := filepath.Join(parent, "My App")
-	if out, err := exec.Command("git", "init", "-q", repo).CombinedOutput(); err != nil {
-		t.Fatalf("git init: %v: %s", err, out)
-	}
-	t.Setenv("PEER_HOME", home)
-	real, err := filepath.EvalSymlinks(repo)
-	if err != nil {
-		t.Fatal(err)
-	}
-	key := sha256.Sum256([]byte(real))
-	legacy := filepath.Join(home, "repos", fmt.Sprintf("%x", key[:8]))
-	old := session{ID: "0123456789abcdef", Repo: real, Writer: "claude", Reader: "codex", StartedAt: "2026-09-01T10:00:00Z", EndedAt: "2026-09-01T10:30:00Z"}
-	if err := os.MkdirAll(filepath.Join(legacy, "sessions", old.ID), 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := writeJSON(filepath.Join(legacy, "sessions", old.ID, "session.json"), old); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(legacy, "sessions", old.ID, "messages.jsonl"), []byte(`{"id":"1","at":"2026-09-01T10:01:00Z","from":"claude","to":"codex","text":"legacy hello"}`+"\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(legacy, "active"), []byte(old.ID+"\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	got, err := invoke(repo, "", "log", "--session", old.ID)
-	if err != nil || !strings.Contains(got, "legacy hello") {
-		t.Fatalf("legacy session unreachable: %q, %v", got, err)
-	}
-	want := filepath.Join(home, "repos", fmt.Sprintf("my-app-%x", key[:8]))
-	if _, err := os.Stat(want); err != nil {
-		t.Fatalf("store not renamed to %s: %v", want, err)
-	}
-	if _, err := os.Stat(legacy); !os.IsNotExist(err) {
-		t.Fatalf("legacy store still present: %v", err)
-	}
-	started, err := invoke(repo, "", "start", "--writer", "claude", "--reader", "codex")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var v session
-	if err := json.Unmarshal([]byte(started), &v); err != nil || !sessionID.MatchString(v.ID) {
-		t.Fatalf("new session ID %q is not time-based: %v", v.ID, err)
-	}
-	history, err := invoke(repo, "", "history")
-	if err != nil || !strings.Contains(history, old.ID) || !strings.Contains(history, v.ID) {
-		t.Fatalf("history lost a session: %s, %v", history, err)
-	}
-	if err := os.MkdirAll(legacy, 0700); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := invoke(repo, "", "status"); err == nil || !strings.Contains(err.Error(), "both") {
-		t.Fatalf("conflicting legacy and new stores were not reported: %v", err)
-	}
-}
-
 func TestSessionIDsInSameSecond(t *testing.T) {
 	repo := testRepo(t)
 	var ids []string
@@ -504,7 +458,91 @@ func TestSessionIDsInSameSecond(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if ids[0] == ids[1] || !validID(ids[0]) || !validID(ids[1]) || validID("../x") {
+	if ids[0] == ids[1] || !sessionID.MatchString(ids[0]) || !sessionID.MatchString(ids[1]) || sessionID.MatchString("../x") {
 		t.Fatalf("session IDs %q are not distinct and valid", ids)
+	}
+}
+
+func TestPickerLists(t *testing.T) {
+	repo := testRepo(t)
+	other := filepath.Join(t.TempDir(), "other")
+	if out, err := exec.Command("git", "init", "-q", other).CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
+	if _, err := invoke(repo, "", "start", "--writer", "claude", "--reader", "codex"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := invoke(repo, "", "end", "--as", "claude"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := invoke(other, "", "start", "--writer", "codex", "--reader", "claude"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := invoke(repo, ""); err == nil || !strings.HasPrefix(err.Error(), "usage:") {
+		t.Fatalf("picker ran without a terminal: %v", err)
+	}
+	local, err := openStore(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries, err := listEntries(local)
+	if err != nil || len(entries) != 2 || entries[0].v.Writer != "codex" || entries[0].v.EndedAt != "" || entries[1].v.Writer != "claude" || entries[1].v.EndedAt == "" {
+		t.Fatalf("want the active session in other, then the ended one here: %+v, %v", entries, err)
+	}
+	if entries, err := listEntries(nil); err != nil || len(entries) != 1 {
+		t.Fatalf("outside a checkout, want only active sessions: %+v, %v", entries, err)
+	}
+}
+
+func TestReadKeys(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	keys := readKeys(r)
+	for _, tc := range []struct {
+		in   string
+		want key
+	}{{"\x1b[A", keyUp}, {"\x1bOB", keyDown}, {"\x1b[", keyOther}, {"q", keyQuit}, {"\x1b", keyEsc}, {"\r", keyEnter}, {"j", keyDown}, {"\x03", keyQuit}} {
+		w.WriteString(tc.in)
+		if got := <-keys; got != tc.want {
+			t.Fatalf("%q: got key %d, want %d", tc.in, got, tc.want)
+		}
+	}
+	w.Close()
+	if _, ok := <-keys; ok {
+		t.Fatal("keys stayed open after input closed")
+	}
+}
+
+func TestRenderKeepsSelectionVisible(t *testing.T) {
+	repo := testRepo(t)
+	for i := 0; i < 6; i++ {
+		if _, err := invoke(repo, "", "start", "--writer", "claude", "--reader", "codex"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := invoke(repo, "", "end", "--as", "claude"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	local, err := openStore(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries, err := listEntries(local)
+	if err != nil || len(entries) != 6 {
+		t.Fatalf("want 6 entries: %d, %v", len(entries), err)
+	}
+	var out bytes.Buffer
+	render(&out, entries, 5, local, 30, 4)
+	lines := strings.Split(strings.TrimPrefix(out.String(), clearScreen), "\n")
+	if len(lines) != 4 || !strings.HasPrefix(lines[3], "› ") {
+		t.Fatalf("selected row not on a 4-line screen: %q", lines)
+	}
+	for _, line := range lines {
+		if len([]rune(line)) >= 30 {
+			t.Fatalf("line not cut to width: %q", line)
+		}
 	}
 }

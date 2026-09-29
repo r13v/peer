@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
 	_ "embed"
@@ -47,16 +48,25 @@ type store struct {
 	repo string
 }
 
-//go:embed roles/reader.md
+//go:embed instructions/flow.md
+var flowInstructions []byte
+
+//go:embed instructions/reader.md
 var readerInstructions []byte
 
-//go:embed roles/writer.md
+//go:embed instructions/writer.md
 var writerInstructions []byte
 
 var errNoSession = errors.New("no session; the writer must run peer start")
 
+const usage = "usage: peer, peer skills flow|writer|reader, peer update, peer start|status|send|wait|end|follow|history, or peer log ID"
+
 // openURL is replaced in tests.
 var openURL = func(link string) error { return exec.Command("open", link).Run() }
+
+// waitTimeout bounds one wait call below Claude Code's two-minute Bash
+// limit; it is replaced in tests.
+var waitTimeout = 90 * time.Second
 
 func main() {
 	cwd, err := os.Getwd()
@@ -71,7 +81,7 @@ func main() {
 
 func run(args []string, in io.Reader, out io.Writer, cwd string) error {
 	if len(args) == 0 {
-		return errors.New("usage: peer skills reader|writer, peer update, or peer start|status|send|wait|end|log|history")
+		return picker(in, out, cwd)
 	}
 	if args[0] == "update" {
 		if len(args) != 1 {
@@ -80,19 +90,12 @@ func run(args []string, in io.Reader, out io.Writer, cwd string) error {
 		return update(in, out)
 	}
 	if args[0] == "skills" {
-		if len(args) != 2 {
-			return errors.New("usage: peer skills reader|writer")
+		docs := map[string][]byte{"flow": flowInstructions, "writer": writerInstructions, "reader": readerInstructions}
+		if len(args) != 2 || docs[args[1]] == nil {
+			return errors.New("usage: peer skills flow|writer|reader")
 		}
-		switch args[1] {
-		case "reader":
-			_, err := out.Write(readerInstructions)
-			return err
-		case "writer":
-			_, err := out.Write(writerInstructions)
-			return err
-		default:
-			return errors.New("usage: peer skills reader|writer")
-		}
+		_, err := out.Write(docs[args[1]])
+		return err
 	}
 	s, err := openStore(cwd)
 	if err != nil {
@@ -103,12 +106,14 @@ func run(args []string, in io.Reader, out io.Writer, cwd string) error {
 	actor := fs.String("as", "", "participant name")
 	writer := fs.String("writer", "", "writer name for start")
 	reader := fs.String("reader", "", "reader name for start")
-	openReader := fs.String("open-reader", "", "codex or claude: open a prefilled reader chat after start")
-	timeout := fs.Duration("timeout", 90*time.Second, "wait timeout, at most 110s")
-	id := fs.String("session", "", "session ID for log")
-	follow := fs.Bool("follow", false, "follow log")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
+	}
+	if args[0] == "log" {
+		if fs.NArg() != 1 {
+			return errors.New("usage: peer log ID; list IDs with peer history")
+		}
+		return s.log(fs.Arg(0), false, newPrinter(out, s.repo, false), nil)
 	}
 	if fs.NArg() != 0 {
 		return fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " "))
@@ -124,15 +129,12 @@ func run(args []string, in io.Reader, out io.Writer, cwd string) error {
 		if *writer == *reader {
 			return errors.New("writer and reader must be different participants")
 		}
-		if *openReader != "" && *openReader != "codex" && *openReader != "claude" {
-			return errors.New("--open-reader must be codex or claude")
-		}
-		if err := s.start(*writer, *reader, out); err != nil || *openReader == "" {
+		if err := s.start(*writer, *reader, out); err != nil || *reader != "codex" && *reader != "claude" {
 			return err
 		}
-		link := readerLink(*openReader, s.repo, *writer, *reader)
+		link := readerLink(s.repo, *writer, *reader)
 		if err := openURL(link); err != nil {
-			return fmt.Errorf("session started, but opening %s failed: %v; open this link: %s", *openReader, err, link)
+			return fmt.Errorf("session started, but opening %s failed: %v; open this link: %s", *reader, err, link)
 		}
 		return nil
 	case "status":
@@ -157,21 +159,23 @@ func run(args []string, in io.Reader, out io.Writer, cwd string) error {
 		if err := checkName(*actor); err != nil {
 			return err
 		}
-		if *timeout < 0 || *timeout > 110*time.Second {
-			return errors.New("timeout must be between 0 and 110s")
-		}
-		return s.wait(*actor, *timeout, out)
+		return s.wait(*actor, waitTimeout, out)
 	case "end":
 		if err := checkName(*actor); err != nil {
 			return err
 		}
 		return s.end(*actor, out)
-	case "log":
-		return s.log(*id, *follow, out)
+	case "follow":
+		p := newPrinter(out, s.repo, true)
+		id, err := s.awaitSession(p)
+		if err != nil {
+			return err
+		}
+		return s.log(id, true, p, nil)
 	case "history":
 		return s.history(out)
 	default:
-		return fmt.Errorf("unknown command %q", args[0])
+		return errors.New(usage)
 	}
 }
 
@@ -203,11 +207,11 @@ func update(in io.Reader, out io.Writer) error {
 	return cmd.Run()
 }
 
-// readerLink builds a desktop deep link that opens a new chat in repo with
-// the reader prompt prefilled. Neither app submits the prompt by itself.
-func readerLink(app, repo, writer, reader string) string {
+// readerLink builds a desktop deep link that opens a new codex or claude
+// chat in repo with the reader prompt prefilled. Neither app submits the prompt by itself.
+func readerLink(repo, writer, reader string) string {
 	prompt := fmt.Sprintf("Use the peer skill. You are participant %s, the reader in %s's peer session in this checkout. Discuss the approach through peer, then review the diff and send concrete findings through peer. Do not edit files. Keep waiting for replies until the review is closed.", reader, writer)
-	if app == "codex" {
+	if reader == "codex" {
 		return (&url.URL{Scheme: "codex", Host: "threads", Path: "/new", RawQuery: url.Values{"path": {repo}, "prompt": {prompt}}.Encode()}).String()
 	}
 	return (&url.URL{Scheme: "claude", Host: "code", Path: "/new", RawQuery: url.Values{"folder": {repo}, "q": {prompt}}.Encode()}).String()
@@ -237,36 +241,42 @@ func (s session) other(name string) (string, error) {
 }
 
 func openStore(cwd string) (*store, error) {
-	cmd := exec.Command("git", "-C", cwd, "rev-parse", "--show-toplevel")
-	root, err := cmd.Output()
-	if err != nil {
-		return nil, errors.New("run this command inside the shared Git checkout")
-	}
-	repo, err := filepath.EvalSymlinks(strings.TrimSpace(string(root)))
+	repo, err := repoRoot(cwd)
 	if err != nil {
 		return nil, err
 	}
-	home := os.Getenv("PEER_HOME")
-	if home == "" {
-		userHome, err := os.UserHomeDir()
-		if err != nil {
-			return nil, err
-		}
-		home = filepath.Join(userHome, ".peer")
-	}
-	repos := filepath.Join(home, "repos")
-	if err := os.MkdirAll(repos, 0700); err != nil {
+	repos, err := reposDir()
+	if err != nil {
 		return nil, err
 	}
 	key := sha256.Sum256([]byte(repo))
 	dir := filepath.Join(repos, repoSlug(repo)+"-"+hex.EncodeToString(key[:8]))
-	if err := migrateRepo(repos, filepath.Join(repos, hex.EncodeToString(key[:8])), dir); err != nil {
-		return nil, err
-	}
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return nil, err
 	}
 	return &store{dir: dir, repo: repo}, nil
+}
+
+func repoRoot(cwd string) (string, error) {
+	root, err := exec.Command("git", "-C", cwd, "rev-parse", "--show-toplevel").Output()
+	if err != nil {
+		return "", errors.New("run this command inside the shared Git checkout")
+	}
+	return filepath.EvalSymlinks(strings.TrimSpace(string(root)))
+}
+
+// reposDir holds one store per checkout under PEER_HOME, by default ~/.peer.
+func reposDir() (string, error) {
+	home := os.Getenv("PEER_HOME")
+	if home == "" {
+		userHome, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		home = filepath.Join(userHome, ".peer")
+	}
+	repos := filepath.Join(home, "repos")
+	return repos, os.MkdirAll(repos, 0700)
 }
 
 // repoSlug turns the checkout's directory name into a readable,
@@ -285,27 +295,6 @@ func repoSlug(repo string) string {
 		return "repo"
 	}
 	return slug
-}
-
-// migrateRepo renames a store directory named by the legacy bare hash.
-// The repos lock keeps concurrent first runs from racing on the rename.
-func migrateRepo(repos, legacy, dir string) error {
-	if _, err := os.Stat(legacy); errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	return withLock(filepath.Join(repos, ".lock"), func() error {
-		if _, err := os.Stat(legacy); errors.Is(err, os.ErrNotExist) {
-			return nil
-		} else if err != nil {
-			return err
-		}
-		if _, err := os.Stat(dir); err == nil {
-			return fmt.Errorf("both %s and %s exist; move the sessions you need from the first into the second, then remove the first", legacy, dir)
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
-		return os.Rename(legacy, dir)
-	})
 }
 
 func (s *store) locked(fn func() error) error {
@@ -374,17 +363,8 @@ func (s *store) activeID() (string, error) {
 // 20260929-120911 or 20260929-120911-2 for a second session in that second.
 var sessionID = regexp.MustCompile(`^\d{8}-\d{6}(-\d+)?$`)
 
-func validID(id string) bool {
-	if sessionID.MatchString(id) {
-		return true
-	}
-	// Legacy sessions used 16 random hex characters.
-	_, err := hex.DecodeString(id)
-	return len(id) == 16 && err == nil
-}
-
 func (s *store) session(id string) (session, error) {
-	if !validID(id) {
+	if !sessionID.MatchString(id) {
 		return session{}, errors.New("invalid session ID")
 	}
 	b, err := os.ReadFile(filepath.Join(s.dir, "sessions", id, "session.json"))
@@ -594,14 +574,9 @@ func (s *store) end(as string, out io.Writer) error {
 	})
 }
 
-func (s *store) log(id string, follow bool, out io.Writer) error {
-	p := newPrinter(out, s.repo, follow)
-	if id == "" {
-		var err error
-		if id, err = s.awaitSession(follow, p); err != nil {
-			return err
-		}
-	}
+// log prints session id's transcript. When following, it streams new
+// messages until the session ends or stop is closed.
+func (s *store) log(id string, follow bool, p *printer, stop <-chan struct{}) error {
 	if _, err := s.session(id); err != nil {
 		return err
 	}
@@ -653,17 +628,18 @@ func (s *store) log(id string, follow bool, out io.Writer) error {
 			return p.ended(v)
 		}
 		p.status(v, dir)
-		time.Sleep(200 * time.Millisecond)
+		select {
+		case <-stop:
+			return p.clearStatus()
+		case <-time.After(200 * time.Millisecond):
+		}
 	}
 }
 
-// awaitSession returns the active session ID. When following, it waits
-// for a new session instead of failing or replaying an ended one. Any
-// session that replaces the stale one counts, even if it ended between polls.
-func (s *store) awaitSession(follow bool, p *printer) (string, error) {
-	if !follow {
-		return s.activeID()
-	}
+// awaitSession returns the active session ID. It waits for a new session
+// instead of failing or replaying an ended one. Any session that replaces
+// the stale one counts, even if it ended between polls.
+func (s *store) awaitSession(p *printer) (string, error) {
 	stale, first, notified := "", true, false
 	for {
 		v, err := s.current()
@@ -726,6 +702,7 @@ type printer struct {
 	lastAt   time.Time
 	idleSent bool
 	statusOn bool
+	watched  bool // saw the session active, so its end is news
 }
 
 func newPrinter(out io.Writer, repo string, follow bool) *printer {
@@ -803,6 +780,7 @@ func (p *printer) status(v session, dir string) {
 	if !p.live {
 		return
 	}
+	p.watched = true
 	if p.lastAt.IsZero() {
 		p.lastAt, _ = time.Parse(time.RFC3339Nano, v.StartedAt)
 	}
@@ -847,7 +825,7 @@ func (p *printer) ended(v session) error {
 		noun = "message"
 	}
 	summary := fmt.Sprintf("%d %s (%s %d, %s %d) in %s", total, noun, v.Writer, p.counts[v.Writer], v.Reader, p.counts[v.Reader], humanDuration(end.Sub(start)))
-	if p.live {
+	if p.watched {
 		notify("peer", "Session ended: "+summary)
 	}
 	_, err = fmt.Fprintf(p.out, "%s\n%s\n", p.paint(ansiDim, "── session ended at "+end.Local().Format("15:04:05")+" ──"), summary)
@@ -892,25 +870,62 @@ func (p *printer) links(text string) string {
 	})
 }
 
-func (s *store) history(out io.Writer) error {
+// sessions returns this checkout's sessions, newest first.
+func (s *store) sessions() ([]session, error) {
 	dirs, err := os.ReadDir(filepath.Join(s.dir, "sessions"))
 	if errors.Is(err, os.ErrNotExist) {
-		return nil
+		return nil, nil
 	}
 	if err != nil {
-		return err
+		return nil, err
 	}
 	var sessions []session
 	for _, d := range dirs {
-		if !d.IsDir() {
+		// Skip directories that are not sessions, such as ones left by
+		// older versions, and damaged ones, so the rest stay listed.
+		if !d.IsDir() || !sessionID.MatchString(d.Name()) {
 			continue
 		}
 		v, err := s.session(d.Name())
 		if err != nil {
-			return err
+			continue
 		}
 		sessions = append(sessions, v)
 	}
 	sort.Slice(sessions, func(i, j int) bool { return sessions[i].StartedAt > sessions[j].StartedAt })
-	return json.NewEncoder(out).Encode(sessions)
+	return sessions, nil
+}
+
+// count returns the number of messages in session id.
+func (s *store) count(id string) int {
+	b, _ := os.ReadFile(filepath.Join(s.dir, "sessions", id, "messages.jsonl"))
+	return bytes.Count(b, []byte("\n"))
+}
+
+// summary describes a session in one line, e.g.
+// "Tue 29 Sep 19:59  claude→codex  12 msgs  8m".
+func (s *store) summary(v session) string {
+	start, _ := time.Parse(time.RFC3339Nano, v.StartedAt)
+	end := time.Now()
+	if v.EndedAt != "" {
+		end, _ = time.Parse(time.RFC3339Nano, v.EndedAt)
+	}
+	return fmt.Sprintf("%s  %s→%s  %3d msgs  %s", start.Local().Format("Mon _2 Jan 15:04"), v.Writer, v.Reader, s.count(v.ID), humanDuration(end.Sub(start)))
+}
+
+func (s *store) history(out io.Writer) error {
+	sessions, err := s.sessions()
+	if err != nil {
+		return err
+	}
+	for _, v := range sessions {
+		state := "ended"
+		if v.EndedAt == "" {
+			state = "active"
+		}
+		if _, err := fmt.Fprintf(out, "%-17s  %s  %s\n", v.ID, s.summary(v), state); err != nil {
+			return err
+		}
+	}
+	return nil
 }
