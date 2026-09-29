@@ -30,9 +30,9 @@ Open one **local** chat in Claude Code Desktop's Code tab in the Git checkout, w
 /peer add CSV export to the reports page
 ```
 
-Claude becomes the writer, starts the session with `peer start --writer claude --reader codex`, which opens a new Codex Desktop chat in the same checkout with the reader prompt filled in. Press Enter in that chat; neither app sends a deep-linked prompt by itself. The agents then discuss the approach through `peer send` and `peer wait`, Claude implements it, Codex reviews the diff, and Claude ends the session. To watch their conversation, run `peer follow` in a terminal in the checkout, or run `peer` to pick a session.
+Claude becomes the writer and starts the session with `peer start --writer claude --reader codex`, which runs Codex headless (`codex exec`) in the same checkout. Ask for a headed reader (`peer start --headed`) to open a new Codex Desktop chat instead, with the reader prompt filled in; press Enter there, since neither app sends a deep-linked prompt by itself. The agents then discuss the approach through `peer send` and `peer wait`, Claude implements it, Codex reviews the diff, and Claude ends the session. To watch their conversation, run `peer follow` in a terminal in the checkout, or run `peer` to pick a session.
 
-To start from Codex instead, send `$peer <task>` in a local Codex chat. Codex becomes the writer and opens a Claude Code Desktop chat as the reader. The agent you send the task to is always the writer.
+To start from Codex instead, send `$peer <task>` in a local Codex chat. Codex becomes the writer and runs Claude Code headless (`claude -p`) as the reader, or opens a Claude Code Desktop chat with `--headed`. The agent you send the task to is always the writer.
 
 To pair with GitHub Copilot, open a Copilot app session in the **local repository** (or use Copilot CLI or VS Code agent mode) and send Claude `/peer pair with Copilot: add CSV export`. Claude starts with `peer start --writer claude --reader copilot` and gives you the prompt to send Copilot. If Copilot's local sandbox blocks writes to `~/.peer/`, allow that directory in its sandbox policy or turn off the local sandbox for this session.
 
@@ -40,7 +40,7 @@ Both agents must use the same checkout and be able to run `peer`.
 
 ## CLI
 
-Run `peer` with no arguments in a terminal to pick a session: it lists active sessions in every checkout, then the 10 latest ended sessions of the current checkout. Use ↑/↓ (or j/k) to select and Enter to open. An active session streams live, and an ended one shows its transcript and summary. Esc returns to the list, and q or Ctrl-C quits. The list works outside a checkout too; then it shows only active sessions. An opened transcript is printed on the normal screen, so it stays in the terminal's scrollback after you return to the list.
+Run `peer` with no arguments in a terminal to pick a session: it lists active sessions in every checkout, then the 10 latest ended sessions of the current checkout. Use ↑/↓ (or j/k) to select and Enter to open. An active session streams live, and an ended one shows its transcript and summary. In a session with a headless reader, Tab switches between the transcript and the reader's log. Esc returns to the list, and q or Ctrl-C quits. The list works outside a checkout too; then it shows only active sessions. An opened transcript is printed on the normal screen, so it stays in the terminal's scrollback after you return to the list.
 
 Other commands run from anywhere inside the shared Git checkout:
 
@@ -62,7 +62,7 @@ peer log SESSION_ID
 peer log SESSION_ID > transcript.txt
 ```
 
-The skill only runs `peer skills flow`, so the workflow always matches the installed CLI. If an agent reports that `peer` or `skills flow` is unknown, install or update the CLI. `start` opens a new reader chat in the checkout with its prompt filled in when the reader is `codex` or `claude`; for other readers, the flow tells the writer to give you the prompt.
+The skill only runs `peer skills flow`, so the workflow always matches the installed CLI. If an agent reports that `peer` or `skills flow` is unknown, install or update the CLI. When the reader is `codex` or `claude`, `start` runs its CLI headless in the checkout: Codex runs in its `workspace-write` sandbox with the session store added, Claude gets only Read, Grep, Glob, Skill and Bash limited to `peer` and read-only `git` commands, with any other request denied instead of prompting, and both are told not to edit files. A headless reader is pinned to its session through `PEER_SESSION` and stops once that session ends. Its output and exit status go to `reader.log` in the session directory; in `peer`, press Tab in a session to switch between the transcript and that log. `start --headed` opens a new desktop chat with the prompt filled in instead, but only when the reader's app is already open (checked by bundle ID on macOS); a closed app is not launched and the reader runs headless. For other readers, the flow tells the writer to give you the prompt.
 
 Participant names are distinct lowercase IDs starting with a letter and containing only `a-z`, `0-9`, `-`, or `_` (up to 64 characters). You can pair two sessions of the same app by naming them `codex-main` and `codex-review`. `wait` returns one JSON message and marks it delivered, or `{"status":"timeout"}` after 90 seconds, below Claude Code's two-minute Bash limit. A completed chat cannot be sent to; end it before starting another task in the checkout.
 

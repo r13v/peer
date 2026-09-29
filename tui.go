@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bufio"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -20,6 +22,7 @@ const (
 	keyEnter
 	keyEsc
 	keyQuit
+	keyTab
 )
 
 const (
@@ -176,12 +179,35 @@ func cut(s string, width int) string {
 }
 
 // view follows one session until Esc. An ended session shows its
-// transcript and summary and stays until Esc too.
+// transcript and summary and stays until Esc too. When the reader runs
+// headless, Tab switches between the transcript and the reader's log.
 func view(e entry, keys <-chan key, out io.Writer) error {
 	p := newPrinter(out, e.s.repo, true)
-	fmt.Fprintf(out, "\n%s\n\n", p.paint(ansiDim, "── "+filepath.Base(e.v.Repo)+" "+e.v.ID+" · Esc back ──"))
-	stop, done := make(chan struct{}), make(chan error, 1)
-	go func() { done <- e.s.log(e.v.ID, true, p, stop) }()
+	readerLog := filepath.Join(e.s.dir, "sessions", e.v.ID, "reader.log")
+	_, err := os.Stat(readerLog)
+	headless, help := err == nil, " · Esc back ──"
+	if headless {
+		help = " · Tab reader log · Esc back ──"
+	}
+	fmt.Fprintf(out, "\n%s\n\n", p.paint(ansiDim, "── "+filepath.Base(e.v.Repo)+" "+e.v.ID+help))
+	showLog := false
+	var stop chan struct{}
+	var done chan error
+	follow := func() {
+		stop, done = make(chan struct{}), make(chan error, 1)
+		if showLog {
+			go func(stop <-chan struct{}, done chan<- error) { done <- followReaderLog(readerLog, p, stop) }(stop, done)
+		} else {
+			go func(stop <-chan struct{}, done chan<- error) { done <- e.s.log(e.v.ID, true, p, stop) }(stop, done)
+		}
+	}
+	halt := func() {
+		close(stop)
+		if done != nil {
+			<-done
+		}
+	}
+	follow()
 	for {
 		select {
 		case err := <-done:
@@ -190,13 +216,21 @@ func view(e entry, keys <-chan key, out io.Writer) error {
 			}
 			done = nil // the session ended; keep showing it until Esc
 		case k, ok := <-keys:
+			if ok && k == keyTab && headless {
+				halt()
+				showLog = !showLog
+				title := "transcript"
+				if showLog {
+					title = e.v.Reader + " log"
+				}
+				fmt.Fprintf(out, "\n%s\n\n", p.paint(ansiDim, "── "+title+" · Tab switch · Esc back ──"))
+				follow()
+				continue
+			}
 			if ok && k != keyEsc && k != keyQuit {
 				continue
 			}
-			close(stop)
-			if done != nil {
-				<-done
-			}
+			halt()
 			fmt.Fprintln(out)
 			if !ok || k == keyQuit {
 				return errQuit
@@ -204,6 +238,83 @@ func view(e entry, keys <-chan key, out io.Writer) error {
 			return nil
 		}
 	}
+}
+
+// followReaderLog prints the headless reader's log as it grows until
+// stop is closed. Only complete lines are printed.
+func followReaderLog(path string, p *printer, stop <-chan struct{}) error {
+	var offset int64
+	for {
+		f, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		if _, err := f.Seek(offset, io.SeekStart); err != nil {
+			f.Close()
+			return err
+		}
+		r := bufio.NewReader(f)
+		for {
+			line, err := r.ReadBytes('\n')
+			if err != nil {
+				break
+			}
+			offset += int64(len(line))
+			if text := readerLogLine(line); text != "" {
+				fmt.Fprintln(p.out, p.links(text))
+			}
+		}
+		f.Close()
+		select {
+		case <-stop:
+			return nil
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
+}
+
+// readerLogLine turns one log line into display text. Codex writes plain
+// text; Claude writes stream-json events, of which only its text, tool
+// calls and final result are shown.
+func readerLogLine(line []byte) string {
+	var ev struct {
+		Type    string `json:"type"`
+		Result  string `json:"result"`
+		Message struct {
+			Content []struct {
+				Type  string          `json:"type"`
+				Text  string          `json:"text"`
+				Name  string          `json:"name"`
+				Input json.RawMessage `json:"input"`
+			} `json:"content"`
+		} `json:"message"`
+	}
+	if json.Unmarshal(line, &ev) != nil || ev.Type == "" {
+		return strings.TrimRight(string(line), "\r\n")
+	}
+	switch ev.Type {
+	case "assistant":
+		var parts []string
+		for _, c := range ev.Message.Content {
+			switch c.Type {
+			case "text":
+				parts = append(parts, c.Text)
+			case "tool_use":
+				var in struct {
+					Command string `json:"command"`
+				}
+				arg := string(c.Input)
+				if json.Unmarshal(c.Input, &in) == nil && in.Command != "" {
+					arg = in.Command
+				}
+				parts = append(parts, "→ "+c.Name+" "+cut(arg, 200))
+			}
+		}
+		return strings.Join(parts, "\n")
+	case "result":
+		return "result: " + ev.Result
+	}
+	return ""
 }
 
 // readKeys decodes key presses from a raw terminal. A lone Esc is told
@@ -232,6 +343,8 @@ func readKeys(f *os.File) <-chan key {
 				k = keyDown
 			case '\r', '\n':
 				k = keyEnter
+			case '\t':
+				k = keyTab
 			case 'q', 3: // 3 is Ctrl-C
 				k = keyQuit
 			case 0x1b:

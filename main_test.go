@@ -16,6 +16,8 @@ import (
 
 func TestMain(m *testing.M) {
 	openURL = func(string) error { return nil }
+	appRunning = func(string) bool { return false }
+	startReader = func([]string, string, string, string) error { return nil }
 	waitTimeout = 0
 	os.Exit(m.Run())
 }
@@ -209,41 +211,90 @@ func TestPairSession(t *testing.T) {
 
 func TestOpenReader(t *testing.T) {
 	var links []string
+	var launched [][]string
+	var logs []string
+	running := false
 	openURL = func(link string) error { links = append(links, link); return nil }
-	t.Cleanup(func() { openURL = func(string) error { return nil } })
-	for _, tc := range []struct{ writer, reader, host, pathKey, promptKey string }{
-		{"claude", "codex", "threads", "path", "prompt"},
-		{"codex", "claude", "code", "folder", "q"},
-		{"claude", "copilot", "", "", ""},
+	appRunning = func(string) bool { return running }
+	startReader = func(argv []string, dir, logPath, id string) error {
+		launched, logs = append(launched, argv), append(logs, logPath)
+		return nil
+	}
+	t.Cleanup(func() {
+		openURL = func(string) error { return nil }
+		appRunning = func(string) bool { return false }
+		startReader = func([]string, string, string, string) error { return nil }
+	})
+	for _, tc := range []struct {
+		writer, reader, host, pathKey, promptKey string
+		headed, running                          bool
+	}{
+		{"claude", "codex", "threads", "path", "prompt", true, true},
+		{"codex", "claude", "code", "folder", "q", true, true},
+		{"claude", "codex", "", "", "", false, true},
+		{"claude", "codex", "", "", "", true, false},
+		{"codex", "claude", "", "", "", false, false},
+		{"claude", "copilot", "", "", "", true, true},
 	} {
-		links = nil
+		links, launched, logs, running = nil, nil, nil, tc.running
 		repo := filepath.Join(t.TempDir(), "my repo & co")
 		if out, err := exec.Command("git", "init", "-q", repo).CombinedOutput(); err != nil {
 			t.Fatalf("git init: %v: %s", err, out)
 		}
 		t.Setenv("PEER_HOME", filepath.Join(t.TempDir(), "data"))
-		started, err := invoke(repo, "", "start", "--writer", tc.writer, "--reader", tc.reader)
+		args := []string{"start", "--writer", tc.writer, "--reader", tc.reader}
+		if tc.headed {
+			args = append(args, "--headed")
+		}
+		started, err := invoke(repo, "", args...)
 		var v session
 		if err != nil || json.Unmarshal([]byte(started), &v) != nil {
 			t.Fatalf("start output is not one session: %q, %v", started, err)
 		}
-		if tc.host == "" {
-			if len(links) != 0 {
-				t.Fatalf("opened a link for %s: %q", tc.reader, links)
+		resolved, _ := filepath.EvalSymlinks(repo)
+		if tc.reader == "copilot" {
+			if len(links)+len(launched) != 0 {
+				t.Fatalf("started copilot: %q %q", links, launched)
 			}
 			continue
 		}
-		if len(links) != 1 {
-			t.Fatalf("want one %s link, got %q", tc.reader, links)
+		if tc.host == "" {
+			if len(links) != 0 || len(launched) != 1 || launched[0][0] != tc.reader || filepath.Base(logs[0]) != "reader.log" || filepath.Base(filepath.Dir(logs[0])) != v.ID {
+				t.Fatalf("%+v: want one headless %s, got links %q, argv %q, logs %q", tc, tc.reader, links, launched, logs)
+			}
+			prompt := launched[0][len(launched[0])-1]
+			if !strings.Contains(prompt, "participant "+tc.reader) || !strings.Contains(prompt, "Nobody reads this chat") {
+				t.Fatalf("wrong headless prompt: %q", prompt)
+			}
+			if tc.reader == "codex" && !strings.Contains(strings.Join(launched[0], " "), "-C "+resolved) {
+				t.Fatalf("codex runs outside the checkout: %q", launched[0])
+			}
+			continue
+		}
+		if len(links) != 1 || len(launched) != 0 {
+			t.Fatalf("want one %s link, got %q, argv %q", tc.reader, links, launched)
 		}
 		u, err := url.Parse(links[0])
 		if err != nil || u.Scheme != tc.reader || u.Host != tc.host || u.Path != "/new" {
 			t.Fatalf("wrong %s link: %s, %v", tc.reader, links[0], err)
 		}
-		resolved, _ := filepath.EvalSymlinks(repo)
 		prompt := u.Query().Get(tc.promptKey)
 		if u.Query().Get(tc.pathKey) != resolved || !strings.Contains(prompt, "participant "+tc.reader) || strings.HasPrefix(prompt, "/") {
 			t.Fatalf("wrong %s query: %v", tc.reader, u.Query())
+		}
+	}
+}
+
+func TestReaderLogLine(t *testing.T) {
+	for line, want := range map[string]string{
+		"codex plain progress\n":             "codex plain progress",
+		`{"type":"system","subtype":"init"}`: "",
+		`{"type":"assistant","message":{"content":[{"type":"text","text":"Reviewing"},{"type":"tool_use","name":"Bash","input":{"command":"peer wait --as claude"}}]}}`: "Reviewing\n→ Bash peer wait --as claude",
+		`{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"main.go"}}]}}`:                                                `→ Read {"file_path":"main.go"}`,
+		`{"type":"result","result":"done"}`: "result: done",
+	} {
+		if got := readerLogLine([]byte(line)); got != want {
+			t.Fatalf("readerLogLine(%q) = %q, want %q", line, got, want)
 		}
 	}
 }
@@ -544,5 +595,77 @@ func TestRenderKeepsSelectionVisible(t *testing.T) {
 		if len([]rune(line)) >= 30 {
 			t.Fatalf("line not cut to width: %q", line)
 		}
+	}
+}
+
+func TestPinnedReaderIgnoresNextSession(t *testing.T) {
+	repo := testRepo(t)
+	started, err := invoke(repo, "", "start", "--writer", "claude", "--reader", "codex")
+	var first session
+	if err != nil || json.Unmarshal([]byte(started), &first) != nil {
+		t.Fatalf("start: %q, %v", started, err)
+	}
+	if _, err := invoke(repo, "", "end", "--as", "claude"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := invoke(repo, "", "start", "--writer", "codex", "--reader", "claude"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := invoke(repo, "hello", "send", "--as", "claude"); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PEER_SESSION", first.ID)
+	if got, err := invoke(repo, "", "wait", "--as", "codex"); err == nil || !strings.Contains(err.Error(), "ended") {
+		t.Fatalf("pinned reader joined the next session: %q, %v", got, err)
+	}
+	if _, err := invoke(repo, "", "start", "--writer", "claude", "--reader", "codex"); err == nil {
+		t.Fatal("a pinned session hid the active one from start")
+	}
+	if _, err := invoke(repo, "", "end", "--as", "codex"); err == nil {
+		t.Fatal("a pinned reader ended the active session")
+	}
+	t.Setenv("PEER_SESSION", "")
+	if _, err := invoke(repo, "", "end", "--as", "codex"); err != nil {
+		t.Fatal(err)
+	}
+	var launched string
+	startReader = func(argv []string, dir, logPath, id string) error { launched = id; return nil }
+	t.Cleanup(func() { startReader = func([]string, string, string, string) error { return nil } })
+	t.Setenv("PEER_SESSION", first.ID)
+	started, err = invoke(repo, "", "start", "--writer", "claude", "--reader", "codex")
+	var third session
+	if err != nil || json.Unmarshal([]byte(started), &third) != nil || launched != third.ID {
+		t.Fatalf("reader pinned to %q, want new session %q: %v", launched, third.ID, err)
+	}
+}
+
+func TestViewTogglesReaderLog(t *testing.T) {
+	repo := testRepo(t)
+	started, err := invoke(repo, "", "start", "--writer", "claude", "--reader", "codex")
+	var v session
+	if err != nil || json.Unmarshal([]byte(started), &v) != nil {
+		t.Fatalf("start: %q, %v", started, err)
+	}
+	if _, err := invoke(repo, "proposal", "send", "--as", "claude"); err != nil {
+		t.Fatal(err)
+	}
+	s, err := openStore(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(s.dir, "sessions", v.ID, "reader.log"), []byte("codex thinking\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	keys, out, done := make(chan key), &bytes.Buffer{}, make(chan error, 1)
+	go func() { done <- view(entry{s, v}, keys, out) }()
+	keys <- keyTab
+	time.Sleep(300 * time.Millisecond)
+	keys <- keyEsc
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	got := out.String()
+	if i, j := strings.Index(got, "proposal"), strings.Index(got, "codex thinking"); i < 0 || j < i || !strings.Contains(got, "Tab reader log") || !strings.Contains(got, "codex log") {
+		t.Fatalf("Tab did not switch from the transcript to the reader log:\n%s", got)
 	}
 }
