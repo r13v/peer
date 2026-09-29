@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/url"
 	"os"
 	"os/exec"
@@ -188,7 +187,7 @@ func TestNewPrinterIgnoresDevNull(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer f.Close()
-	if p := newPrinter(f, t.TempDir(), true); p.color || p.live {
+	if p := newPrinter(f, t.TempDir()); p.color {
 		t.Fatal("/dev/null was treated as a terminal")
 	}
 }
@@ -202,29 +201,6 @@ func TestBodyMarkdown(t *testing.T) {
 	}
 }
 
-func TestReadKeys(t *testing.T) {
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer r.Close()
-	keys := readKeys(r)
-	for _, tc := range []struct {
-		in   string
-		want key
-	}{{"\x1b[A", keyUp}, {"\x1bOB", keyDown}, {"\x1b[", keyOther}, {"q", keyQuit}, {"\x1b", keyEsc}, {"\r", keyEnter}, {"j", keyDown}, {"\x03", keyQuit}, {"x", keyClose}} {
-		w.WriteString(tc.in)
-		if got := <-keys; got != tc.want {
-			t.Fatalf("%q: got key %d, want %d", tc.in, got, tc.want)
-		}
-	}
-	w.Close()
-	if _, ok := <-keys; ok {
-		t.Fatal("keys stayed open after input closed")
-	}
-}
-
-// startRoom starts room name and returns it as start printed it.
 func startRoom(t *testing.T, repo, name, writer, reader string) session {
 	t.Helper()
 	started, err := invoke(repo, "", "start", name, "--writer", writer, "--reader", reader)
@@ -417,7 +393,7 @@ func TestOpenReader(t *testing.T) {
 	running := false
 	openURL = func(link string) error { links = append(links, link); return nil }
 	appRunning = func(string) bool { return running }
-	startReader = func(argv []string, dir, logPath string) error {
+	startReader = func(argv []string, _, logPath string) error {
 		launched, logs = append(launched, argv), append(logs, logPath)
 		return nil
 	}
@@ -525,72 +501,6 @@ func TestWaitReceivesLaterMessage(t *testing.T) {
 	}
 }
 
-func TestFollowStopsWhenSessionEnds(t *testing.T) {
-	repo := testRepo(t)
-	v := startRoom(t, repo, "follow", "claude", "codex")
-	done := make(chan string)
-	go func() {
-		got, err := invoke(repo, "", "follow")
-		if err != nil {
-			t.Error(err)
-		}
-		done <- got
-	}()
-	time.Sleep(300 * time.Millisecond)
-	if _, err := invoke(repo, "see main.go:3", "send", v.ID, "--as", "claude"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := invoke(repo, "", "end", v.ID, "--as", "claude"); err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case got := <-done:
-		if !strings.Contains(got, "claude → codex\nsee main.go:3\n") || !strings.Contains(got, "session ended") || !strings.Contains(got, "1 message (claude 1, codex 0) in ") || strings.Contains(got, "\x1b") {
-			t.Fatalf("unexpected follow output: %q", got)
-		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("follow kept running after the session ended")
-	}
-}
-
-func TestFollowWaitsForNextSession(t *testing.T) {
-	repo := testRepo(t)
-	old := startRoom(t, repo, "old", "claude", "codex")
-	if _, err := invoke(repo, "old task", "send", old.ID, "--as", "claude"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := invoke(repo, "", "end", old.ID, "--as", "claude"); err != nil {
-		t.Fatal(err)
-	}
-	if got, err := invoke(repo, "", "log", old.ID); err != nil || !strings.Contains(got, "old task") {
-		t.Fatalf("log of an ended session: %q, %v", got, err)
-	}
-	done := make(chan string)
-	go func() {
-		got, err := invoke(repo, "", "follow")
-		if err != nil {
-			t.Error(err)
-		}
-		done <- got
-	}()
-	time.Sleep(300 * time.Millisecond)
-	v := startRoom(t, repo, "new", "codex", "claude")
-	if _, err := invoke(repo, "new task", "send", v.ID, "--as", "codex"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := invoke(repo, "", "end", v.ID, "--as", "codex"); err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case got := <-done:
-		if !strings.HasPrefix(got, "waiting for a session to start") || !strings.Contains(got, "new task") || strings.Contains(got, "old task") {
-			t.Fatalf("unexpected follow output: %q", got)
-		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("follow did not pick up the next session")
-	}
-}
-
 func TestWaitMarksCursorBeforeFirstMessage(t *testing.T) {
 	repo := testRepo(t)
 	v := startRoom(t, repo, "cursor", "claude", "codex")
@@ -631,158 +541,5 @@ func TestPickerLists(t *testing.T) {
 	}
 	if entries, err := listEntries(nil); err != nil || len(entries) != 2 {
 		t.Fatalf("outside a checkout, want only active rooms: %+v, %v", entries, err)
-	}
-}
-
-func TestRenderKeepsSelectionVisible(t *testing.T) {
-	repo := testRepo(t)
-	for i := 0; i < 6; i++ {
-		v := startRoom(t, repo, "r", "claude", "codex")
-		if _, err := invoke(repo, "", "end", v.ID, "--as", "claude"); err != nil {
-			t.Fatal(err)
-		}
-	}
-	local, err := openStore(repo)
-	if err != nil {
-		t.Fatal(err)
-	}
-	entries, err := listEntries(local)
-	if err != nil || len(entries) != 6 {
-		t.Fatalf("want 6 entries: %d, %v", len(entries), err)
-	}
-	var out bytes.Buffer
-	render(&out, entries, 5, local, 30, 4)
-	lines := strings.Split(strings.TrimPrefix(out.String(), clearScreen), "\n")
-	if len(lines) != 4 || !strings.HasPrefix(lines[3], "› ") {
-		t.Fatalf("selected row not on a 4-line screen: %q", lines)
-	}
-	for _, line := range lines {
-		if len([]rune(line)) >= 30 {
-			t.Fatalf("line not cut to width: %q", line)
-		}
-	}
-}
-
-func TestViewTogglesReaderLog(t *testing.T) {
-	repo := testRepo(t)
-	v := startRoom(t, repo, "view", "claude", "codex")
-	if _, err := invoke(repo, "proposal", "send", v.ID, "--as", "claude"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := invoke(repo, "", "end", v.ID, "--as", "claude"); err != nil {
-		t.Fatal(err)
-	}
-	s, err := openStore(repo)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if v, err = s.refresh(v.ID); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(s.dir, "sessions", v.ID, "reader.log"), []byte("codex thinking\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	keys, out, done := make(chan key), &bytes.Buffer{}, make(chan error, 1)
-	go func() { done <- view(entry{s, v}, keys, out) }()
-	for _, k := range []key{keyTab, keyTab} {
-		time.Sleep(300 * time.Millisecond)
-		keys <- k
-	}
-	time.Sleep(300 * time.Millisecond)
-	keys <- keyEsc
-	if err := <-done; err != nil {
-		t.Fatal(err)
-	}
-	got := out.String()
-	if i, j := strings.Index(got, "proposal"), strings.Index(got, "codex thinking"); i < 0 || j < i || !strings.Contains(got, "Tab reader log") || !strings.Contains(got, "codex log") {
-		t.Fatalf("Tab did not switch from the transcript to the reader log:\n%s", got)
-	}
-	last := got[strings.LastIndex(got, clearScreen):]
-	if strings.Contains(last, "codex thinking") || !strings.Contains(last, "proposal") || !strings.Contains(last, "1 message (claude 1, codex 0)") || strings.Contains(got, "\x1b[3J") {
-		t.Fatalf("second Tab did not redraw the transcript alone with fresh counts:\n%q", last)
-	}
-}
-
-func TestRenderShowsFullRoomIDs(t *testing.T) {
-	repo := testRepo(t)
-	name := "support-booking-errors-long"
-	startRoom(t, repo, name, "claude", "codex")
-	startRoom(t, repo, name, "claude", "codex")
-	local, err := openStore(repo)
-	if err != nil {
-		t.Fatal(err)
-	}
-	entries, err := listEntries(local)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var out bytes.Buffer
-	render(&out, entries, 0, local, 200, 10)
-	if !strings.Contains(out.String(), name+"-2 ") || !strings.Contains(out.String(), name+" ") {
-		t.Fatalf("long room IDs cut:\n%s", out.String())
-	}
-}
-
-func TestAwaitSessionPrefersActive(t *testing.T) {
-	repo := testRepo(t)
-	s, err := openStore(repo)
-	if err != nil {
-		t.Fatal(err)
-	}
-	done := make(chan string)
-	go func() {
-		id, err := s.awaitSession(newPrinter(io.Discard, repo, true))
-		if err != nil {
-			t.Error(err)
-		}
-		done <- id
-	}()
-	time.Sleep(100 * time.Millisecond)
-	// Both rooms appear between two polls; the one still active wins.
-	if err := s.locked(func() error {
-		a := filepath.Join(s.dir, "sessions", "a")
-		b := filepath.Join(s.dir, "sessions", "b")
-		now := time.Now().UTC()
-		for _, v := range []session{{ID: "a", StartedAt: now.Format(time.RFC3339Nano)}, {ID: "b", StartedAt: now.Add(time.Second).Format(time.RFC3339Nano), EndedAt: now.Add(2 * time.Second).Format(time.RFC3339Nano)}} {
-			dir := map[string]string{"a": a, "b": b}[v.ID]
-			if err := os.MkdirAll(dir, 0700); err != nil {
-				return err
-			}
-			if err := writeJSON(filepath.Join(dir, "session.json"), v); err != nil {
-				return err
-			}
-		}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case id := <-done:
-		if id != "a" {
-			t.Fatalf("follow chose %q over the active room", id)
-		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("awaitSession did not return")
-	}
-}
-
-func TestRenderShowsEndedReason(t *testing.T) {
-	repo := testRepo(t)
-	v := startRoom(t, repo, "stuck", "claude", "codex")
-	local, err := openStore(repo)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := local.close(v.ID); err != nil {
-		t.Fatal(err)
-	}
-	entries, err := listEntries(local)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var out bytes.Buffer
-	render(&out, entries, 0, local, 80, 10)
-	if !strings.Contains(out.String(), "stuck                     closed in peer") {
-		t.Fatalf("reason hidden at 80 columns:\n%s", out.String())
 	}
 }

@@ -6,4 +6,4 @@ Discuss the task and approach with the reader before editing. Send messages thro
 
 Implement the agreed approach. Ask the reader to inspect the diff and report concrete findings with file paths and line numbers. Fix confirmed issues and request another review. If you disagree, explain the evidence in the dialogue; ask the user when the disagreement affects the task's direction.
 
-After review closes, send the result and unresolved points to the reader, then run `peer end ID --as YOUR_NAME`. The user can watch the dialogue with `peer follow` or pick a session with `peer`, and later list rooms with `peer history` and read one with `peer log ID`.
+After review closes, send the result and unresolved points to the reader, then run `peer end ID --as YOUR_NAME`. The user can watch the dialogue in `peer`, and later list rooms with `peer history` and read one with `peer log ID`.

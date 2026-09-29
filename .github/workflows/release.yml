@@ -23,10 +23,12 @@ jobs:
         with:
           go-version-file: go.mod
           cache: false
-      - name: Check
-        run: |
-          go test ./...
-          go vet ./...
+      - name: Lint
+        uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.13.2
+      - name: Test
+        run: make test
       - name: Build macOS archives
         run: |
           mkdir -p dist
