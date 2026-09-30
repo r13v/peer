@@ -723,7 +723,10 @@ func (m *model) restyle() {
 	m.renderLog()
 }
 
-func (m *model) author(v session, name string) string {
+// author names a message's sender or recipient; withAgent appends the
+// member's app, dimmed, after its role.
+func (m *model) author(v session, name string, withAgent bool) string {
+	st := readerStyle
 	switch name {
 	case everyone:
 		return "all"
@@ -732,9 +735,13 @@ func (m *model) author(v session, name string) string {
 	case system:
 		return dim.Render(name)
 	case writer:
-		return writerStyle.Render(v.label(name))
+		st = writerStyle
 	}
-	return readerStyle.Render(v.label(name))
+	out := st.Render(name)
+	if mem := v.member(name); withAgent && mem != nil && mem.Agent != "" {
+		out += " " + dim.Render(mem.Agent)
+	}
+	return out
 }
 
 func (m *model) renderChat() {
@@ -753,7 +760,7 @@ func (m *model) renderChat() {
 			lines = append(lines, dim.Render("── "+d+" ──"), "")
 		}
 		m.room.starts = append(m.room.starts, len(lines))
-		lines = append(lines, dim.Render(at.Format("15:04:05"))+"  "+m.author(v, msg.From)+dim.Render(" → ")+m.author(v, msg.To))
+		lines = append(lines, dim.Render(at.Format("15:04:05"))+"  "+m.author(v, msg.From, true)+dim.Render(" → ")+m.author(v, msg.To, false))
 		lines = append(lines, strings.Split(m.body(&m.renderer, msg.ID, msg.Text, w), "\n")...)
 		lines = append(lines, "")
 	}
@@ -842,7 +849,7 @@ func (m *model) renderLog() {
 		switch e.Kind {
 		case logText:
 			gap()
-			lines = append(lines, at+m.author(v, m.room.logRole))
+			lines = append(lines, at+m.author(v, m.room.logRole, true))
 			lines = append(lines, strings.Split(m.body(&m.logGlam, "log\x00"+e.Text, e.Text, w), "\n")...)
 		case logTool:
 			gap()

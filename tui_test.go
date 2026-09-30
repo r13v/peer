@@ -59,6 +59,9 @@ func TestTUIShowsTranscriptAndReaderLog(t *testing.T) {
 	if m.showLog || strings.Contains(m.render(), "reader log") {
 		t.Fatal("l did not hide the reader log")
 	}
+	if chat := ansi.Strip(strings.Join(m.chat.lines, "\n")); !strings.Contains(chat, "writer claude → all") || !strings.Contains(chat, "peer → writer\n") {
+		t.Fatalf("headers do not name the sender's agent only:\n%s", chat)
+	}
 	if m.chat.query != "proposal" || len(m.chat.matches) != 1 || m.chat.cur != 0 {
 		t.Fatalf("search did not find the message: %q %+v %d", m.chat.query, m.chat.matches, m.chat.cur)
 	}

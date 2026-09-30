@@ -301,12 +301,15 @@ func (p *printer) message(v session, m message) error {
 	}
 	_, err = fmt.Fprintf(p.out, "%s  %s %s %s\n%s\n\n",
 		p.paint(ansiDim, at.Format("15:04:05")),
-		p.author(v, m.From), p.paint(ansiDim, "→"), p.author(v, m.To),
+		p.author(v, m.From, true), p.paint(ansiDim, "→"), p.author(v, m.To, false),
 		p.body(m.Text))
 	return err
 }
 
-func (p *printer) author(v session, name string) string {
+// author names a message's sender or recipient; withAgent appends the
+// member's app, dimmed, after its role.
+func (p *printer) author(v session, name string, withAgent bool) string {
+	code := ansiReader
 	switch name {
 	case everyone:
 		return "all"
@@ -315,9 +318,13 @@ func (p *printer) author(v session, name string) string {
 	case system:
 		return p.paint(ansiDim, name)
 	case writer:
-		return p.paint(ansiWriter, v.label(name))
+		code = ansiWriter
 	}
-	return p.paint(ansiReader, v.label(name))
+	out := p.paint(code, name)
+	if m := v.member(name); withAgent && m != nil && m.Agent != "" {
+		out += " " + p.paint(ansiDim, m.Agent)
+	}
+	return out
 }
 
 // body indents the text and highlights `code`, **bold** and list markers.
