@@ -139,7 +139,7 @@ func newKeyMap() keyMap {
 		Down:     b([]string{"j", "down"}, "j/↓", "down"),
 		Tab:      b([]string{"tab"}, "Tab", "next pane"),
 		Open:     b([]string{"enter"}, "Enter", "open room"),
-		Log:      b([]string{"l"}, "l", "toggle reader log"),
+		Log:      b([]string{"l"}, "l", "toggle member log"),
 		Rooms:    b([]string{"s"}, "s", "toggle rooms"),
 		Markdown: b([]string{"m"}, "m", "markdown / plain"),
 		Theme:    b([]string{"T"}, "T", "next theme"),
@@ -293,7 +293,7 @@ type room struct {
 	msgOff  int64
 	logs    []string
 	logOff  int64
-	hasLog  bool
+	logRole string // the member whose log is shown, or "" if none has one
 	status  string
 	starts  []int // first chat line of each message
 	pending bool  // a room is selected but not read yet
@@ -394,8 +394,8 @@ func (m *model) poll() tea.Cmd {
 	}
 }
 
-// readRoom returns r with the messages and reader log lines written
-// since it was last read.
+// readRoom returns r with the messages and member log lines written
+// since it was last read. The log is the first launched member's.
 func readRoom(r room) (*room, error) {
 	v, err := r.e.s.refresh(r.e.v.ID)
 	if err != nil {
@@ -417,18 +417,30 @@ func readRoom(r room) (*room, error) {
 		r.msgs = append(r.msgs, msg)
 	}
 	r.msgOff = off
-	lines, off, exists, err := readLines(filepath.Join(dir, "reader.log"), r.logOff)
-	if err != nil {
-		return nil, err
-	}
-	r.logs = slices.Clone(r.logs)
-	links := &printer{repo: v.Repo, color: true}
-	for _, line := range lines {
-		if text := readerLogLine(line); text != "" {
-			r.logs = append(r.logs, links.links(text))
+	logRole := ""
+	for _, role := range v.members()[1:] {
+		if _, err := os.Stat(r.e.s.logPath(v.ID, role)); err == nil {
+			logRole = role
+			break
 		}
 	}
-	r.logOff, r.hasLog = off, exists
+	if logRole != r.logRole {
+		r.logs, r.logOff, r.logRole = nil, 0, logRole
+	}
+	if logRole != "" {
+		lines, off, _, err := readLines(r.e.s.logPath(v.ID, logRole), r.logOff)
+		if err != nil {
+			return nil, err
+		}
+		r.logs = slices.Clone(r.logs)
+		links := &printer{repo: v.Repo, color: true}
+		for _, line := range lines {
+			if text := memberLogLine(line); text != "" {
+				r.logs = append(r.logs, links.links(text))
+			}
+		}
+		r.logOff = off
+	}
 	r.e.v, r.status, r.loaded, r.pending = v, roomStatus(v, dir), true, false
 	return &r, nil
 }
@@ -473,7 +485,12 @@ func roomStatus(v session, dir string) string {
 		return "ended"
 	}
 	var parts []string
-	for _, name := range v.members() {
+	for _, m := range v.Members {
+		name := m.Role
+		if m.Exited {
+			parts = append(parts, name+" exited")
+			continue
+		}
 		since, _ := time.Parse(time.RFC3339Nano, v.StartedAt)
 		if st, err := os.Stat(filepath.Join(dir, "cursor-"+name)); err == nil {
 			if time.Since(st.ModTime()) < 2*time.Second {
@@ -568,7 +585,7 @@ func (m *model) choose(i int) {
 func (m *model) apply(r *room) tea.Cmd {
 	wasActive := m.room.loaded && m.room.e.v.EndedAt == ""
 	grew := len(r.msgs) != len(m.room.msgs) || r.e.v.EndedAt != m.room.e.v.EndedAt || !m.room.loaded
-	logGrew := len(r.logs) != len(m.room.logs) || r.hasLog != m.room.hasLog || !m.room.loaded
+	logGrew := len(r.logs) != len(m.room.logs) || r.logRole != m.room.logRole || !m.room.loaded
 	r.starts = m.room.starts // a render since the poll may have moved them
 	m.room = *r
 	if grew {
@@ -605,8 +622,10 @@ func (m *model) tally() string {
 	for _, name := range v.members() {
 		parts = append(parts, fmt.Sprintf("%s %d", name, counts[name]))
 	}
-	if counts[human] > 0 {
-		parts = append(parts, fmt.Sprintf("%s %d", human, counts[human]))
+	for _, name := range []string{human, system} {
+		if counts[name] > 0 {
+			parts = append(parts, fmt.Sprintf("%s %d", name, counts[name]))
+		}
 	}
 	return fmt.Sprintf("%d %s (%s) in %s", len(m.room.msgs), noun, strings.Join(parts, ", "), humanDuration(end.Sub(start)))
 }
@@ -655,11 +674,12 @@ func (m *model) author(v session, name string) string {
 		return "all"
 	case human:
 		return humanStyle.Render(name)
+	case system:
+		return dim.Render(name)
+	case writer:
+		return writerStyle.Render(v.label(name))
 	}
-	if name == v.Writer {
-		return writerStyle.Render(name)
-	}
-	return readerStyle.Render(name)
+	return readerStyle.Render(v.label(name))
 }
 
 func (m *model) renderChat() {
@@ -740,8 +760,8 @@ func (m *model) renderLog() {
 	for _, text := range m.room.logs {
 		lines = append(lines, strings.Split(ansi.Wrap(text, w, ""), "\n")...)
 	}
-	if !m.room.hasLog {
-		lines = []string{dim.Render("The reader is not headless, so it has no log here.")}
+	if m.room.logRole == "" {
+		lines = []string{dim.Render("No member runs headless, so there is no log here.")}
 	}
 	m.log.setLines(lines)
 }
@@ -1015,9 +1035,9 @@ func (m *model) render() string {
 	}
 	parts := []string{top}
 	if m.logH > 0 {
-		name := "reader"
-		if m.room.e.s != nil {
-			name = m.room.e.v.Reader
+		name := "member"
+		if m.room.logRole != "" {
+			name = m.room.e.v.label(m.room.logRole)
 		}
 		head := title.Render(name+" log") + paneState(&m.log)
 		parts = append(parts, m.zones.Mark("log", box(head+"\n"+m.log.vp.View(), m.width, m.logH, m.focus == focusLog)))
@@ -1108,7 +1128,7 @@ func (m *model) roomList() string {
 		if e.v.EndedReason != "" {
 			detail += failedMark.Render(e.v.EndedReason) + dim.Render(" · ")
 		}
-		detail += dim.Render(e.v.Writer + "→" + e.v.Reader)
+		detail += dim.Render(strings.Join(e.v.members(), ", "))
 		add(i, row)
 		add(i, ansi.Truncate(detail, w, "…"))
 	}
@@ -1207,10 +1227,10 @@ func pad(s string, w int) string {
 	return s + strings.Repeat(" ", max(w-ansi.StringWidth(s), 0))
 }
 
-// readerLogLine turns one log line into display text. Codex writes plain
+// memberLogLine turns one log line into display text. Codex writes plain
 // text; Claude writes stream-json events, of which only its text, tool
 // calls and final result are shown.
-func readerLogLine(line []byte) string {
+func memberLogLine(line []byte) string {
 	var ev struct {
 		Type    string `json:"type"`
 		Result  string `json:"result"`
