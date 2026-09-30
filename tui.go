@@ -355,7 +355,6 @@ type model struct {
 	added    string // the last request sent, shown until the next key
 }
 
-// addStep is where the add form is.
 type addStep int
 
 const (
@@ -393,7 +392,7 @@ type closedMsg struct{ err error }
 
 type sentMsg struct{ err error }
 
-// askedMsg reports the writer's add request; agent is set once it is sent.
+// askedMsg reports whether the request to add agent reached the writer.
 type askedMsg struct {
 	agent string
 	err   error
@@ -965,18 +964,13 @@ func (m *model) startAdd() tea.Cmd {
 }
 
 func (m *model) pressAdd(msg tea.KeyPressMsg) tea.Cmd {
-	switch msg.String() {
-	case "esc":
+	switch k := msg.String(); {
+	case k == "esc":
 		m.adding = addOff
 		m.addInput.Blur()
-	case "tab", "left", "right":
-		if m.adding == addDescribe { // arrows move the cursor
-			var cmd tea.Cmd
-			m.addInput, cmd = m.addInput.Update(msg)
-			return cmd
-		}
+	case m.adding == addPick && (k == "tab" || k == "left" || k == "right"):
 		m.addAgent = (m.addAgent + 1) % len(inviteAgents)
-	case "enter":
+	case k == "enter":
 		if m.adding == addPick {
 			m.adding = addDescribe
 			m.addInput.Prompt = inviteAgents[m.addAgent] + " as › "
@@ -990,12 +984,10 @@ func (m *model) pressAdd(msg tea.KeyPressMsg) tea.Cmd {
 		m.addInput.Blur()
 		e, agent := m.addRoom, inviteAgents[m.addAgent]
 		return func() tea.Msg { return askedMsg{agent, e.s.post(e.v.ID, writer, addRequest(e.v.ID, agent, desc))} }
-	default:
-		if m.adding == addDescribe {
-			var cmd tea.Cmd
-			m.addInput, cmd = m.addInput.Update(msg)
-			return cmd
-		}
+	case m.adding == addDescribe:
+		var cmd tea.Cmd
+		m.addInput, cmd = m.addInput.Update(msg)
+		return cmd
 	}
 	return nil
 }
