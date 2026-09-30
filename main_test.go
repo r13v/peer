@@ -198,6 +198,9 @@ func TestMemberLogLine(t *testing.T) {
 		`{"type":"item.completed","item":{"type":"command_execution","command":"ls /x","aggregated_output":"ls: /x: No such file\n","exit_code":1,"status":"failed"}}`: {{Kind: logTool, Text: "ls /x", Failed: true}, {Kind: logOutput, Text: "ls: /x: No such file"}},
 		`{"type":"error","message":"stream disconnected"}`:                                                                                                             {{Kind: logRaw, Text: "stream disconnected", Failed: true}},
 		`{"type":"turn.completed","usage":{}}`:                                                                                                                         nil,
+		`{"type":"thread.started","thread_id":"t"}`:                                                                                                                    nil,
+		`{"type":"item.completed","item":{"type":"new_kind"}}`:                                                                                                         {{Kind: logRaw, Text: `{"type":"item.completed","item":{"type":"new_kind"}}`}},
+		`{"type":"new_event","x":1}`:                                                                                                                                   {{Kind: logRaw, Text: `{"type":"new_event","x":1}`}},
 	} {
 		if got := memberLogLine([]byte(line)); !slices.Equal(got, want) {
 			t.Fatalf("memberLogLine(%q) = %+v, want %+v", line, got, want)
@@ -826,5 +829,14 @@ func TestPostFromUser(t *testing.T) {
 	}
 	if err := s.post(v.ID, everyone, "late"); err == nil {
 		t.Fatal("post to an ended room succeeded")
+	}
+}
+
+func TestUnknownAgentHasNoLaunch(t *testing.T) {
+	if _, err := memberArgs(&store{}, "copilot", "p"); err == nil {
+		t.Fatal("memberArgs accepted copilot")
+	}
+	if _, err := memberLink("/repo", "copilot", "p"); err == nil {
+		t.Fatal("memberLink accepted copilot")
 	}
 }

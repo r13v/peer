@@ -41,7 +41,8 @@ func stamped(line []byte) (time.Time, []byte) {
 
 // memberLogLine turns one log line into entries. Both apps write JSON
 // events: codex exec --json and claude stream-json. Anything else, such
-// as stderr or older plain codex logs, is shown as it is.
+// as stderr, older plain codex logs or an event it does not know, is
+// shown as it is.
 func memberLogLine(line []byte) []logEntry {
 	var ev struct {
 		Type    string          `json:"type"`
@@ -104,7 +105,7 @@ func memberLogLine(line []byte) []logEntry {
 		case "reasoning", "todo_list":
 			return nil
 		}
-		return []logEntry{{Kind: logTool, Text: it.Type}}
+		return []logEntry{{Kind: logRaw, Text: raw}}
 	case "error": // codex
 		var text string
 		if json.Unmarshal(ev.Message, &text) != nil {
@@ -153,8 +154,12 @@ func memberLogLine(line []byte) []logEntry {
 			why := cmp.Or(ev.Result, strings.Join(ev.Errors, "; "), ev.Subtype)
 			return []logEntry{{Kind: logRaw, Text: "result: " + why, Failed: true}}
 		}
+		return nil
+	case "system", // claude
+		"thread.started", "turn.started", "turn.completed", "item.started", "item.updated": // codex
+		return nil
 	}
-	return nil
+	return []logEntry{{Kind: logRaw, Text: raw}} // an event this parser does not know
 }
 
 // toolResult is the text of a claude tool result, which is a string or

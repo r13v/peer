@@ -49,11 +49,14 @@ var appRunning = func(agent string) bool {
 // memberArgs runs the agent's CLI without a chat window. Codex's sandbox
 // also lets it write the peer store outside the checkout; Claude gets no
 // edit tools and only peer and read-only git in Bash.
-func memberArgs(s *store, agent, prompt string) []string {
-	if agent == "codex" {
-		return []string{"codex", "exec", "--json", "-C", s.repo, "-s", "workspace-write", "--add-dir", s.dir, "-c", "approval_policy=never", prompt}
+func memberArgs(s *store, agent, prompt string) ([]string, error) {
+	switch agent {
+	case "codex":
+		return []string{"codex", "exec", "--json", "-C", s.repo, "-s", "workspace-write", "--add-dir", s.dir, "-c", "approval_policy=never", prompt}, nil
+	case "claude":
+		return []string{"claude", "-p", "--verbose", "--output-format", "stream-json", "--permission-mode", "dontAsk", "--permission-prompts", "none", "--tools", "Bash", "Read", "Grep", "Glob", "Skill", "--allowedTools", "Skill", "Bash(peer:*)", "Bash(git diff:*)", "Bash(git status:*)", "Bash(git log:*)", "Bash(git show:*)", "Read", "Grep", "Glob", "--", prompt}, nil
 	}
-	return []string{"claude", "-p", "--verbose", "--output-format", "stream-json", "--permission-mode", "dontAsk", "--permission-prompts", "none", "--tools", "Bash", "Read", "Grep", "Glob", "Skill", "--allowedTools", "Skill", "Bash(peer:*)", "Bash(git diff:*)", "Bash(git status:*)", "Bash(git log:*)", "Bash(git show:*)", "Read", "Grep", "Glob", "--", prompt}
+	return nil, fmt.Errorf("peer cannot launch %s", agent)
 }
 
 // startMember runs argv in dir in its own process session, so it
@@ -110,11 +113,14 @@ func stamp(in io.Reader, out io.Writer) error {
 
 // memberLink builds a desktop deep link that opens a new codex or claude
 // chat in repo with prompt prefilled. Neither app submits the prompt by itself.
-func memberLink(repo, agent, prompt string) string {
-	if agent == "codex" {
-		return (&url.URL{Scheme: "codex", Host: "threads", Path: "/new", RawQuery: url.Values{"path": {repo}, "prompt": {prompt}}.Encode()}).String()
+func memberLink(repo, agent, prompt string) (string, error) {
+	switch agent {
+	case "codex":
+		return (&url.URL{Scheme: "codex", Host: "threads", Path: "/new", RawQuery: url.Values{"path": {repo}, "prompt": {prompt}}.Encode()}).String(), nil
+	case "claude":
+		return (&url.URL{Scheme: "claude", Host: "code", Path: "/new", RawQuery: url.Values{"folder": {repo}, "q": {prompt}}.Encode()}).String(), nil
 	}
-	return (&url.URL{Scheme: "claude", Host: "code", Path: "/new", RawQuery: url.Values{"folder": {repo}, "q": {prompt}}.Encode()}).String()
+	return "", fmt.Errorf("%s has no desktop link", agent)
 }
 
 // invite adds m to room id for its writer and launches m's agent in a
@@ -148,8 +154,11 @@ func (s *store) invite(id, as string, m member, brief string, headed bool, out i
 		})
 	}
 	if headed && appRunning(m.Agent) {
-		link := memberLink(s.repo, m.Agent, memberPrompt(v, m.Role, brief, false))
-		if err := openURL(link); err != nil {
+		link, err := memberLink(s.repo, m.Agent, memberPrompt(v, m.Role, brief, false))
+		if err == nil {
+			err = openURL(link)
+		}
+		if err != nil {
 			failed()
 			return fmt.Errorf("opening %s failed: %w; invite %s again", m.Agent, err, m.Role)
 		}
@@ -163,7 +172,11 @@ func (s *store) invite(id, as string, m member, brief string, headed bool, out i
 		fmt.Fprintf(os.Stderr, "peer: %s, so %s runs headless\n", why, m.Role)
 	}
 	logPath := s.logPath(v.ID, m.Role)
-	if err := startMember(memberArgs(s, m.Agent, memberPrompt(v, m.Role, brief, true)), s.repo, logPath, s.exitPath(v.ID, m.Role)); err != nil {
+	argv, err := memberArgs(s, m.Agent, memberPrompt(v, m.Role, brief, true))
+	if err == nil {
+		err = startMember(argv, s.repo, logPath, s.exitPath(v.ID, m.Role))
+	}
+	if err != nil {
 		failed()
 		return fmt.Errorf("launching %s failed: %w", m.Agent, err)
 	}
