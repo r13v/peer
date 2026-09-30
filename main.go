@@ -1,4 +1,4 @@
-// Command peer lets two coding agents pair on one Git checkout through a
+// Command peer lets coding agents work on one Git checkout through a
 // shared message store, and shows their rooms in a terminal UI.
 package main
 
@@ -32,14 +32,24 @@ import (
 )
 
 type session struct {
-	ID        string `json:"id"`
-	Repo      string `json:"repo"`
-	Writer    string `json:"writer"`
-	Reader    string `json:"reader"`
-	StartedAt string `json:"started_at"`
-	EndedAt   string `json:"ended_at,omitempty"`
+	ID   string `json:"id"`
+	Repo string `json:"repo"`
+	// Members lists the room's participants in joining order; the first
+	// is the writer.
+	Members   []member `json:"members"`
+	StartedAt string   `json:"started_at"`
+	EndedAt   string   `json:"ended_at,omitempty"`
 	// EndedReason says why a session ended other than by its writer's end.
 	EndedReason string `json:"ended_reason,omitempty"`
+}
+
+// member is a participant, known in the room by its role. Agent names the
+// app behind it, such as codex, for display and launching.
+type member struct {
+	Role  string `json:"role"`
+	Agent string `json:"agent,omitempty"`
+	// Exited is set once a launched member's process has stopped.
+	Exited bool `json:"exited,omitempty"`
 }
 
 type message struct {
@@ -58,13 +68,13 @@ type store struct {
 //go:embed instructions/flow.md
 var flowInstructions []byte
 
-//go:embed instructions/reader.md
-var readerInstructions []byte
+//go:embed instructions/member.md
+var memberInstructions []byte
 
 //go:embed instructions/writer.md
 var writerInstructions []byte
 
-const usage = "usage: peer, peer --version, peer update, peer skills flow|writer|reader, peer start NAME, peer send|wait|end ID --as NAME, peer status [ID], peer history, or peer log ID"
+const usage = "usage: peer, peer --version, peer update, peer skills flow|writer|member, peer start NAME, peer join|invite ID ROLE, peer send|wait|end ID --as ROLE, peer status [ID], peer history, or peer log ID"
 
 // version is set at release build time.
 var version = "dev"
@@ -77,9 +87,13 @@ var openURL = func(link string) error { return exec.Command("open", link).Run() 
 var waitTimeout = 90 * time.Second
 
 const (
-	// human is the author of messages sent from the peer TUI; new rooms
-	// refuse it as a participant name.
+	// writer is the role of the one participant that edits files.
+	writer = "writer"
+	// human is the author of messages sent from the peer TUI; rooms
+	// refuse it as a role.
 	human = "user"
+	// system is the author of peer's own notices, such as a member joining.
+	system = "peer"
 	// everyone addresses a message to every participant of a room.
 	everyone = "*"
 )
@@ -113,9 +127,9 @@ func run(args []string, in io.Reader, out io.Writer, cwd string) error {
 		return update(in, out)
 	}
 	if args[0] == "skills" {
-		docs := map[string][]byte{"flow": flowInstructions, "writer": writerInstructions, "reader": readerInstructions}
+		docs := map[string][]byte{"flow": flowInstructions, "writer": writerInstructions, "member": memberInstructions}
 		if len(args) != 2 || docs[args[1]] == nil {
-			return errors.New("usage: peer skills flow|writer|reader")
+			return errors.New("usage: peer skills flow|writer|member")
 		}
 		_, err := out.Write(docs[args[1]])
 		return err
@@ -126,15 +140,20 @@ func run(args []string, in io.Reader, out io.Writer, cwd string) error {
 	}
 	fs := flag.NewFlagSet(args[0], flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	actor := fs.String("as", "", "participant name")
-	writer := fs.String("writer", "", "writer name for start")
-	reader := fs.String("reader", "", "reader name for start")
-	headed := fs.Bool("headed", false, "open the reader's desktop app for start")
-	// The room name or ID comes first, as in peer send ID --as NAME; Go's
-	// flag parsing would stop at it, so it is taken off before the flags.
-	rest, id := args[1:], ""
+	actor := fs.String("as", "", "sender's role")
+	to := fs.String("to", everyone, "recipient role for send")
+	agent := fs.String("agent", "", "app behind the participant")
+	brief := fs.String("brief", "", "extra instructions for invite")
+	headed := fs.Bool("headed", false, "open the member's desktop app for invite")
+	// The room name or ID and, for join and invite, the role come first,
+	// as in peer join ID ROLE; Go's flag parsing would stop at them, so
+	// they are taken off before the flags.
+	rest, id, role := args[1:], "", ""
 	if len(rest) > 0 && !strings.HasPrefix(rest[0], "-") {
 		id, rest = rest[0], rest[1:]
+	}
+	if (args[0] == "join" || args[0] == "invite") && len(rest) > 0 && !strings.HasPrefix(rest[0], "-") {
+		role, rest = rest[0], rest[1:]
 	}
 	if err := fs.Parse(rest); err != nil {
 		return err
@@ -148,6 +167,12 @@ func run(args []string, in io.Reader, out io.Writer, cwd string) error {
 		}
 		return nil
 	}
+	needRole := func(cmd string) error {
+		if id == "" || role == "" {
+			return fmt.Errorf("usage: peer %s", cmd)
+		}
+		return checkRole(role)
+	}
 	switch args[0] {
 	case "log":
 		if err := needID("log"); err != nil {
@@ -156,43 +181,29 @@ func run(args []string, in io.Reader, out io.Writer, cwd string) error {
 		return s.log(id, newPrinter(out, s.repo))
 	case "start":
 		if !roomName.MatchString(id) {
-			return errors.New("usage: peer start NAME --writer NAME --reader NAME; the room NAME is 1-40 characters: a-z, 0-9 or -, starting with a letter")
+			return errors.New("usage: peer start NAME [--agent NAME]; the room NAME is 1-40 characters: a-z, 0-9 or -, starting with a letter")
 		}
-		for _, name := range []string{*writer, *reader} {
-			if err := checkName(name); err != nil {
-				return err
-			}
-			if name == human {
-				return fmt.Errorf("%q is reserved for messages from the peer TUI", human)
-			}
-		}
-		if *writer == *reader {
-			return errors.New("writer and reader must be different participants")
-		}
-		v, err := s.start(id, *writer, *reader, out)
-		if err != nil || appBundles[*reader] == "" {
+		if err := checkAgent(*agent); err != nil {
 			return err
 		}
-		if *headed && appRunning(*reader) {
-			link := readerLink(s.repo, v)
-			if err := openURL(link); err != nil {
-				return fmt.Errorf("session started, but opening %s failed: %w; open this link: %s", *reader, err, link)
-			}
-			return nil
+		_, err := s.start(id, *agent, out)
+		return err
+	case "join":
+		if err := needRole("join ID ROLE [--agent NAME]"); err != nil {
+			return err
 		}
-		if *headed {
-			why := *reader + " is not open"
-			if runtime.GOOS != "darwin" {
-				why = "desktop chats open only on macOS"
-			}
-			fmt.Fprintf(os.Stderr, "peer: %s, so %s runs headless\n", why, *reader)
+		if err := checkAgent(*agent); err != nil {
+			return err
 		}
-		logPath := filepath.Join(s.dir, "sessions", v.ID, "reader.log")
-		if err := startReader(readerArgs(s, v), s.repo, logPath); err != nil {
-			return fmt.Errorf("session started, but launching %s failed: %w; open %s in this checkout and send: %s", *reader, err, *reader, readerPrompt(v, false))
+		return s.join(id, member{Role: role, Agent: *agent}, out)
+	case "invite":
+		if err := needRole("invite ID ROLE --as writer --agent codex|claude [--brief TEXT] [--headed]"); err != nil {
+			return err
 		}
-		fmt.Fprintf(os.Stderr, "peer: %s runs headless; watch it in peer, or read %s\n", *reader, logPath)
-		return nil
+		if appBundles[*agent] == "" {
+			return errors.New("invite launches codex or claude; to add another agent, give it a join prompt")
+		}
+		return s.invite(id, *actor, member{Role: role, Agent: *agent}, *brief, *headed, out)
 	case "status":
 		return s.status(id, out)
 	case "send":
@@ -202,6 +213,11 @@ func run(args []string, in io.Reader, out io.Writer, cwd string) error {
 		if err := checkName(*actor); err != nil {
 			return err
 		}
+		if *to != everyone {
+			if err := checkName(*to); err != nil {
+				return err
+			}
+		}
 		body, err := io.ReadAll(io.LimitReader(in, 64*1024+1))
 		if err != nil {
 			return err
@@ -210,7 +226,7 @@ func run(args []string, in io.Reader, out io.Writer, cwd string) error {
 		if err != nil {
 			return err
 		}
-		return s.send(id, *actor, text, out)
+		return s.send(id, *actor, *to, text, out)
 	case "wait":
 		if err := needID("wait"); err != nil {
 			return err
@@ -279,47 +295,49 @@ func installDir(executable string) (string, error) {
 	return filepath.Dir(resolved), nil
 }
 
-// readerPrompt starts the reader's chat. A headless reader has nobody to
-// ask, so it is told to keep waiting on its own.
-func readerPrompt(v session, headless bool) string {
-	prompt := fmt.Sprintf("Use the peer skill. You are participant %s, the reader in %s's peer room %s in this checkout. Discuss the approach through peer, then review the diff and send concrete findings through peer. Do not edit files. Keep waiting for replies until the review is closed.", v.Reader, v.Writer, v.ID)
+// memberPrompt starts an invited member's chat. A headless member has
+// nobody to ask, so it is told to keep waiting on its own.
+func memberPrompt(v session, role, brief string, headless bool) string {
+	prompt := fmt.Sprintf("Use the peer skill. You are the %s in peer room %s in this checkout; you have already joined, so do not run peer join. Follow peer skills member.", role, v.ID)
+	if brief != "" {
+		prompt += " Your focus: " + brief
+	}
 	if headless {
 		prompt += " Nobody reads this chat: do not ask the user anything, run peer and git directly rather than through wrapper commands, and keep calling peer wait until the writer ends the session. Once peer reports that the session has ended, stop."
 	}
 	return prompt
 }
 
-// appBundles maps each reader with a desktop app to its macOS bundle ID.
+// appBundles maps each agent with a desktop app to its macOS bundle ID.
 var appBundles = map[string]string{"codex": "com.openai.codex", "claude": "com.anthropic.claudefordesktop"}
 
-// appRunning reports whether reader's desktop app is open without
+// appRunning reports whether agent's desktop app is open without
 // launching it; it is replaced in tests. The desktop apps and their deep
 // links exist only on macOS, so other systems report false and run the
-// reader headless.
-var appRunning = func(reader string) bool {
+// member headless.
+var appRunning = func(agent string) bool {
 	if runtime.GOOS != "darwin" {
 		return false
 	}
-	out, err := exec.Command("osascript", "-e", `application id "`+appBundles[reader]+`" is running`).Output()
+	out, err := exec.Command("osascript", "-e", `application id "`+appBundles[agent]+`" is running`).Output()
 	return err == nil && strings.TrimSpace(string(out)) == "true"
 }
 
-// readerArgs runs the reader's CLI without a chat window. Codex's sandbox
+// memberArgs runs the agent's CLI without a chat window. Codex's sandbox
 // also lets it write the peer store outside the checkout; Claude gets no
 // edit tools and only peer and read-only git in Bash.
-func readerArgs(s *store, v session) []string {
-	prompt := readerPrompt(v, true)
-	if v.Reader == "codex" {
+func memberArgs(s *store, agent, prompt string) []string {
+	if agent == "codex" {
 		return []string{"codex", "exec", "-C", s.repo, "-s", "workspace-write", "--add-dir", s.dir, "-c", "approval_policy=never", prompt}
 	}
 	return []string{"claude", "-p", "--verbose", "--output-format", "stream-json", "--permission-mode", "dontAsk", "--permission-prompts", "none", "--tools", "Bash", "Read", "Grep", "Glob", "Skill", "--allowedTools", "Skill", "Bash(peer:*)", "Bash(git diff:*)", "Bash(git status:*)", "Bash(git log:*)", "Bash(git show:*)", "Read", "Grep", "Glob", "--", prompt}
 }
 
-// startReader runs argv in dir in its own process session, so it outlives
-// the writer's command, and appends its output and exit status to logPath.
-// The status also goes to reader.exit next to it, which ends the room; it
-// is replaced in tests.
-var startReader = func(argv []string, dir, logPath string) error {
+// startMember runs argv in dir in its own process session, so it
+// outlives the writer's command, and appends its output and exit status
+// to logPath. The status also goes to exitPath, which load turns into the
+// member leaving; it is replaced in tests.
+var startMember = func(argv []string, dir, logPath, exitPath string) error {
 	if _, err := exec.LookPath(argv[0]); err != nil {
 		return err
 	}
@@ -328,8 +346,7 @@ var startReader = func(argv []string, dir, logPath string) error {
 		return err
 	}
 	defer log.Close()
-	exit := filepath.Join(filepath.Dir(logPath), readerExit)
-	cmd := exec.Command("sh", append([]string{"-c", `exit_file=$1; shift; "$@"; status=$?; echo "[peer] reader exited with status $status"; echo "$status" > "$exit_file"`, "sh", exit}, argv...)...)
+	cmd := exec.Command("sh", append([]string{"-c", `exit_file=$1; shift; "$@"; status=$?; echo "[peer] exited with status $status"; echo "$status" > "$exit_file"`, "sh", exitPath}, argv...)...)
 	cmd.Dir = dir
 	cmd.Stdout, cmd.Stderr = log, log
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
@@ -339,25 +356,43 @@ var startReader = func(argv []string, dir, logPath string) error {
 	return cmd.Process.Release()
 }
 
-// readerLink builds a desktop deep link that opens a new codex or claude
-// chat in repo with the reader prompt prefilled. Neither app submits the prompt by itself.
-func readerLink(repo string, v session) string {
-	prompt := readerPrompt(v, false)
-	if v.Reader == "codex" {
+// memberLink builds a desktop deep link that opens a new codex or claude
+// chat in repo with prompt prefilled. Neither app submits the prompt by itself.
+func memberLink(repo, agent, prompt string) string {
+	if agent == "codex" {
 		return (&url.URL{Scheme: "codex", Host: "threads", Path: "/new", RawQuery: url.Values{"path": {repo}, "prompt": {prompt}}.Encode()}).String()
 	}
 	return (&url.URL{Scheme: "claude", Host: "code", Path: "/new", RawQuery: url.Values{"folder": {repo}, "q": {prompt}}.Encode()}).String()
 }
 
+// checkRole checks a role that join or invite adds to a room.
+func checkRole(role string) error {
+	if err := checkName(role); err != nil {
+		return err
+	}
+	if role == writer || role == human || role == system {
+		return fmt.Errorf("role %q is reserved", role)
+	}
+	return nil
+}
+
+// checkAgent checks an optional app name.
+func checkAgent(agent string) error {
+	if agent == "" {
+		return nil
+	}
+	return checkName(agent)
+}
+
 func checkName(name string) error {
 	if len(name) == 0 || len(name) > 64 {
-		return errors.New("participant name must be 1-64 characters: a-z, 0-9, - or _, starting with a letter")
+		return errors.New("role must be 1-64 characters: a-z, 0-9, - or _, starting with a letter")
 	}
 	for i, c := range name {
 		if c >= 'a' && c <= 'z' || i > 0 && (c >= '0' && c <= '9' || c == '-' || c == '_') {
 			continue
 		}
-		return errors.New("participant name must be 1-64 characters: a-z, 0-9, - or _, starting with a letter")
+		return errors.New("role must be 1-64 characters: a-z, 0-9, - or _, starting with a letter")
 	}
 	return nil
 }
@@ -374,17 +409,38 @@ func messageText(body string) (string, error) {
 	return text, nil
 }
 
-// members lists the room's participants in the order the TUI offers them.
-func (s session) members() []string { return []string{s.Writer, s.Reader} }
+// members lists the roles of the room's participants in joining order.
+func (s session) members() []string {
+	roles := make([]string, len(s.Members))
+	for i, m := range s.Members {
+		roles[i] = m.Role
+	}
+	return roles
+}
 
-func (s session) other(name string) (string, error) {
-	if name == s.Writer {
-		return s.Reader, nil
+// member returns the participant with role, or nil.
+func (s *session) member(role string) *member {
+	for i := range s.Members {
+		if s.Members[i].Role == role {
+			return &s.Members[i]
+		}
 	}
-	if name == s.Reader {
-		return s.Writer, nil
+	return nil
+}
+
+// label names a participant for people, e.g. "reader · codex".
+func (s session) label(role string) string {
+	if m := s.member(role); m != nil && m.Agent != "" {
+		return role + " · " + m.Agent
 	}
-	return "", fmt.Errorf("%q is not a participant in session %s", name, s.ID)
+	return role
+}
+
+func (s session) check(role string) error {
+	if s.member(role) == nil {
+		return fmt.Errorf("%q is not a participant in session %s", role, s.ID)
+	}
+	return nil
 }
 
 func openStore(cwd string) (*store, error) {
@@ -502,9 +558,6 @@ var (
 	sessionID = regexp.MustCompile(`^[a-z][a-z0-9-]{0,39}(-\d+)?$`)
 )
 
-// readerExit holds the headless reader's exit status once it stops.
-const readerExit = "reader.exit"
-
 // session reads session id without ending it; participants use refresh.
 func (s *store) session(id string) (session, error) {
 	if !sessionID.MatchString(id) {
@@ -518,29 +571,61 @@ func (s *store) session(id string) (session, error) {
 		return session{}, err
 	}
 	var v session
-	err = json.Unmarshal(b, &v)
-	return v, err
+	if err := json.Unmarshal(b, &v); err != nil {
+		return v, err
+	}
+	if len(v.Members) == 0 || v.Members[0].Role != writer {
+		return v, fmt.Errorf("session %s was made by an older peer", id)
+	}
+	return v, nil
 }
 
-// load reads session id under the store lock and ends it once its
-// headless reader has exited, so nobody waits on a reader that is gone.
+// load reads session id under the store lock and marks members whose
+// launched process has exited. The writer hears of each, so it does not
+// wait on a member that is gone and can invite the role again.
 func (s *store) load(id string) (session, error) {
 	v, err := s.session(id)
 	if err != nil || v.EndedAt != "" {
 		return v, err
 	}
-	b, err := os.ReadFile(filepath.Join(s.dir, "sessions", id, readerExit))
-	if errors.Is(err, os.ErrNotExist) {
-		return v, nil
+	for i := range v.Members {
+		m := &v.Members[i]
+		if m.Role == writer || m.Exited {
+			continue
+		}
+		b, err := os.ReadFile(s.exitPath(id, m.Role))
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return v, err
+		}
+		status, err := strconv.Atoi(strings.TrimSpace(string(b)))
+		if err != nil {
+			continue // the wrapper is still writing it
+		}
+		m.Exited = true
+		if err := writeJSON(s.sessionPath(id), v); err != nil {
+			return v, err
+		}
+		if _, err := s.appendMessage(v, system, writer, fmt.Sprintf("%s exited with status %d", m.Role, status)); err != nil {
+			return v, err
+		}
 	}
-	if err != nil {
-		return v, err
-	}
-	status, err := strconv.Atoi(strings.TrimSpace(string(b)))
-	if err != nil {
-		return v, nil // the wrapper is still writing it
-	}
-	return v, s.finish(&v, fmt.Sprintf("%s exited with status %d", v.Reader, status))
+	return v, nil
+}
+
+func (s *store) sessionPath(id string) string {
+	return filepath.Join(s.dir, "sessions", id, "session.json")
+}
+
+// logPath and exitPath hold a launched member's output and exit status.
+func (s *store) logPath(id, role string) string {
+	return filepath.Join(s.dir, "sessions", id, role+".log")
+}
+
+func (s *store) exitPath(id, role string) string {
+	return filepath.Join(s.dir, "sessions", id, role+".exit")
 }
 
 // refresh is load for callers that do not hold the store lock.
@@ -557,10 +642,10 @@ func (s *store) refresh(id string) (session, error) {
 // finish ends active session v; the caller holds the store lock.
 func (s *store) finish(v *session, reason string) error {
 	v.EndedAt, v.EndedReason = time.Now().UTC().Format(time.RFC3339Nano), reason
-	return writeJSON(filepath.Join(s.dir, "sessions", v.ID, "session.json"), v)
+	return writeJSON(s.sessionPath(v.ID), v)
 }
 
-func (s *store) start(name, writer, reader string, out io.Writer) (session, error) {
+func (s *store) start(name, agent string, out io.Writer) (session, error) {
 	var v session
 	err := s.locked(func() error {
 		if err := os.MkdirAll(filepath.Join(s.dir, "sessions"), 0700); err != nil {
@@ -578,13 +663,110 @@ func (s *store) start(name, writer, reader string, out io.Writer) (session, erro
 			}
 			id = fmt.Sprintf("%s-%d", name, n)
 		}
-		v = session{ID: id, Repo: s.repo, Writer: writer, Reader: reader, StartedAt: time.Now().UTC().Format(time.RFC3339Nano)}
+		v = session{ID: id, Repo: s.repo, Members: []member{{Role: writer, Agent: agent}}, StartedAt: time.Now().UTC().Format(time.RFC3339Nano)}
 		if err := writeJSON(filepath.Join(dir, "session.json"), v); err != nil {
 			return err
 		}
 		return json.NewEncoder(out).Encode(v)
 	})
 	return v, err
+}
+
+// join adds m to active room id and tells the writer. A role that is
+// taken stays taken, except that a member who has exited can be replaced.
+func (s *store) join(id string, m member, out io.Writer) error {
+	return s.locked(func() error {
+		v, err := s.add(id, m)
+		if err != nil {
+			return err
+		}
+		return json.NewEncoder(out).Encode(v)
+	})
+}
+
+// add is join for callers that hold the store lock.
+func (s *store) add(id string, m member) (session, error) {
+	v, err := s.load(id)
+	if err != nil {
+		return v, err
+	}
+	if v.EndedAt != "" {
+		return v, endedError(v)
+	}
+	if old := v.member(m.Role); old != nil {
+		if !old.Exited {
+			return v, fmt.Errorf("role %s is already in room %s; if that is you, continue as %s, otherwise use another role, such as %s-2", m.Role, id, m.Role, m.Role)
+		}
+		// The newcomer replays the room from the start, and the old
+		// status must not mark it as exited.
+		for _, f := range []string{s.exitPath(id, m.Role), filepath.Join(s.dir, "sessions", id, "cursor-"+m.Role)} {
+			if err := os.Remove(f); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return v, err
+			}
+		}
+		*old = m
+	} else {
+		v.Members = append(v.Members, m)
+	}
+	if err := writeJSON(s.sessionPath(id), v); err != nil {
+		return v, err
+	}
+	_, err = s.appendMessage(v, system, writer, v.label(m.Role)+" joined")
+	return v, err
+}
+
+// invite adds m to room id for its writer and launches m's agent in a
+// desktop chat when headed and the app is open, otherwise headless.
+func (s *store) invite(id, as string, m member, brief string, headed bool, out io.Writer) error {
+	if as != writer {
+		return errors.New("only the writer can invite; run peer invite ID ROLE --as writer")
+	}
+	var v session
+	err := s.locked(func() error {
+		var err error
+		v, err = s.add(id, m)
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	// failed marks the member exited, so the role can be invited again.
+	failed := func() {
+		_ = s.locked(func() error {
+			cur, err := s.load(v.ID)
+			if err != nil || cur.EndedAt != "" || cur.member(m.Role) == nil {
+				return err
+			}
+			cur.member(m.Role).Exited = true
+			if err := writeJSON(s.sessionPath(v.ID), cur); err != nil {
+				return err
+			}
+			_, err = s.appendMessage(cur, system, writer, m.Role+" failed to start")
+			return err
+		})
+	}
+	if headed && appRunning(m.Agent) {
+		link := memberLink(s.repo, m.Agent, memberPrompt(v, m.Role, brief, false))
+		if err := openURL(link); err != nil {
+			failed()
+			return fmt.Errorf("opening %s failed: %w; invite %s again", m.Agent, err, m.Role)
+		}
+		return json.NewEncoder(out).Encode(v)
+	}
+	if headed {
+		why := m.Agent + " is not open"
+		if runtime.GOOS != "darwin" {
+			why = "desktop chats open only on macOS"
+		}
+		fmt.Fprintf(os.Stderr, "peer: %s, so %s runs headless\n", why, m.Role)
+	}
+	logPath := s.logPath(v.ID, m.Role)
+	if err := startMember(memberArgs(s, m.Agent, memberPrompt(v, m.Role, brief, true)), s.repo, logPath, s.exitPath(v.ID, m.Role)); err != nil {
+		failed()
+		return fmt.Errorf("launching %s failed: %w", m.Agent, err)
+	}
+	fmt.Fprintf(os.Stderr, "peer: %s runs headless; watch it in peer, or read %s\n", m.Role, logPath)
+	return json.NewEncoder(out).Encode(v)
 }
 
 // status prints room id, or every active room in this checkout.
@@ -610,7 +792,7 @@ func (s *store) status(id string, out io.Writer) error {
 	return nil
 }
 
-func (s *store) send(sid, from, text string, out io.Writer) error {
+func (s *store) send(sid, from, to, text string, out io.Writer) error {
 	return s.locked(func() error {
 		v, err := s.load(sid)
 		if err != nil {
@@ -619,9 +801,16 @@ func (s *store) send(sid, from, text string, out io.Writer) error {
 		if v.EndedAt != "" {
 			return endedError(v)
 		}
-		to, err := v.other(from)
-		if err != nil {
+		if err := v.check(from); err != nil {
 			return err
+		}
+		if to == from {
+			return errors.New("cannot send a message to yourself")
+		}
+		if to != everyone {
+			if err := v.check(to); err != nil {
+				return err
+			}
 		}
 		m, err := s.appendMessage(v, from, to, text)
 		if err != nil {
@@ -687,7 +876,7 @@ func (s *store) nextMessage(sid, as string) (*message, error) {
 		if err != nil {
 			return err
 		}
-		if _, err := v.other(as); err != nil {
+		if err := v.check(as); err != nil {
 			return err
 		}
 		dir := filepath.Join(s.dir, "sessions", v.ID)
@@ -730,7 +919,7 @@ func (s *store) nextMessage(sid, as string) (*message, error) {
 			if err := json.Unmarshal(line, &m); err != nil {
 				return err
 			}
-			if m.To == as || m.To == everyone {
+			if m.From != as && (m.To == as || m.To == everyone) {
 				found = &m
 				break
 			}
@@ -769,7 +958,7 @@ func (s *store) end(sid, as string, out io.Writer) error {
 		if err != nil {
 			return err
 		}
-		if v.Writer != as {
+		if as != writer {
 			return errors.New("only the writer can end this session")
 		}
 		if v.EndedAt != "" {
@@ -907,11 +1096,12 @@ func (p *printer) author(v session, name string) string {
 		return "all"
 	case human:
 		return p.paint(ansiHuman, name)
+	case system:
+		return p.paint(ansiDim, name)
+	case writer:
+		return p.paint(ansiWriter, v.label(name))
 	}
-	if name == v.Writer {
-		return p.paint(ansiWriter, name)
-	}
-	return p.paint(ansiReader, name)
+	return p.paint(ansiReader, v.label(name))
 }
 
 // body indents the text and highlights `code`, **bold** and list markers.
@@ -1003,14 +1193,14 @@ func (s *store) count(id string) int {
 }
 
 // summary describes a session in one line, e.g.
-// "Tue 29 Sep 19:59  claude→codex  12 msgs  8m".
+// "Tue 29 Sep 19:59  writer, reader  12 msgs  8m".
 func (s *store) summary(v session) string {
 	start, _ := time.Parse(time.RFC3339Nano, v.StartedAt)
 	end := time.Now()
 	if v.EndedAt != "" {
 		end, _ = time.Parse(time.RFC3339Nano, v.EndedAt)
 	}
-	return fmt.Sprintf("%s  %s→%s  %3d msgs  %s", start.Local().Format("Mon _2 Jan 15:04"), v.Writer, v.Reader, s.count(v.ID), humanDuration(end.Sub(start)))
+	return fmt.Sprintf("%s  %s  %3d msgs  %s", start.Local().Format("Mon _2 Jan 15:04"), strings.Join(v.members(), ", "), s.count(v.ID), humanDuration(end.Sub(start)))
 }
 
 func (s *store) history(out io.Writer) error {

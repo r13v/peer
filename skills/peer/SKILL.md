@@ -1,6 +1,6 @@
 ---
 name: peer
-description: Pair with another local coding agent on the same Git checkout. Use when the user asks two agents to discuss, implement, or review one task together.
+description: Work with other local coding agents on the same Git checkout: one writer edits, members in any role discuss and review. Use when the user asks agents to discuss, implement, or review one task together, or to join a peer room.
 ---
 
 Run `peer skills flow` and follow it.
