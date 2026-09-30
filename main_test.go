@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -23,6 +24,12 @@ var (
 )
 
 func TestMain(m *testing.M) {
+	if len(os.Args) > 1 && os.Args[1] == "stamp" { // startMember runs the test binary as peer
+		if err := stamp(os.Stdin, os.Stdout); err != nil {
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
 	openURL = func(string) error { return nil }
 	realAppRunning = appRunning
 	appRunning = func(string) bool { return false }
@@ -177,16 +184,53 @@ func TestAppRunningOffMacOS(t *testing.T) {
 }
 
 func TestMemberLogLine(t *testing.T) {
-	for line, want := range map[string]string{
-		"codex plain progress\n":             "codex plain progress",
-		`{"type":"system","subtype":"init"}`: "",
-		`{"type":"assistant","message":{"content":[{"type":"text","text":"Reviewing"},{"type":"tool_use","name":"Bash","input":{"command":"peer wait --as claude"}}]}}`: "Reviewing\n→ Bash peer wait --as claude",
-		`{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"main.go"}}]}}`:                                                `→ Read {"file_path":"main.go"}`,
-		`{"type":"result","result":"done"}`: "result: done",
+	for line, want := range map[string][]logEntry{
+		"codex plain progress\n":             {{Kind: logRaw, Text: "codex plain progress"}},
+		`{"type":"system","subtype":"init"}`: nil,
+		`{"type":"assistant","message":{"content":[{"type":"text","text":"Reviewing"},{"type":"tool_use","name":"Bash","input":{"command":"peer wait --as claude"}}]}}`: {{Kind: logText, Text: "Reviewing"}, {Kind: logTool, Text: "Bash peer wait --as claude"}},
+		`{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"main.go"}}]}}`:                                                {{Kind: logTool, Text: `Read {"file_path":"main.go"}`}},
+		`{"type":"user","message":{"content":[{"type":"tool_result","content":[{"type":"text","text":"no such file"}],"is_error":true}]}}`:                              {{Kind: logOutput, Text: "no such file", Failed: true}},
+		`{"type":"result","result":"done"}`: nil,
+		`{"type":"result","subtype":"error_max_turns","is_error":true,"errors":["Reached maximum turns"]}`:                                                             {{Kind: logRaw, Text: "result: Reached maximum turns", Failed: true}},
+		`{"type":"result","subtype":"error_during_execution","is_error":true}`:                                                                                         {{Kind: logRaw, Text: "result: error_during_execution", Failed: true}},
+		`{"type":"item.started","item":{"type":"command_execution","command":"ls"}}`:                                                                                   nil,
+		`{"type":"item.completed","item":{"type":"agent_message","text":"ok"}}`:                                                                                        {{Kind: logText, Text: "ok"}},
+		`{"type":"item.completed","item":{"type":"command_execution","command":"ls /x","aggregated_output":"ls: /x: No such file\n","exit_code":1,"status":"failed"}}`: {{Kind: logTool, Text: "ls /x", Failed: true}, {Kind: logOutput, Text: "ls: /x: No such file"}},
+		`{"type":"error","message":"stream disconnected"}`:                                                                                                             {{Kind: logRaw, Text: "stream disconnected", Failed: true}},
+		`{"type":"turn.completed","usage":{}}`:                                                                                                                         nil,
 	} {
-		if got := memberLogLine([]byte(line)); got != want {
-			t.Fatalf("memberLogLine(%q) = %q, want %q", line, got, want)
+		if got := memberLogLine([]byte(line)); !slices.Equal(got, want) {
+			t.Fatalf("memberLogLine(%q) = %+v, want %+v", line, got, want)
 		}
+	}
+}
+
+func TestStartMemberStampsOutputAndKeepsStatus(t *testing.T) {
+	dir := t.TempDir()
+	logPath, exitPath := filepath.Join(dir, "member.log"), filepath.Join(dir, "member.exit")
+	if err := realStartMember([]string{"sh", "-c", "echo out; echo err >&2; printf tail; exit 3"}, dir, logPath, exitPath); err != nil {
+		t.Fatal(err)
+	}
+	var data []byte
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+		data, _ = os.ReadFile(logPath)
+		if bytes.Contains(data, []byte("[peer] exited")) {
+			break
+		}
+	}
+	if status, _ := os.ReadFile(exitPath); strings.TrimSpace(string(status)) != "3" {
+		t.Fatalf("exit status %q, want 3", status)
+	}
+	var got []string
+	for _, line := range strings.SplitAfter(strings.TrimSuffix(string(data), "\n"), "\n") {
+		at, rest := stamped([]byte(line))
+		if at.IsZero() {
+			t.Fatalf("line not stamped: %q", line)
+		}
+		got = append(got, strings.TrimSuffix(string(rest), "\n"))
+	}
+	if want := []string{"out", "err", "tail[peer] exited with status 3"}; !slices.Equal(got, want) {
+		t.Fatalf("log lines %q, want %q", got, want)
 	}
 }
 
