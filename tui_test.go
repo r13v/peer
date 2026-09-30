@@ -59,6 +59,9 @@ func TestTUIShowsTranscriptAndReaderLog(t *testing.T) {
 	if m.showLog || strings.Contains(m.render(), "reader log") {
 		t.Fatal("l did not hide the reader log")
 	}
+	if chat := ansi.Strip(strings.Join(m.chat.lines, "\n")); !strings.Contains(chat, "writer claude → all") || !strings.Contains(chat, "peer → writer\n") {
+		t.Fatalf("headers do not name the sender's agent only:\n%s", chat)
+	}
 	if m.chat.query != "proposal" || len(m.chat.matches) != 1 || m.chat.cur != 0 {
 		t.Fatalf("search did not find the message: %q %+v %d", m.chat.query, m.chat.matches, m.chat.cur)
 	}
@@ -566,5 +569,85 @@ func TestLogSwitchesMembersAndShowsBlocks(t *testing.T) {
 	m.Update(m.poll()())
 	if m.room.logRole != "reader" || len(m.room.logs) != 3 {
 		t.Fatalf("L did not cycle back to the reader: %s %+v", m.room.logRole, m.room.logs)
+	}
+}
+
+func TestAddAsksWriterToInvite(t *testing.T) {
+	repo := testRepo(t)
+	startRoom(t, repo, "first")
+	startRoom(t, repo, "second")
+	s, err := openStore(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := loaded(t, s)
+	target := m.room.e.v.ID
+	m.Update(press('i'))
+	m.Update(tea.PasteMsg{Content: "message draft"})
+	m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	m.Update(press('a'))
+	m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	if !strings.Contains(ansi.Strip(m.statusLine()), "[codex]") {
+		t.Fatalf("Tab did not pick codex: %q", ansi.Strip(m.statusLine()))
+	}
+	if _, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter}); cmd == nil {
+		t.Fatal("Enter did not focus the description")
+	}
+	if _, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter}); cmd != nil || m.adding != addDescribe {
+		t.Fatal("an empty description was sent")
+	}
+	for _, r := range "q a" { // keys must type, not act
+		if _, cmd := m.Update(press(r)); cmd != nil && cmd() == tea.Quit() {
+			t.Fatal("q quit while adding")
+		}
+	}
+	m.Update(tea.PasteMsg{Content: " security reviewer"})
+	m.choose(1 - m.sel) // the selection moves while typing
+	m.Update(m.poll()())
+	_, send := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m.Update(send())
+	if m.addInput.Value() != "" || m.compose.Value() != "message draft" || !strings.Contains(m.statusLine(), "asked the writer to add codex") {
+		t.Fatalf("description %q, message draft %q, status %q", m.addInput.Value(), m.compose.Value(), ansi.Strip(m.statusLine()))
+	}
+	msg, err := s.nextMessage(target, writer)
+	if err != nil || msg == nil || msg.From != human || msg.To != writer ||
+		!strings.Contains(msg.Text, "\n\nq a security reviewer\n\n") || !strings.Contains(msg.Text, "peer invite "+target+" ROLE --as writer --agent codex") {
+		t.Fatalf("writer got %+v, %v", msg, err)
+	}
+	other := "first"
+	if target == other {
+		other = "second"
+	}
+	if msg, _ := s.nextMessage(other, writer); msg != nil {
+		t.Fatalf("the other room got %+v", msg)
+	}
+}
+
+func TestAddKeepsDescriptionWhenRoomEnds(t *testing.T) {
+	repo := testRepo(t)
+	v := startRoom(t, repo, "add")
+	s, err := openStore(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := loaded(t, s)
+	m.Update(press('a'))
+	m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m.Update(tea.PasteMsg{Content: "tech riter"})
+	for range len("riter") {
+		m.Update(tea.KeyPressMsg{Code: tea.KeyLeft})
+	}
+	m.Update(press('w'))
+	m.Update(tea.KeyPressMsg{Code: tea.KeyRight})
+	if m.addInput.Value() != "tech writer" || m.addInput.Position() != len("tech wr") {
+		t.Fatalf("arrows did not move the cursor: %q at %d", m.addInput.Value(), m.addInput.Position())
+	}
+	if err := s.end(v.ID, writer, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m.Update(cmd())
+	if m.sendErr == nil || m.addInput.Value() != "tech writer" || m.added != "" {
+		t.Fatalf("description %q, error %v, added %q after a failed send", m.addInput.Value(), m.sendErr, m.added)
 	}
 }

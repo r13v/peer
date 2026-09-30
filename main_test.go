@@ -288,6 +288,20 @@ func TestBodyMarkdown(t *testing.T) {
 	}
 }
 
+func TestAuthorDimsAgent(t *testing.T) {
+	p := &printer{repo: t.TempDir(), color: true}
+	v := session{Members: []member{{Role: writer, Agent: "claude"}, {Role: "reader"}}}
+	if got, want := p.author(v, writer, true), "\x1b[1;36mwriter\x1b[0m \x1b[2mclaude\x1b[0m"; got != want {
+		t.Fatalf("sender:\n got %q\nwant %q", got, want)
+	}
+	if got, want := p.author(v, writer, false), "\x1b[1;36mwriter\x1b[0m"; got != want {
+		t.Fatalf("recipient:\n got %q\nwant %q", got, want)
+	}
+	if got, want := p.author(v, "reader", true), "\x1b[1;35mreader\x1b[0m"; got != want {
+		t.Fatalf("no agent:\n got %q\nwant %q", got, want)
+	}
+}
+
 // startRoom starts a room as the writer, joins a reader to it, and takes
 // the join notice off the writer's queue.
 func startRoom(t *testing.T, repo, name string) session {
@@ -346,7 +360,7 @@ func TestPairSession(t *testing.T) {
 		t.Fatal("log without an ID accepted")
 	}
 	log, err := invoke(repo, "", "log", id)
-	if err != nil || !strings.Contains(log, "proposal") || !strings.Contains(log, "check line 12") || !strings.Contains(log, "writer · claude") {
+	if err != nil || !strings.Contains(log, "proposal") || !strings.Contains(log, "check line 12") || !strings.Contains(log, "writer claude → all") || !strings.Contains(log, "peer → writer\n") {
 		t.Fatalf("transcript incomplete: %s, %v", log, err)
 	}
 	if _, err := invoke(repo, "", "end", id, "--as", "reader"); err == nil {
