@@ -159,7 +159,7 @@ func memberLogLine(line []byte) []logEntry {
 		"thread.started", "turn.started", "turn.completed", "item.started", "item.updated": // codex
 		return nil
 	}
-	return []logEntry{{Kind: logRaw, Text: raw}} // an event this parser does not know
+	return []logEntry{{Kind: logRaw, Text: raw}}
 }
 
 // toolResult is the text of a claude tool result, which is a string or
