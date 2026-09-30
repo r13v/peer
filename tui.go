@@ -28,6 +28,7 @@ import (
 
 const (
 	pollEvery  = 250 * time.Millisecond
+	closeAfter = 2 * time.Second // how long x waits for the second press
 	roomsEvery = time.Second
 )
 
@@ -152,7 +153,7 @@ func newKeyMap() keyMap {
 		Search:   b([]string{"/"}, "/", "search pane"),
 		Next:     b([]string{"n"}, "n", "next match"),
 		Prev:     b([]string{"N"}, "N", "previous match"),
-		Close:    b([]string{"x"}, "x", "close room"),
+		Close:    b([]string{"x"}, "x x", "close room"),
 		Compose:  b([]string{"i"}, "i", "message the room (Tab: recipient)"),
 		Esc:      b([]string{"esc"}, "Esc", "clear search / back"),
 		Help:     b([]string{"?"}, "?", "help"),
@@ -326,9 +327,13 @@ type model struct {
 	theme     int
 	dark      bool
 	lastRooms time.Time
-	renderer  *glamour.TermRenderer
-	rendered  map[string]string // glamour output by message ID
-	err       error
+	// The first x arms closing a room; a second x within closeAfter, with
+	// no other key between, closes it.
+	closing  entry
+	closeAt  time.Time
+	renderer *glamour.TermRenderer
+	rendered map[string]string // glamour output by message ID
+	err      error
 	// The composer keeps its draft until a send succeeds. It sends to the
 	// room it was opened in, whatever is selected by then.
 	composing   bool
@@ -828,6 +833,8 @@ func (m *model) pressCompose(msg tea.KeyPressMsg) tea.Cmd {
 }
 
 func (m *model) press(msg tea.KeyPressMsg) tea.Cmd {
+	armed := m.closeArmed()
+	m.closeAt = time.Time{}
 	if m.composing && msg.String() != "ctrl+c" {
 		return m.pressCompose(msg)
 	}
@@ -912,7 +919,7 @@ func (m *model) press(msg tea.KeyPressMsg) tea.Cmd {
 		p.vp.GotoBottom()
 		p.unread = false
 	case m.focus == focusRooms:
-		return m.pressRooms(msg)
+		return m.pressRooms(msg, armed)
 	default:
 		p := m.active()
 		p.vp, _ = p.vp.Update(msg)
@@ -923,7 +930,12 @@ func (m *model) press(msg tea.KeyPressMsg) tea.Cmd {
 	return nil
 }
 
-func (m *model) pressRooms(msg tea.KeyPressMsg) tea.Cmd {
+// closeArmed reports whether a first x is waiting for its second press.
+func (m *model) closeArmed() bool { return time.Since(m.closeAt) < closeAfter }
+
+// pressRooms handles keys in the room list. armed tells whether the key
+// follows a first x that armed closing m.closing.
+func (m *model) pressRooms(msg tea.KeyPressMsg, armed bool) tea.Cmd {
 	k := m.keys
 	switch {
 	case key.Matches(msg, k.Up) && m.sel > 0:
@@ -934,6 +946,10 @@ func (m *model) pressRooms(msg tea.KeyPressMsg) tea.Cmd {
 		m.focus = focusChat
 	case key.Matches(msg, k.Close) && m.sel >= 0 && m.sel < len(m.rooms) && m.rooms[m.sel].v.EndedAt == "":
 		e := m.rooms[m.sel]
+		if !armed || m.closing.key() != e.key() {
+			m.closing, m.closeAt = e, time.Now()
+			return nil
+		}
 		return func() tea.Msg { return closedMsg{e.s.close(e.v.ID)} }
 	}
 	return nil
@@ -1175,6 +1191,10 @@ func dayLabel(t, now time.Time) string {
 }
 
 func (m *model) statusLine() string {
+	if m.closeArmed() {
+		hint := " press x again to close " + m.closing.v.ID
+		return statusBar.Render(ansi.Truncate(hint+strings.Repeat(" ", max(m.width-ansi.StringWidth(hint), 0)), m.width, ""))
+	}
 	if m.searching {
 		m.input.SetWidth(m.width - 2)
 		return m.input.View()

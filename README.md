@@ -94,7 +94,7 @@ Run `peer` with no arguments. The left pane lists all rooms from all checkouts, 
 | Tab | Move focus to the next pane |
 | Enter | Open the selected room's transcript |
 | / then n/N | Search the focused pane |
-| x | End the selected active room (room list focused) |
+| x x | End the selected active room (room list focused); the first x asks for confirmation in the status bar |
 | i | Write a message to the selected active room; Tab picks all or one participant, Enter sends, Esc cancels |
 | ? | Show all keys |
 | q | Quit |

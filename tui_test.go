@@ -117,9 +117,15 @@ func TestCloseRoomFromList(t *testing.T) {
 		t.Fatal(err)
 	}
 	m := loaded(t, s)
+	if _, cmd := m.Update(press('x')); cmd != nil {
+		t.Fatal("the first x closed the room")
+	}
+	if !strings.Contains(m.statusLine(), "press x again to close stuck") {
+		t.Fatalf("status line lacks the close prompt: %q", m.statusLine())
+	}
 	_, cmd := m.Update(press('x'))
 	if cmd == nil {
-		t.Fatal("x did nothing on an active room")
+		t.Fatal("the second x did nothing on an active room")
 	}
 	m.Update(cmd())
 	for range 2 {
@@ -131,6 +137,53 @@ func TestCloseRoomFromList(t *testing.T) {
 	if !strings.Contains(m.render(), "closed in peer") {
 		t.Fatal("the list does not say why the room ended")
 	}
+}
+
+func TestCloseNeedsSecondPressOnSameRoom(t *testing.T) {
+	repo := testRepo(t)
+	startRoom(t, repo, "one")
+	startRoom(t, repo, "two")
+	s, err := openStore(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		name string
+		mid  func(m *model)
+	}{
+		{"another key between", func(m *model) { m.Update(press('m')) }},
+		{"window passed", func(m *model) { m.closeAt = m.closeAt.Add(-closeAfter) }},
+		{"another room selected", func(m *model) { m.choose(1 - m.sel) }},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			m := loaded(t, s)
+			m.Update(press('x'))
+			c.mid(m)
+			if _, cmd := m.Update(press('x')); cmd != nil {
+				t.Fatal("x closed a room without confirmation")
+			}
+		})
+	}
+	t.Run("list reordered", func(t *testing.T) {
+		m := loaded(t, s)
+		m.Update(press('x'))
+		armed := m.closing.v.ID
+		m.setRooms([]entry{m.rooms[1], m.rooms[0]})
+		_, cmd := m.Update(press('x'))
+		if cmd == nil {
+			t.Fatal("the second x did nothing")
+		}
+		m.Update(cmd())
+		for _, id := range []string{"one", "two"} {
+			v, err := s.session(id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if closed := v.EndedReason == "closed in peer"; closed != (id == armed) {
+				t.Fatalf("room %s: ended %q, armed room was %s", id, v.EndedReason, armed)
+			}
+		}
+	})
 }
 
 func TestReadLinesLeavesPartialLine(t *testing.T) {
