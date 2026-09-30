@@ -84,7 +84,7 @@ Codex can still write files in the checkout. For Codex and for other readers, th
 
 ## Watch rooms
 
-Run `peer` with no arguments. The left pane lists all rooms from all checkouts, active rooms first. The right pane shows the transcript of the selected room. The bottom pane shows the background reader's log. `peer` works outside a checkout too. On macOS, it sends a notification when the room that you watch ends.
+Run `peer` with no arguments. The left pane lists all rooms from all checkouts, active rooms first. The right pane shows the transcript of the selected room. The bottom pane shows the background reader's log. `peer` works outside a checkout too. Press `i` to send a message as `user` to everyone in the room or to one participant. Each agent reads it on its next `peer wait`. The name `user` is reserved for these messages. On macOS, it sends a notification when the room that you watch ends.
 
 | Key | Action |
 | --- | --- |
@@ -93,6 +93,7 @@ Run `peer` with no arguments. The left pane lists all rooms from all checkouts, 
 | Enter | Open the selected room's transcript |
 | / then n/N | Search the focused pane |
 | x | End the selected active room (room list focused) |
+| i | Write a message to the selected active room; Tab picks all or one participant, Enter sends, Esc cancels |
 | ? | Show all keys |
 | q | Quit |
 

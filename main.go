@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -74,6 +75,14 @@ var openURL = func(link string) error { return exec.Command("open", link).Run() 
 // waitTimeout bounds one wait call below Claude Code's two-minute Bash
 // limit; it is replaced in tests.
 var waitTimeout = 90 * time.Second
+
+const (
+	// human is the author of messages sent from the peer TUI; new rooms
+	// refuse it as a participant name.
+	human = "user"
+	// everyone addresses a message to every participant of a room.
+	everyone = "*"
+)
 
 func main() {
 	cwd, err := os.Getwd()
@@ -149,11 +158,13 @@ func run(args []string, in io.Reader, out io.Writer, cwd string) error {
 		if !roomName.MatchString(id) {
 			return errors.New("usage: peer start NAME --writer NAME --reader NAME; the room NAME is 1-40 characters: a-z, 0-9 or -, starting with a letter")
 		}
-		if err := checkName(*writer); err != nil {
-			return err
-		}
-		if err := checkName(*reader); err != nil {
-			return err
+		for _, name := range []string{*writer, *reader} {
+			if err := checkName(name); err != nil {
+				return err
+			}
+			if name == human {
+				return fmt.Errorf("%q is reserved for messages from the peer TUI", human)
+			}
 		}
 		if *writer == *reader {
 			return errors.New("writer and reader must be different participants")
@@ -195,12 +206,9 @@ func run(args []string, in io.Reader, out io.Writer, cwd string) error {
 		if err != nil {
 			return err
 		}
-		if len(body) > 64*1024 || !utf8.Valid(body) {
-			return errors.New("message must be UTF-8 and at most 64 KiB")
-		}
-		text := strings.TrimSpace(string(body))
-		if text == "" {
-			return errors.New("message is empty; pipe its text to stdin")
+		text, err := messageText(string(body))
+		if err != nil {
+			return err
 		}
 		return s.send(id, *actor, text, out)
 	case "wait":
@@ -353,6 +361,21 @@ func checkName(name string) error {
 	}
 	return nil
 }
+
+// messageText trims a message body and checks that it can be sent.
+func messageText(body string) (string, error) {
+	if len(body) > 64*1024 || !utf8.ValidString(body) {
+		return "", errors.New("message must be UTF-8 and at most 64 KiB")
+	}
+	text := strings.TrimSpace(body)
+	if text == "" {
+		return "", errors.New("message is empty; pipe its text to stdin")
+	}
+	return text, nil
+}
+
+// members lists the room's participants in the order the TUI offers them.
+func (s session) members() []string { return []string{s.Writer, s.Reader} }
 
 func (s session) other(name string) (string, error) {
 	if name == s.Writer {
@@ -600,31 +623,61 @@ func (s *store) send(sid, from, text string, out io.Writer) error {
 		if err != nil {
 			return err
 		}
-		id, err := newID()
+		m, err := s.appendMessage(v, from, to, text)
 		if err != nil {
 			return err
-		}
-		m := message{ID: id, At: time.Now().UTC().Format(time.RFC3339Nano), From: from, To: to, Text: text}
-		b, err := json.Marshal(m)
-		if err != nil {
-			return err
-		}
-		f, err := os.OpenFile(filepath.Join(s.dir, "sessions", v.ID, "messages.jsonl"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
-		if err != nil {
-			return err
-		}
-		if _, err = f.Write(append(b, '\n')); err == nil {
-			err = f.Sync()
-		}
-		closeErr := f.Close()
-		if err != nil {
-			return err
-		}
-		if closeErr != nil {
-			return closeErr
 		}
 		return json.NewEncoder(out).Encode(m)
 	})
+}
+
+// post sends text from the human to one participant of an active room,
+// or to all of them when to is everyone.
+func (s *store) post(sid, to, text string) error {
+	text, err := messageText(text)
+	if err != nil {
+		return err
+	}
+	return s.locked(func() error {
+		v, err := s.load(sid)
+		if err != nil {
+			return err
+		}
+		if v.EndedAt != "" {
+			return endedError(v)
+		}
+		if to != everyone && !slices.Contains(v.members(), to) {
+			return fmt.Errorf("%q is not a participant in session %s", to, v.ID)
+		}
+		_, err = s.appendMessage(v, human, to, text)
+		return err
+	})
+}
+
+// appendMessage adds a message to v's transcript; the caller holds the
+// store lock.
+func (s *store) appendMessage(v session, from, to, text string) (message, error) {
+	id, err := newID()
+	if err != nil {
+		return message{}, err
+	}
+	m := message{ID: id, At: time.Now().UTC().Format(time.RFC3339Nano), From: from, To: to, Text: text}
+	b, err := json.Marshal(m)
+	if err != nil {
+		return message{}, err
+	}
+	f, err := os.OpenFile(filepath.Join(s.dir, "sessions", v.ID, "messages.jsonl"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+	if err != nil {
+		return message{}, err
+	}
+	if _, err = f.Write(append(b, '\n')); err == nil {
+		err = f.Sync()
+	}
+	closeErr := f.Close()
+	if err != nil {
+		return message{}, err
+	}
+	return m, closeErr
 }
 
 func (s *store) nextMessage(sid, as string) (*message, error) {
@@ -677,7 +730,7 @@ func (s *store) nextMessage(sid, as string) (*message, error) {
 			if err := json.Unmarshal(line, &m); err != nil {
 				return err
 			}
-			if m.To == as {
+			if m.To == as || m.To == everyone {
 				found = &m
 				break
 			}
@@ -785,6 +838,7 @@ const (
 	ansiDim     = "\x1b[2m"
 	ansiWriter  = "\x1b[1;36m"
 	ansiReader  = "\x1b[1;35m"
+	ansiHuman   = "\x1b[1;33m"
 	ansiLinkEnd = "\x1b]8;;\x1b\\"
 )
 
@@ -848,6 +902,12 @@ func (p *printer) message(v session, m message) error {
 }
 
 func (p *printer) author(v session, name string) string {
+	switch name {
+	case everyone:
+		return "all"
+	case human:
+		return p.paint(ansiHuman, name)
+	}
 	if name == v.Writer {
 		return p.paint(ansiWriter, name)
 	}

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -353,5 +354,94 @@ func TestFileReferencesBecomeLinks(t *testing.T) {
 	link := "\x1b]8;;file://" + filepath.Join(v.Repo, "main.go")
 	if !strings.Contains(m.room.logs[0], link) || !strings.Contains(strings.Join(m.chat.lines, "\n"), link) {
 		t.Fatalf("file references not linked:\n%q\n%q", m.room.logs, m.chat.lines)
+	}
+}
+
+func TestComposeSendsToChosenMember(t *testing.T) {
+	repo := testRepo(t)
+	v := startRoom(t, repo, "compose", "claude", "copilot")
+	s, err := openStore(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := loaded(t, s)
+	m.Update(press('i'))
+	for _, r := range "q jx" { // room keys must type, not act
+		if _, cmd := m.Update(press(r)); cmd != nil && cmd() == tea.Quit() {
+			t.Fatal("q quit while composing")
+		}
+	}
+	m.Update(tea.PasteMsg{Content: " hi"})
+	if !strings.Contains(ansi.Strip(m.statusLine()), "to all › q jx hi") {
+		t.Fatalf("composer shows %q", ansi.Strip(m.statusLine()))
+	}
+	m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	if !strings.Contains(ansi.Strip(m.statusLine()), "to claude ›") {
+		t.Fatalf("Tab did not pick the first member: %q", ansi.Strip(m.statusLine()))
+	}
+	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m.Update(cmd())
+	msg, err := s.nextMessage(v.ID, "claude")
+	if err != nil || msg == nil || msg.Text != "q jx hi" || msg.From != human || msg.To != "claude" {
+		t.Fatalf("claude got %+v, %v", msg, err)
+	}
+	if msg, _ := s.nextMessage(v.ID, "copilot"); msg != nil {
+		t.Fatalf("copilot got %+v", msg)
+	}
+	if m.compose.Value() != "" || m.sendErr != nil {
+		t.Fatalf("draft %q, error %v after a send", m.compose.Value(), m.sendErr)
+	}
+}
+
+func TestComposeKeepsDraftWhenSendFails(t *testing.T) {
+	repo := testRepo(t)
+	v := startRoom(t, repo, "compose", "claude", "copilot")
+	s, err := openStore(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := loaded(t, s)
+	m.Update(press('i'))
+	m.Update(tea.PasteMsg{Content: "draft"})
+	if err := s.end(v.ID, "claude", io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	m.Update(cmd())
+	if m.sendErr == nil || m.compose.Value() != "draft" {
+		t.Fatalf("draft %q, error %v after a failed send", m.compose.Value(), m.sendErr)
+	}
+}
+
+func TestComposeWaitsForSendAndKeepsItsRoom(t *testing.T) {
+	repo := testRepo(t)
+	startRoom(t, repo, "first", "claude", "copilot")
+	startRoom(t, repo, "second", "claude", "copilot")
+	s, err := openStore(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := loaded(t, s)
+	target := m.room.e.v.ID
+	m.Update(press('i'))
+	m.Update(tea.PasteMsg{Content: "hello"})
+	m.choose(1 - m.sel)  // the selection moves while composing
+	m.Update(m.poll()()) // and the new room is read
+	_, send := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if m.Update(press('i')); m.composing {
+		t.Fatal("the composer reopened while a send was in flight")
+	}
+	m.Update(send())
+	if m.compose.Value() != "" || m.sending {
+		t.Fatalf("draft %q, sending %v after the send", m.compose.Value(), m.sending)
+	}
+	for _, id := range []string{"first", "second"} {
+		msg, err := s.nextMessage(id, "claude")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := msg != nil; got != (id == target) {
+			t.Fatalf("room %s got %+v; the draft was opened in %s", id, msg, target)
+		}
 	}
 }

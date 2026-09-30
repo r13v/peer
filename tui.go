@@ -41,6 +41,7 @@ var (
 	title        = lipgloss.NewStyle().Foreground(accent)
 	writerStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6"))
 	readerStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("5"))
+	humanStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("3"))
 	activeMark   = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
 	failedMark   = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
 	selected     = lipgloss.NewStyle().Background(accent).Foreground(lipgloss.Color("0"))
@@ -126,7 +127,7 @@ const (
 
 type keyMap struct {
 	Up, Down, Tab, Open, Log, Rooms, Markdown, Theme, NextMsg, PrevMsg, Top, Bottom,
-	Page, Sideways, Search, Next, Prev, Close, Esc, Help, Quit key.Binding
+	Page, Sideways, Search, Next, Prev, Close, Compose, Esc, Help, Quit key.Binding
 }
 
 func newKeyMap() keyMap {
@@ -152,6 +153,7 @@ func newKeyMap() keyMap {
 		Next:     b([]string{"n"}, "n", "next match"),
 		Prev:     b([]string{"N"}, "N", "previous match"),
 		Close:    b([]string{"x"}, "x", "close room"),
+		Compose:  b([]string{"i"}, "i", "message the room (Tab: recipient)"),
 		Esc:      b([]string{"esc"}, "Esc", "clear search / back"),
 		Help:     b([]string{"?"}, "?", "help"),
 		Quit:     b([]string{"q", "ctrl+c"}, "q", "quit"),
@@ -162,7 +164,7 @@ func (k keyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
 		{k.Up, k.Down, k.Page, k.Sideways, k.Top, k.Bottom, k.NextMsg, k.PrevMsg},
 		{k.Tab, k.Open, k.Log, k.Rooms, k.Markdown, k.Theme},
-		{k.Search, k.Next, k.Prev, k.Esc, k.Close, k.Help, k.Quit},
+		{k.Search, k.Next, k.Prev, k.Esc, k.Close, k.Compose, k.Help, k.Quit},
 	}
 }
 
@@ -327,13 +329,21 @@ type model struct {
 	renderer  *glamour.TermRenderer
 	rendered  map[string]string // glamour output by message ID
 	err       error
+	// The composer keeps its draft until a send succeeds. It sends to the
+	// room it was opened in, whatever is selected by then.
+	composing   bool
+	sending     bool // a post is in flight; the composer waits for it
+	compose     textinput.Model
+	composeRoom entry
+	composeTo   int // index into targets()
+	sendErr     error
 }
 
 func newModel(local *store) *model {
 	in := textinput.New()
 	in.Prompt = "/"
 	return &model{
-		local: local, zones: zone.New(), keys: newKeyMap(), help: help.New(), input: in,
+		local: local, zones: zone.New(), keys: newKeyMap(), help: help.New(), input: in, compose: textinput.New(),
 		chat: newPane(), log: newPane(), showLog: true, showRooms: true, markdown: true, dark: true,
 		rendered: map[string]string{}, counts: map[string]int{},
 	}
@@ -352,6 +362,8 @@ type pollMsg struct {
 }
 
 type closedMsg struct{ err error }
+
+type sentMsg struct{ err error }
 
 func (m *model) Init() tea.Cmd {
 	return tea.Batch(tea.RequestBackgroundColor, m.poll())
@@ -461,7 +473,7 @@ func roomStatus(v session, dir string) string {
 		return "ended"
 	}
 	var parts []string
-	for _, name := range []string{v.Writer, v.Reader} {
+	for _, name := range v.members() {
 		since, _ := time.Parse(time.RFC3339Nano, v.StartedAt)
 		if st, err := os.Stat(filepath.Join(dir, "cursor-"+name)); err == nil {
 			if time.Since(st.ModTime()) < 2*time.Second {
@@ -500,12 +512,23 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmds...)
 	case closedMsg:
 		m.err, m.lastRooms = msg.err, time.Time{}
+	case sentMsg:
+		m.sending = false
+		if m.sendErr = msg.err; msg.err == nil {
+			m.compose.SetValue("")
+		}
 	case tea.MouseWheelMsg:
 		m.wheel(msg)
 	case tea.MouseClickMsg:
 		m.click(msg)
 	case tea.KeyPressMsg:
 		return m, m.press(msg)
+	default:
+		if m.composing { // paste and cursor blinks
+			var cmd tea.Cmd
+			m.compose, cmd = m.compose.Update(msg)
+			return m, cmd
+		}
 	}
 	return m, nil
 }
@@ -578,7 +601,14 @@ func (m *model) tally() string {
 	if v.EndedAt != "" {
 		end, _ = time.Parse(time.RFC3339Nano, v.EndedAt)
 	}
-	return fmt.Sprintf("%d %s (%s %d, %s %d) in %s", len(m.room.msgs), noun, v.Writer, counts[v.Writer], v.Reader, counts[v.Reader], humanDuration(end.Sub(start)))
+	var parts []string
+	for _, name := range v.members() {
+		parts = append(parts, fmt.Sprintf("%s %d", name, counts[name]))
+	}
+	if counts[human] > 0 {
+		parts = append(parts, fmt.Sprintf("%s %d", human, counts[human]))
+	}
+	return fmt.Sprintf("%d %s (%s) in %s", len(m.room.msgs), noun, strings.Join(parts, ", "), humanDuration(end.Sub(start)))
 }
 
 // layout sizes the panes: rooms on the left, the transcript on the right,
@@ -620,6 +650,12 @@ func (m *model) restyle() {
 }
 
 func (m *model) author(v session, name string) string {
+	switch name {
+	case everyone:
+		return "all"
+	case human:
+		return humanStyle.Render(name)
+	}
 	if name == v.Writer {
 		return writerStyle.Render(name)
 	}
@@ -718,7 +754,63 @@ func (m *model) active() *pane {
 	return &m.chat
 }
 
+// targets lists who the composer can address: everyone, then each
+// participant of the room it was opened in.
+func (m *model) targets() []string {
+	return append([]string{everyone}, m.composeRoom.v.members()...)
+}
+
+func (m *model) composePrompt() string {
+	to := m.targets()[m.composeTo]
+	if to == everyone {
+		to = "all"
+	}
+	return "to " + to + " › "
+}
+
+// startCompose opens the composer on the selected room, keeping the
+// draft of an earlier failed or cancelled send.
+func (m *model) startCompose() tea.Cmd {
+	if m.sending {
+		return nil
+	}
+	if !m.room.loaded || m.room.e.v.EndedAt != "" {
+		m.sendErr = errors.New("select an active room to send a message")
+		return nil
+	}
+	if m.composeRoom.s == nil || m.room.e.key() != m.composeRoom.key() {
+		m.composeTo = 0
+	}
+	m.composing, m.composeRoom, m.sendErr = true, m.room.e, nil
+	m.compose.Prompt = m.composePrompt()
+	return m.compose.Focus()
+}
+
+func (m *model) pressCompose(msg tea.KeyPressMsg) tea.Cmd {
+	switch msg.String() {
+	case "esc":
+		m.composing = false
+		m.compose.Blur()
+	case "tab":
+		m.composeTo = (m.composeTo + 1) % len(m.targets())
+		m.compose.Prompt = m.composePrompt()
+	case "enter":
+		m.composing, m.sending = false, true
+		m.compose.Blur()
+		e, to, text := m.composeRoom, m.targets()[m.composeTo], m.compose.Value()
+		return func() tea.Msg { return sentMsg{e.s.post(e.v.ID, to, text)} }
+	default:
+		var cmd tea.Cmd
+		m.compose, cmd = m.compose.Update(msg)
+		return cmd
+	}
+	return nil
+}
+
 func (m *model) press(msg tea.KeyPressMsg) tea.Cmd {
+	if m.composing && msg.String() != "ctrl+c" {
+		return m.pressCompose(msg)
+	}
 	if m.searching && msg.String() != "ctrl+c" {
 		switch msg.String() {
 		case "esc":
@@ -778,6 +870,8 @@ func (m *model) press(msg tea.KeyPressMsg) tea.Cmd {
 		m.searching, m.searchIn = true, m.focus
 		m.input.SetValue("")
 		return m.input.Focus()
+	case key.Matches(msg, k.Compose):
+		return m.startCompose()
 	case key.Matches(msg, k.Next):
 		m.active().jump(1)
 	case key.Matches(msg, k.Prev):
@@ -866,7 +960,7 @@ func (m *model) wheel(msg tea.MouseWheelMsg) {
 		m.chat.vp, _ = m.chat.vp.Update(msg)
 	case m.zones.Get("log").InBounds(msg):
 		m.log.vp, _ = m.log.vp.Update(msg)
-	case m.zones.Get("rooms").InBounds(msg):
+	case m.zones.Get("rooms").InBounds(msg) && !m.composing:
 		if msg.Button == tea.MouseWheelUp && m.sel > 0 {
 			m.choose(m.sel - 1)
 		} else if msg.Button == tea.MouseWheelDown && m.sel < len(m.rooms)-1 {
@@ -876,6 +970,9 @@ func (m *model) wheel(msg tea.MouseWheelMsg) {
 }
 
 func (m *model) click(msg tea.MouseClickMsg) {
+	if m.composing { // the draft stays with its room
+		return
+	}
 	for i := range m.rooms {
 		if m.zones.Get("room" + strconv.Itoa(i)).InBounds(msg) {
 			m.choose(i)
@@ -1062,12 +1159,21 @@ func (m *model) statusLine() string {
 		m.input.SetWidth(m.width - 2)
 		return m.input.View()
 	}
+	if m.composing {
+		m.compose.SetWidth(m.width - 2 - ansi.StringWidth(m.compose.Prompt))
+		return m.compose.View()
+	}
 	left := " peer"
 	if m.room.e.s != nil {
 		left = " " + m.room.e.v.ID + fmt.Sprintf(" · %d msgs", len(m.room.msgs))
 	}
 	if m.err != nil {
 		left += " · " + m.err.Error()
+	}
+	if m.sending {
+		left += " · sending…"
+	} else if m.sendErr != nil {
+		left += " · not sent: " + m.sendErr.Error()
 	}
 	flags := "plain"
 	if m.markdown {

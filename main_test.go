@@ -620,3 +620,74 @@ func TestPickerCachesEndedCounts(t *testing.T) {
 		t.Fatalf("an ended count was reread, or leaked to the other room named same: %+v, %v", entries, err)
 	}
 }
+
+func TestPostFromUser(t *testing.T) {
+	repo := testRepo(t)
+	v := startRoom(t, repo, "post", "claude", "copilot")
+	s, err := openStore(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []struct{ to, text string }{{everyone, "to all"}, {"copilot", "to copilot"}} {
+		if err := s.post(v.ID, p.to, p.text); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for as, want := range map[string][]string{"claude": {"to all"}, "copilot": {"to all", "to copilot"}} {
+		var got []string
+		for {
+			m, err := s.nextMessage(v.ID, as)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if m == nil {
+				break
+			}
+			if m.From != human {
+				t.Fatalf("%s got a message from %q", as, m.From)
+			}
+			got = append(got, m.Text)
+		}
+		if strings.Join(got, "|") != strings.Join(want, "|") {
+			t.Fatalf("%s got %q, want %q", as, got, want)
+		}
+	}
+	for _, p := range []struct{ to, text string }{{"codex", "hi"}, {everyone, "  "}, {everyone, strings.Repeat("a", 64*1024+1)}, {everyone, "\xff"}} {
+		if err := s.post(v.ID, p.to, p.text); err == nil {
+			t.Fatalf("post to %q with %d bytes succeeded", p.to, len(p.text))
+		}
+	}
+	if err := s.end(v.ID, "claude", new(bytes.Buffer)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.post(v.ID, everyone, "late"); err == nil {
+		t.Fatal("post to an ended room succeeded")
+	}
+}
+
+func TestStartReservesUser(t *testing.T) {
+	repo := testRepo(t)
+	if _, err := invoke(repo, "", "start", "room", "--writer", "claude", "--reader", human); err == nil {
+		t.Fatal("start accepted the reserved name user")
+	}
+}
+
+func TestPostReachesLegacyUserParticipant(t *testing.T) {
+	repo := testRepo(t)
+	s, err := openStore(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v, err := s.start("legacy", human, "copilot", new(bytes.Buffer)) // before user was reserved
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.post(v.ID, everyone, "guidance"); err != nil {
+		t.Fatal(err)
+	}
+	for _, as := range v.members() {
+		if m, err := s.nextMessage(v.ID, as); err != nil || m == nil || m.Text != "guidance" {
+			t.Fatalf("%s got %+v, %v", as, m, err)
+		}
+	}
+}
