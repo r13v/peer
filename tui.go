@@ -2,6 +2,8 @@ package main
 
 import (
 	"bufio"
+	"bytes"
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -127,7 +129,7 @@ const (
 )
 
 type keyMap struct {
-	Up, Down, Tab, Open, Log, Rooms, Markdown, Theme, NextMsg, PrevMsg, Top, Bottom,
+	Up, Down, Tab, Open, Log, LogNext, Rooms, Markdown, Theme, NextMsg, PrevMsg, Top, Bottom,
 	Page, Sideways, Search, Next, Prev, Close, Compose, Esc, Help, Quit key.Binding
 }
 
@@ -141,6 +143,7 @@ func newKeyMap() keyMap {
 		Tab:      b([]string{"tab"}, "Tab", "next pane"),
 		Open:     b([]string{"enter"}, "Enter", "open room"),
 		Log:      b([]string{"l"}, "l", "toggle member log"),
+		LogNext:  b([]string{"L"}, "L", "next member's log"),
 		Rooms:    b([]string{"s"}, "s", "toggle rooms"),
 		Markdown: b([]string{"m"}, "m", "markdown / plain"),
 		Theme:    b([]string{"T"}, "T", "next theme"),
@@ -164,7 +167,7 @@ func newKeyMap() keyMap {
 func (k keyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
 		{k.Up, k.Down, k.Page, k.Sideways, k.Top, k.Bottom, k.NextMsg, k.PrevMsg},
-		{k.Tab, k.Open, k.Log, k.Rooms, k.Markdown, k.Theme},
+		{k.Tab, k.Open, k.Log, k.LogNext, k.Rooms, k.Markdown, k.Theme},
 		{k.Search, k.Next, k.Prev, k.Esc, k.Close, k.Compose, k.Help, k.Quit},
 	}
 }
@@ -288,16 +291,17 @@ func (p *pane) jump(dir int) {
 
 // room is what the TUI has read of the selected room so far.
 type room struct {
-	e       entry
-	loaded  bool
-	msgs    []message
-	msgOff  int64
-	logs    []string
-	logOff  int64
-	logRole string // the member whose log is shown, or "" if none has one
-	status  string
-	starts  []int // first chat line of each message
-	pending bool  // a room is selected but not read yet
+	e        entry
+	loaded   bool
+	msgs     []message
+	msgOff   int64
+	logs     []logEntry
+	logOff   int64
+	logRole  string   // the member whose log is shown, or "" if none has one
+	logRoles []string // the members that have a log, in join order
+	status   string
+	starts   []int // first chat line of each message
+	pending  bool  // a room is selected but not read yet
 }
 
 type model struct {
@@ -331,8 +335,9 @@ type model struct {
 	// no other key between, closes it.
 	closing  entry
 	closeAt  time.Time
-	renderer *glamour.TermRenderer
-	rendered map[string]string // glamour output by message ID
+	renderer *glamour.TermRenderer // for the chat's width
+	logGlam  *glamour.TermRenderer // for the log's width
+	rendered map[string]string     // glamour output by message ID, or "log\x00" and log text
 	err      error
 	// The composer keeps its draft until a send succeeds. It sends to the
 	// room it was opened in, whatever is selected by then.
@@ -400,7 +405,8 @@ func (m *model) poll() tea.Cmd {
 }
 
 // readRoom returns r with the messages and member log lines written
-// since it was last read. The log is the first launched member's.
+// since it was last read. The log is r.logRole's, or the first launched
+// member's when r.logRole has none.
 func readRoom(r room) (*room, error) {
 	v, err := r.e.s.refresh(r.e.v.ID)
 	if err != nil {
@@ -422,11 +428,17 @@ func readRoom(r room) (*room, error) {
 		r.msgs = append(r.msgs, msg)
 	}
 	r.msgOff = off
-	logRole := ""
+	r.logRoles = nil
 	for _, role := range v.members()[1:] {
 		if _, err := os.Stat(r.e.s.logPath(v.ID, role)); err == nil {
-			logRole = role
-			break
+			r.logRoles = append(r.logRoles, role)
+		}
+	}
+	logRole := r.logRole
+	if !slices.Contains(r.logRoles, logRole) {
+		logRole = ""
+		if len(r.logRoles) > 0 {
+			logRole = r.logRoles[0]
 		}
 	}
 	if logRole != r.logRole {
@@ -440,8 +452,13 @@ func readRoom(r room) (*room, error) {
 		r.logs = slices.Clone(r.logs)
 		links := &printer{repo: v.Repo, color: true}
 		for _, line := range lines {
-			if text := memberLogLine(line); text != "" {
-				r.logs = append(r.logs, links.links(text))
+			at, line := stamped(line)
+			for _, e := range memberLogLine(line) {
+				e.At = at
+				if e.Kind != logText { // text is linked after markdown
+					e.Text = links.links(e.Text)
+				}
+				r.logs = append(r.logs, e)
 			}
 		}
 		r.logOff = off
@@ -661,7 +678,7 @@ func (m *model) layout() {
 	m.log.vp.SetWidth(m.width - 2)
 	m.log.vp.SetHeight(max(m.logH-3, 1))
 	if resized {
-		m.renderer, m.rendered = nil, map[string]string{}
+		m.renderer, m.logGlam, m.rendered = nil, nil, map[string]string{}
 		m.renderChat()
 		m.renderLog()
 	}
@@ -669,8 +686,9 @@ func (m *model) layout() {
 
 // restyle drops rendered markdown after a theme or background change.
 func (m *model) restyle() {
-	m.renderer, m.rendered = nil, map[string]string{}
+	m.renderer, m.logGlam, m.rendered = nil, nil, map[string]string{}
 	m.renderChat()
+	m.renderLog()
 }
 
 func (m *model) author(v session, name string) string {
@@ -704,7 +722,7 @@ func (m *model) renderChat() {
 		}
 		m.room.starts = append(m.room.starts, len(lines))
 		lines = append(lines, dim.Render(at.Format("15:04:05"))+"  "+m.author(v, msg.From)+dim.Render(" → ")+m.author(v, msg.To))
-		lines = append(lines, strings.Split(m.body(msg, w), "\n")...)
+		lines = append(lines, strings.Split(m.body(&m.renderer, msg.ID, msg.Text, w), "\n")...)
 		lines = append(lines, "")
 	}
 	if len(m.room.msgs) == 0 {
@@ -721,17 +739,18 @@ func (m *model) renderChat() {
 	m.chat.setLines(lines)
 }
 
-// body renders a message as markdown, with code highlighted, or as plain
-// wrapped text.
-func (m *model) body(msg message, width int) string {
+// body renders text as markdown, with code highlighted, or as plain
+// wrapped text. r is the renderer for width, made on first use, and id
+// keys the rendered cache.
+func (m *model) body(r **glamour.TermRenderer, id, text string, width int) string {
 	if !m.markdown {
-		text := "  " + strings.ReplaceAll(ansi.Wrap(msg.Text, max(width-2, 10), ""), "\n", "\n  ")
+		text := "  " + strings.ReplaceAll(ansi.Wrap(text, max(width-2, 10), ""), "\n", "\n  ")
 		return (&printer{repo: m.room.e.v.Repo, color: true}).links(text)
 	}
-	if out, ok := m.rendered[msg.ID]; ok {
+	if out, ok := m.rendered[id]; ok {
 		return out
 	}
-	if m.renderer == nil {
+	if *r == nil {
 		style := themes[m.theme]
 		if style == "auto" {
 			style = "light"
@@ -739,20 +758,20 @@ func (m *model) body(msg message, width int) string {
 				style = "dark"
 			}
 		}
-		r, err := glamour.NewTermRenderer(glamour.WithStandardStyle(style), glamour.WithWordWrap(max(width-4, 10)))
+		g, err := glamour.NewTermRenderer(glamour.WithStandardStyle(style), glamour.WithWordWrap(max(width-4, 10)))
 		if err != nil {
 			m.err = err
 			m.markdown = false
-			return m.body(msg, width)
+			return m.body(r, id, text, width)
 		}
-		m.renderer = r
+		*r = g
 	}
-	out, err := m.renderer.Render(msg.Text)
+	out, err := (*r).Render(text)
 	if err != nil {
-		out = msg.Text
+		out = text
 	}
 	out = (&printer{repo: m.room.e.v.Repo, color: true}).links(strings.Trim(out, "\n"))
-	m.rendered[msg.ID] = out
+	m.rendered[id] = out
 	return out
 }
 
@@ -760,13 +779,67 @@ func (m *model) renderLog() {
 	if !m.room.loaded {
 		return
 	}
-	w := max(m.log.vp.Width(), 10)
-	var lines []string
-	for _, text := range m.room.logs {
-		lines = append(lines, strings.Split(ansi.Wrap(text, w, ""), "\n")...)
-	}
 	if m.room.logRole == "" {
-		lines = []string{dim.Render("No member runs headless, so there is no log here.")}
+		m.log.setLines([]string{dim.Render("No member runs headless, so there is no log here.")})
+		return
+	}
+	v, w := m.room.e.v, max(m.log.vp.Width(), 10)
+	var lines []string
+	add := func(st lipgloss.Style, prefix, text string, width int) {
+		for _, l := range strings.Split(ansi.Wrap(text, width, ""), "\n") {
+			lines = append(lines, st.Render(prefix+l))
+		}
+	}
+	gap := func() { // one blank line between blocks
+		if n := len(lines); n > 0 && lines[n-1] != "" {
+			lines = append(lines, "")
+		}
+	}
+	day, prev, prevAt := "", logKind(-1), time.Time{}
+	for _, e := range m.room.logs {
+		at := ""
+		if !e.At.IsZero() { // logs written before stamping have no times
+			local := e.At.Local()
+			if d := local.Format("Mon, 2 Jan 2006"); d != day {
+				day = d
+				gap()
+				lines = append(lines, dim.Render("── "+d+" ──"), "")
+			}
+			at = dim.Render(local.Format("15:04:05")) + "  "
+		}
+		switch e.Kind {
+		case logText:
+			gap()
+			lines = append(lines, at+m.author(v, m.room.logRole))
+			lines = append(lines, strings.Split(m.body(&m.logGlam, "log\x00"+e.Text, e.Text, w), "\n")...)
+		case logTool:
+			gap()
+			head := at + title.Render("$ "+e.Text)
+			if e.Failed {
+				head += " " + failedMark.Render("✗ failed")
+			}
+			lines = append(lines, strings.Split(ansi.Wrap(head, w, ""), "\n")...)
+		case logOutput:
+			if at != "" && !e.At.Equal(prevAt) { // claude's result is its own event
+				gap()
+				lines = append(lines, at+dim.Render("↳ output"))
+			}
+			st := dim
+			if e.Failed {
+				st = failedMark
+			}
+			add(st, "  │ ", e.Text, w-4)
+		default:
+			if prev != logRaw {
+				gap()
+			}
+			st := lipgloss.NewStyle()
+			if e.Failed {
+				st = failedMark
+			}
+			lines = append(lines, strings.Split(ansi.Wrap(at+st.Render(e.Text), w, ""), "\n")...)
+		}
+		prev, prevAt = e.Kind, e.At
 	}
 	m.log.setLines(lines)
 }
@@ -878,6 +951,16 @@ func (m *model) press(msg tea.KeyPressMsg) tea.Cmd {
 			m.focus = focusChat
 		}
 		m.layout()
+	case key.Matches(msg, k.LogNext):
+		if n := len(m.room.logRoles); n > 1 {
+			// Read the next member's log from its start, and drop a poll
+			// already under way, which reads the previous one's.
+			next := m.room.logRoles[(slices.Index(m.room.logRoles, m.room.logRole)+1)%n]
+			m.gen++
+			m.room.logs, m.room.logOff, m.room.logRole = nil, 0, next
+			m.log = newPane()
+			m.layout()
+		}
 	case key.Matches(msg, k.Rooms):
 		m.showRooms = !m.showRooms
 		if !m.showRooms && m.focus == focusRooms {
@@ -887,6 +970,7 @@ func (m *model) press(msg tea.KeyPressMsg) tea.Cmd {
 	case key.Matches(msg, k.Markdown):
 		m.markdown = !m.markdown
 		m.renderChat()
+		m.renderLog()
 	case key.Matches(msg, k.Theme):
 		m.theme = (m.theme + 1) % len(themes)
 		m.restyle()
@@ -1055,7 +1139,11 @@ func (m *model) render() string {
 		if m.room.logRole != "" {
 			name = m.room.e.v.label(m.room.logRole)
 		}
-		head := title.Render(name+" log") + paneState(&m.log)
+		head := title.Render(name + " log")
+		if n := len(m.room.logRoles); n > 1 {
+			head += dim.Render(fmt.Sprintf(" %d/%d · L next", slices.Index(m.room.logRoles, m.room.logRole)+1, n))
+		}
+		head += paneState(&m.log)
 		parts = append(parts, m.zones.Mark("log", box(head+"\n"+m.log.vp.View(), m.width, m.logH, m.focus == focusLog)))
 	}
 	parts = append(parts, m.statusLine())
@@ -1247,32 +1335,128 @@ func pad(s string, w int) string {
 	return s + strings.Repeat(" ", max(w-ansi.StringWidth(s), 0))
 }
 
-// memberLogLine turns one log line into display text. Codex writes plain
-// text; Claude writes stream-json events, of which only its text, tool
-// calls and final result are shown.
-func memberLogLine(line []byte) string {
-	var ev struct {
-		Type    string `json:"type"`
-		Result  string `json:"result"`
-		Message struct {
-			Content []struct {
-				Type  string          `json:"type"`
-				Text  string          `json:"text"`
-				Name  string          `json:"name"`
-				Input json.RawMessage `json:"input"`
-			} `json:"content"`
-		} `json:"message"`
+// logKind is what a member log entry shows.
+type logKind int
+
+const (
+	logRaw    logKind = iota // a line as written: plain output or stderr
+	logText                  // the member's own words, shown as markdown
+	logTool                  // a command or tool call
+	logOutput                // what a command or tool returned
+)
+
+// logEntry is one thing a member did, at the time its line was written;
+// At is zero in logs written before lines were stamped.
+type logEntry struct {
+	At     time.Time
+	Kind   logKind
+	Text   string
+	Failed bool
+}
+
+// stamped splits the time stamp writes before a log line from the line.
+func stamped(line []byte) (time.Time, []byte) {
+	if i := bytes.IndexByte(line, '\t'); i > 0 && i < 40 {
+		if at, err := time.Parse(time.RFC3339Nano, string(line[:i])); err == nil {
+			return at, line[i+1:]
+		}
 	}
+	return time.Time{}, line
+}
+
+// memberLogLine turns one log line into entries. Both apps write JSON
+// events: codex exec --json and claude stream-json. Anything else, such
+// as stderr or older plain codex logs, is shown as it is.
+func memberLogLine(line []byte) []logEntry {
+	var ev struct {
+		Type    string          `json:"type"`
+		Message json.RawMessage `json:"message"` // claude's message, or codex's error text
+		Subtype string          `json:"subtype"`
+		Result  string          `json:"result"`
+		Errors  []string        `json:"errors"`
+		IsError bool            `json:"is_error"`
+		Error   struct {
+			Message string `json:"message"`
+		} `json:"error"`
+		Item struct {
+			Type             string `json:"type"`
+			Text             string `json:"text"`
+			Message          string `json:"message"`
+			Command          string `json:"command"`
+			AggregatedOutput string `json:"aggregated_output"`
+			ExitCode         *int   `json:"exit_code"`
+			Status           string `json:"status"`
+			Server           string `json:"server"`
+			Tool             string `json:"tool"`
+			Query            string `json:"query"`
+			Changes          []struct {
+				Path string `json:"path"`
+			} `json:"changes"`
+		} `json:"item"`
+	}
+	raw := strings.TrimRight(string(line), "\r\n")
 	if json.Unmarshal(line, &ev) != nil || ev.Type == "" {
-		return strings.TrimRight(string(line), "\r\n")
+		if raw == "" {
+			return nil
+		}
+		return []logEntry{{Kind: logRaw, Text: raw}}
 	}
 	switch ev.Type {
-	case "assistant":
-		var parts []string
-		for _, c := range ev.Message.Content {
+	case "item.completed": // codex; item.started would repeat each command
+		it := ev.Item
+		switch it.Type {
+		case "agent_message":
+			return []logEntry{{Kind: logText, Text: it.Text}}
+		case "command_execution":
+			failed := it.Status == "failed" || it.ExitCode != nil && *it.ExitCode != 0
+			out := []logEntry{{Kind: logTool, Text: it.Command, Failed: failed}}
+			if o := strings.TrimRight(it.AggregatedOutput, "\n"); o != "" {
+				out = append(out, logEntry{Kind: logOutput, Text: o})
+			}
+			return out
+		case "file_change":
+			var paths []string
+			for _, c := range it.Changes {
+				paths = append(paths, c.Path)
+			}
+			return []logEntry{{Kind: logTool, Text: "edit " + strings.Join(paths, " "), Failed: it.Status == "failed"}}
+		case "mcp_tool_call":
+			return []logEntry{{Kind: logTool, Text: it.Server + "." + it.Tool, Failed: it.Status == "failed"}}
+		case "web_search":
+			return []logEntry{{Kind: logTool, Text: "search " + it.Query}}
+		case "error":
+			return []logEntry{{Kind: logRaw, Text: it.Message, Failed: true}}
+		case "reasoning", "todo_list":
+			return nil
+		}
+		return []logEntry{{Kind: logTool, Text: it.Type}}
+	case "error": // codex
+		var text string
+		if json.Unmarshal(ev.Message, &text) != nil {
+			text = raw
+		}
+		return []logEntry{{Kind: logRaw, Text: text, Failed: true}}
+	case "turn.failed": // codex
+		return []logEntry{{Kind: logRaw, Text: ev.Error.Message, Failed: true}}
+	case "assistant", "user": // claude
+		var msg struct {
+			Content []struct {
+				Type    string          `json:"type"`
+				Text    string          `json:"text"`
+				Name    string          `json:"name"`
+				Input   json.RawMessage `json:"input"`
+				Content json.RawMessage `json:"content"`
+				IsError bool            `json:"is_error"`
+			} `json:"content"`
+		}
+		if json.Unmarshal(ev.Message, &msg) != nil {
+			return nil // a user prompt given as a string
+		}
+		var out []logEntry
+		for _, c := range msg.Content {
 			switch c.Type {
 			case "text":
-				parts = append(parts, c.Text)
+				out = append(out, logEntry{Kind: logText, Text: c.Text})
 			case "tool_use":
 				var in struct {
 					Command string `json:"command"`
@@ -1281,12 +1465,40 @@ func memberLogLine(line []byte) string {
 				if json.Unmarshal(c.Input, &in) == nil && in.Command != "" {
 					arg = in.Command
 				}
-				parts = append(parts, "→ "+c.Name+" "+ansi.Truncate(arg, 200, "…"))
+				out = append(out, logEntry{Kind: logTool, Text: c.Name + " " + ansi.Truncate(arg, 200, "…")})
+			case "tool_result":
+				if text := strings.TrimRight(toolResult(c.Content), "\n"); text != "" || c.IsError {
+					out = append(out, logEntry{Kind: logOutput, Text: text, Failed: c.IsError})
+				}
 			}
 		}
-		return strings.Join(parts, "\n")
-	case "result":
-		return "result: " + ev.Result
+		return out
+	case "result": // claude; its text repeats the last message
+		if ev.IsError {
+			why := cmp.Or(ev.Result, strings.Join(ev.Errors, "; "), ev.Subtype)
+			return []logEntry{{Kind: logRaw, Text: "result: " + why, Failed: true}}
+		}
 	}
-	return ""
+	return nil
+}
+
+// toolResult is the text of a claude tool result, which is a string or
+// a list of content blocks.
+func toolResult(content json.RawMessage) string {
+	var text string
+	if json.Unmarshal(content, &text) == nil {
+		return text
+	}
+	var blocks []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	_ = json.Unmarshal(content, &blocks) // anything else has no text
+	var parts []string
+	for _, b := range blocks {
+		if b.Type == "text" {
+			parts = append(parts, b.Text)
+		}
+	}
+	return strings.Join(parts, "\n")
 }

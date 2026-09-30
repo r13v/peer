@@ -126,6 +126,9 @@ func run(args []string, in io.Reader, out io.Writer, cwd string) error {
 		}
 		return update(in, out)
 	}
+	if args[0] == "stamp" { // hidden: startMember pipes a member's output through it
+		return stamp(in, out)
+	}
 	if args[0] == "skills" {
 		docs := map[string][]byte{"flow": flowInstructions, "writer": writerInstructions, "member": memberInstructions}
 		if len(args) != 2 || docs[args[1]] == nil {
@@ -328,7 +331,7 @@ var appRunning = func(agent string) bool {
 // edit tools and only peer and read-only git in Bash.
 func memberArgs(s *store, agent, prompt string) []string {
 	if agent == "codex" {
-		return []string{"codex", "exec", "-C", s.repo, "-s", "workspace-write", "--add-dir", s.dir, "-c", "approval_policy=never", prompt}
+		return []string{"codex", "exec", "--json", "-C", s.repo, "-s", "workspace-write", "--add-dir", s.dir, "-c", "approval_policy=never", prompt}
 	}
 	return []string{"claude", "-p", "--verbose", "--output-format", "stream-json", "--permission-mode", "dontAsk", "--permission-prompts", "none", "--tools", "Bash", "Read", "Grep", "Glob", "Skill", "--allowedTools", "Skill", "Bash(peer:*)", "Bash(git diff:*)", "Bash(git status:*)", "Bash(git log:*)", "Bash(git show:*)", "Read", "Grep", "Glob", "--", prompt}
 }
@@ -341,12 +344,18 @@ var startMember = func(argv []string, dir, logPath, exitPath string) error {
 	if _, err := exec.LookPath(argv[0]); err != nil {
 		return err
 	}
+	self, err := os.Executable()
+	if err != nil {
+		return err
+	}
 	log, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 	if err != nil {
 		return err
 	}
 	defer log.Close()
-	cmd := exec.Command("sh", append([]string{"-c", `exit_file=$1; shift; "$@"; status=$?; echo "[peer] exited with status $status"; echo "$status" > "$exit_file"`, "sh", exitPath}, argv...)...)
+	// The status is taken inside the group: after the pipe, $? is stamp's.
+	script := `exit_file=$1; self=$2; shift 2; { "$@"; status=$?; echo "[peer] exited with status $status"; echo "$status" > "$exit_file"; } 2>&1 | "$self" stamp`
+	cmd := exec.Command("sh", append([]string{"-c", script, "sh", exitPath, self}, argv...)...)
 	cmd.Dir = dir
 	cmd.Stdout, cmd.Stderr = log, log
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
@@ -354,6 +363,29 @@ var startMember = func(argv []string, dir, logPath, exitPath string) error {
 		return err
 	}
 	return cmd.Process.Release()
+}
+
+// stamp copies in to out line by line, each prefixed with the time it
+// was read and a tab, so the log shows when a member wrote each line.
+func stamp(in io.Reader, out io.Writer) error {
+	r := bufio.NewReader(in)
+	for {
+		line, err := r.ReadBytes('\n')
+		if len(line) > 0 {
+			if line[len(line)-1] != '\n' {
+				line = append(line, '\n')
+			}
+			if _, werr := fmt.Fprintf(out, "%s\t%s", time.Now().UTC().Format(time.RFC3339Nano), line); werr != nil {
+				return werr
+			}
+		}
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+	}
 }
 
 // memberLink builds a desktop deep link that opens a new codex or claude

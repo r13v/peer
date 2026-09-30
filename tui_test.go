@@ -405,8 +405,8 @@ func TestFileReferencesBecomeLinks(t *testing.T) {
 	}
 	m := loaded(t, s)
 	link := "\x1b]8;;file://" + filepath.Join(v.Repo, "main.go")
-	if !strings.Contains(m.room.logs[0], link) || !strings.Contains(strings.Join(m.chat.lines, "\n"), link) {
-		t.Fatalf("file references not linked:\n%q\n%q", m.room.logs, m.chat.lines)
+	if !strings.Contains(m.room.logs[0].Text, link) || !strings.Contains(strings.Join(m.chat.lines, "\n"), link) {
+		t.Fatalf("file references not linked:\n%+v\n%q", m.room.logs, m.chat.lines)
 	}
 }
 
@@ -507,5 +507,64 @@ func TestRoomStatusShowsExitedMember(t *testing.T) {
 	v := session{StartedAt: time.Now().UTC().Format(time.RFC3339Nano), Members: []member{{Role: writer}, {Role: "reader", Exited: true}}}
 	if got := roomStatus(v, dir); !strings.HasSuffix(got, " · reader exited") {
 		t.Fatalf("status %q hides the exited member", got)
+	}
+}
+
+func TestLogSwitchesMembersAndShowsBlocks(t *testing.T) {
+	repo := testRepo(t)
+	v := startRoom(t, repo, "logs")
+	if _, err := invoke(repo, "", "join", v.ID, "tester"); err != nil {
+		t.Fatal(err)
+	}
+	s, err := openStore(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(s.dir, "sessions", v.ID)
+	at := "2026-10-01T09:08:07Z\t"
+	reader := at + `{"type":"item.completed","item":{"type":"agent_message","text":"reader **says**"}}` + "\n" +
+		at + `{"type":"item.completed","item":{"type":"command_execution","command":"go test","aggregated_output":"FAIL\n","exit_code":1,"status":"failed"}}` + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "reader.log"), []byte(reader), 0600); err != nil {
+		t.Fatal(err)
+	}
+	tester := "tester plain\n" +
+		"2026-10-01T09:08:07Z\t" + `{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"make"}}]}}` + "\n" +
+		"2026-10-01T09:09:37Z\t" + `{"type":"user","message":{"content":[{"type":"tool_result","content":"built"}]}}` + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "tester.log"), []byte(tester), 0600); err != nil {
+		t.Fatal(err)
+	}
+	m := loaded(t, s)
+	out := ansi.Strip(strings.Join(m.log.lines, "\n"))
+	stamp := time.Date(2026, 10, 1, 9, 8, 7, 0, time.UTC).Local().Format("15:04:05")
+	for _, want := range []string{stamp + "  reader", "reader says", stamp + "  $ go test ✗ failed", "  │ FAIL"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("log misses %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "**") {
+		t.Fatalf("log text not rendered as markdown:\n%s", out)
+	}
+	m.press(tea.KeyPressMsg{Code: 'm', Text: "m"})
+	if !strings.Contains(ansi.Strip(strings.Join(m.log.lines, "\n")), "reader **says**") {
+		t.Fatal("m did not show the log as plain text")
+	}
+	late := m.poll() // reads the reader's log
+	m.press(tea.KeyPressMsg{Code: 'L', Text: "L"})
+	m.Update(late())
+	if m.room.logRole != "tester" || len(m.room.logs) != 0 {
+		t.Fatalf("a late read of the previous log was shown: %s %+v", m.room.logRole, m.room.logs)
+	}
+	m.Update(m.poll()())
+	if len(m.room.logs) != 3 || m.room.logs[0].Text != "tester plain" || !strings.Contains(ansi.Strip(m.render()), "tester log 2/2") {
+		t.Fatalf("L did not show the tester's log: %+v", m.room.logs)
+	}
+	result := time.Date(2026, 10, 1, 9, 9, 37, 0, time.UTC).Local().Format("15:04:05")
+	if out := ansi.Strip(strings.Join(m.log.lines, "\n")); !strings.Contains(out, stamp+"  $ Bash make\n\n"+result+"  ↳ output\n  │ built") {
+		t.Fatalf("a later result lost its time:\n%s", out)
+	}
+	m.press(tea.KeyPressMsg{Code: 'L', Text: "L"})
+	m.Update(m.poll()())
+	if m.room.logRole != "reader" || len(m.room.logs) != 3 {
+		t.Fatalf("L did not cycle back to the reader: %s %+v", m.room.logRole, m.room.logs)
 	}
 }
