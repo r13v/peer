@@ -45,11 +45,14 @@ var (
 	humanStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("3"))
 	activeMark   = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
 	failedMark   = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
-	selected     = lipgloss.NewStyle().Background(accent).Foreground(lipgloss.Color("0"))
-	statusBar    = lipgloss.NewStyle().Background(accent).Foreground(lipgloss.Color("0"))
+	selected     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("2")).Background(lipgloss.Color("#161b22"))
 	matchStyle   = lipgloss.NewStyle().Reverse(true)
 	currentMatch = lipgloss.NewStyle().Background(lipgloss.Color("3")).Foreground(lipgloss.Color("0"))
-	border       = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("8"))
+	tabOn        = lipgloss.NewStyle().Bold(true).Padding(0, 1).Foreground(lipgloss.Color("#ffffff")).Background(lipgloss.Color("#1f6feb"))
+	tabOff       = lipgloss.NewStyle().Padding(0, 1).Foreground(lipgloss.Color("#c9d1d9")).Background(lipgloss.Color("#21262d"))
+	thumb        = lipgloss.NewStyle().Foreground(lipgloss.Color("#8b949e"))
+	rule         = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	keyStyle     = lipgloss.NewStyle().Bold(true)
 )
 
 // entry is a session with the store that holds it and its message count.
@@ -369,8 +372,10 @@ var inviteAgents = []string{"claude", "codex"}
 func newModel(local *store) *model {
 	in := textinput.New()
 	in.Prompt = "/"
+	h := help.New()
+	h.Styles.FullKey, h.Styles.FullDesc = keyStyle, dim
 	return &model{
-		local: local, zones: zone.New(), keys: newKeyMap(), help: help.New(), input: in, compose: textinput.New(), addInput: textinput.New(),
+		local: local, zones: zone.New(), keys: newKeyMap(), help: h, input: in, compose: textinput.New(), addInput: textinput.New(),
 		chat: newPane(), log: newPane(), showLog: true, showRooms: true, markdown: true, dark: true,
 		rendered: map[string]string{}, counts: map[string]int{},
 	}
@@ -683,13 +688,14 @@ func (m *model) tally() string {
 	return fmt.Sprintf("%d %s (%s) in %s", len(m.room.msgs), noun, strings.Join(parts, ", "), humanDuration(end.Sub(start)))
 }
 
-// layout sizes the panes: rooms on the left, the transcript on the right,
-// the reader log across the bottom and a status bar below everything.
+// layout sizes the panes: tabs on top, rooms on the left, the transcript
+// on the right, the member log across the bottom, then a rule and the
+// key hints. Each pane keeps two columns on its right for its scrollbar.
 func (m *model) layout() {
 	if m.width == 0 {
 		return
 	}
-	h := m.height - 1
+	h := m.height - 3
 	m.logH = 0
 	if m.showLog && h >= 12 { // too short for both, the log gives way
 		m.logH = max(h/3, 6)
@@ -705,9 +711,9 @@ func (m *model) layout() {
 	chatW := m.width - m.sideW
 	resized := m.chat.vp.Width() != chatW-2 || m.log.vp.Width() != m.width-2
 	m.chat.vp.SetWidth(chatW - 2)
-	m.chat.vp.SetHeight(max(m.topH-3, 1))
+	m.chat.vp.SetHeight(max(m.topH-1, 1))
 	m.log.vp.SetWidth(m.width - 2)
-	m.log.vp.SetHeight(max(m.logH-3, 1))
+	m.log.vp.SetHeight(max(m.logH-1, 1))
 	if resized {
 		m.renderer, m.logGlam, m.rendered = nil, nil, map[string]string{}
 		m.renderChat()
@@ -1133,13 +1139,7 @@ func (m *model) pressRooms(msg tea.KeyPressMsg, armed bool) tea.Cmd {
 }
 
 func (m *model) cycleFocus() {
-	order := []focus{focusChat}
-	if m.showRooms {
-		order = append([]focus{focusRooms}, order...)
-	}
-	if m.logH > 0 {
-		order = append(order, focusLog)
-	}
+	order := m.panes()
 	i := slices.Index(order, m.focus)
 	m.focus = order[(i+1)%len(order)]
 }
@@ -1186,6 +1186,12 @@ func (m *model) click(msg tea.MouseClickMsg) {
 	if m.composing { // the draft stays with its room
 		return
 	}
+	for _, f := range m.panes() {
+		if m.zones.Get("tab" + paneNames[f]).InBounds(msg) {
+			m.focus = f
+			return
+		}
+	}
 	for i := range m.rooms {
 		if m.zones.Get("room" + strconv.Itoa(i)).InBounds(msg) {
 			m.choose(i)
@@ -1218,15 +1224,15 @@ func (m *model) render() string {
 	var chat string
 	if m.showHelp {
 		m.help.SetWidth(chatW - 2)
-		chat = box(title.Render("Keys")+"\n\n"+m.help.FullHelpView(m.keys.FullHelp()), chatW, m.topH, true)
+		chat = fit(" "+title.Render("Keys")+"\n\n"+m.help.FullHelpView(m.keys.FullHelp()), chatW, m.topH)
 	} else {
-		chat = box(m.chatTitle()+"\n"+m.chat.vp.View(), chatW, m.topH, m.focus == focusChat)
+		chat = fit(" "+m.chatTitle(), chatW, 1) + "\n" + m.chat.view()
 	}
 	top := m.zones.Mark("chat", chat)
 	if m.showRooms {
-		top = lipgloss.JoinHorizontal(lipgloss.Top, m.zones.Mark("rooms", box(m.roomList(), m.sideW, m.topH, m.focus == focusRooms)), top)
+		top = lipgloss.JoinHorizontal(lipgloss.Top, m.zones.Mark("rooms", m.roomList()), top)
 	}
-	parts := []string{top}
+	parts := []string{m.tabs(), top}
 	if m.logH > 0 {
 		name := "member"
 		if m.room.logRole != "" {
@@ -1237,10 +1243,75 @@ func (m *model) render() string {
 			head += dim.Render(fmt.Sprintf(" %d/%d · L next", slices.Index(m.room.logRoles, m.room.logRole)+1, n))
 		}
 		head += paneState(&m.log)
-		parts = append(parts, m.zones.Mark("log", box(head+"\n"+m.log.vp.View(), m.width, m.logH, m.focus == focusLog)))
+		parts = append(parts, m.zones.Mark("log", divider(head, m.width)+"\n"+m.log.view()))
 	}
-	parts = append(parts, m.statusLine())
-	return lipgloss.JoinVertical(lipgloss.Left, parts...)
+	parts = append(parts, divider("", m.width), m.statusLine())
+	return strings.Join(parts, "\n")
+}
+
+var paneNames = map[focus]string{focusRooms: "Rooms", focusChat: "Chat", focusLog: "Log"}
+
+// panes lists the shown panes in Tab order.
+func (m *model) panes() []focus {
+	order := []focus{focusChat}
+	if m.showRooms {
+		order = append([]focus{focusRooms}, order...)
+	}
+	if m.logH > 0 {
+		order = append(order, focusLog)
+	}
+	return order
+}
+
+// tabs names the shown panes, the focused one highlighted.
+func (m *model) tabs() string {
+	var out []string
+	for _, f := range m.panes() {
+		st := tabOff
+		if f == m.focus {
+			st = tabOn
+		}
+		out = append(out, m.zones.Mark("tab"+paneNames[f], st.Render(paneNames[f])))
+	}
+	return " " + strings.Join(out, " ")
+}
+
+// view is the pane's viewport with its scrollbar on the right.
+func (p *pane) view() string {
+	w, h := p.vp.Width(), p.vp.Height()
+	lines := strings.Split(fit(p.vp.View(), w, h), "\n")
+	bar := scrollbar(h, p.vp.TotalLineCount(), h, p.vp.YOffset(), " ")
+	for i := range lines {
+		lines[i] += " " + bar[i]
+	}
+	return strings.Join(lines, "\n")
+}
+
+// scrollbar draws a column of h cells on track, with a thumb sized and
+// placed by which visible lines from offset of total are on screen.
+func scrollbar(h, total, visible, offset int, track string) []string {
+	bar := make([]string, max(h, 0))
+	for i := range bar {
+		bar[i] = track
+	}
+	if h <= 0 || total <= visible {
+		return bar
+	}
+	size := min(max(h*visible/total, 1), h)
+	pos := (h - size) * min(max(offset, 0), total-visible) / (total - visible)
+	for i := pos; i < pos+size; i++ {
+		bar[i] = thumb.Render("┃")
+	}
+	return bar
+}
+
+// divider is a rule width cells wide, with head, if any, near its start.
+func divider(head string, width int) string {
+	if head == "" {
+		return rule.Render(strings.Repeat("─", max(width, 0)))
+	}
+	head = ansi.Truncate(head, max(width-4, 0), "…")
+	return rule.Render("── ") + head + " " + rule.Render(strings.Repeat("─", max(width-ansi.StringWidth(head)-4, 0)))
 }
 
 func (m *model) chatTitle() string {
@@ -1263,9 +1334,10 @@ func paneState(p *pane) string {
 	return s
 }
 
-// roomList renders the rooms, scrolled so the selected one stays visible.
+// roomList renders the rooms, scrolled so the selected one stays visible,
+// with a scrollbar that doubles as the rule beside the transcript.
 func (m *model) roomList() string {
-	w, h := m.sideW-2, max(m.topH-2, 1)
+	w, h := m.sideW-2, max(m.topH, 1)
 	var lines []string
 	var owner []int // the room each line belongs to, or -1
 	add := func(i int, line string) {
@@ -1301,7 +1373,7 @@ func (m *model) roomList() string {
 		} else if e.v.EndedAt != "" {
 			mark, markStyle = "○", dim
 		}
-		repo, avail := filepath.Base(e.v.Repo), max(w-4, 2)
+		repo, avail := filepath.Base(e.v.Repo), max(w-5, 2)
 		rw := min(ansi.StringWidth(repo), max(avail-ansi.StringWidth(e.v.ID)-1, avail/3))
 		id := pad(ansi.Truncate(e.v.ID, avail-rw-1, "…"), avail-rw-1)
 		repo = ansi.Truncate(repo, rw, "…")
@@ -1309,9 +1381,9 @@ func (m *model) roomList() string {
 		if m.local != nil && e.v.Repo == m.local.repo {
 			repoStyle = title
 		}
-		row := " " + markStyle.Render(mark) + " " + id + " " + repoStyle.Render(repo)
+		row := "  " + markStyle.Render(mark) + " " + id + " " + repoStyle.Render(repo)
 		if i == m.sel {
-			row, at = selected.Render(pad(" "+mark+" "+id+" "+repo, w)), len(lines)
+			row, at = selected.Render(pad("❯ "+mark+" "+id+" "+repo, w)), len(lines)
 		}
 		// Short fields first, so a narrow list keeps them; the pair is
 		// usually the same and goes last. An ended room's day is in its
@@ -1321,7 +1393,7 @@ func (m *model) roomList() string {
 			end, _ = time.Parse(time.RFC3339Nano, e.v.EndedAt)
 			when = start.Format("15:04") + " · "
 		}
-		detail := dim.Render(fmt.Sprintf("   %s%d msgs · %s · ", when, e.count, humanDuration(end.Sub(start))))
+		detail := dim.Render(fmt.Sprintf("    %s%d msgs · %s · ", when, e.count, humanDuration(end.Sub(start))))
 		if e.v.EndedReason != "" {
 			detail += failedMark.Render(e.v.EndedReason) + dim.Render(" · ")
 		}
@@ -1332,10 +1404,17 @@ func (m *model) roomList() string {
 	if len(m.rooms) == 0 {
 		add(-1, dim.Render("No rooms. Start one with /peer in an agent chat."))
 	}
-	// Keep both lines of the selected room on screen, then mark the
-	// visible lines of each room as one zone.
+	// Keep both lines of the selected room on screen, fill the height, add
+	// the scrollbar, then mark the visible lines of each room as one zone.
 	first := min(max(at-h+2, 0), max(len(lines)-h, 0))
-	last := min(first+h, len(lines))
+	bar := scrollbar(h, len(lines), h, first, rule.Render("│"))
+	for len(lines) < first+h {
+		add(-1, "")
+	}
+	for j := first; j < first+h; j++ {
+		lines[j] = pad(ansi.Truncate(lines[j], w, ""), w) + " " + bar[j-first]
+	}
+	last := first + h
 	var out []string
 	for j := first; j < last; {
 		k := j + 1
@@ -1371,10 +1450,11 @@ func dayLabel(t, now time.Time) string {
 	return t.Format("Mon _2 Jan 2006")
 }
 
+// statusLine is the footer: the pending prompt or input if any, else
+// notices or key hints for the focused pane, with the room on the right.
 func (m *model) statusLine() string {
 	if m.closeArmed() {
-		hint := " press x again to close " + m.closing.v.ID
-		return statusBar.Render(ansi.Truncate(hint+strings.Repeat(" ", max(m.width-ansi.StringWidth(hint), 0)), m.width, ""))
+		return ansi.Truncate(" "+failedMark.Render("press x again to close "+m.closing.v.ID)+dim.Render(" · any other key cancels"), m.width, "")
 	}
 	if m.searching {
 		m.input.SetWidth(m.width - 2)
@@ -1386,46 +1466,81 @@ func (m *model) statusLine() string {
 	}
 	switch m.adding {
 	case addPick:
-		line := " add ›"
+		line := " " + title.Render("add ›")
 		for i, a := range inviteAgents {
 			if i == m.addAgent {
-				a = "[" + a + "]"
+				a = selected.Render("[" + a + "]")
 			}
 			line += " " + a
 		}
-		return statusBar.Render(pad(ansi.Truncate(line+"  · Tab switch · Enter next · Esc cancel", m.width, ""), m.width))
+		return ansi.Truncate(line+"   "+hints("tab", "switch", "enter", "next", "esc", "cancel"), m.width, "")
 	case addDescribe:
 		m.addInput.SetWidth(m.width - 2 - ansi.StringWidth(m.addInput.Prompt))
 		return m.addInput.View()
 	}
-	left := " peer"
-	if m.room.e.s != nil {
-		left = " " + m.room.e.v.ID + fmt.Sprintf(" · %d msgs", len(m.room.msgs))
-	}
+	var notes []string
 	if m.err != nil {
-		left += " · " + m.err.Error()
+		notes = append(notes, failedMark.Render(m.err.Error()))
 	}
 	switch {
 	case m.sending:
-		left += " · sending…"
+		notes = append(notes, dim.Render("sending…"))
 	case m.sendErr != nil:
-		left += " · not sent: " + m.sendErr.Error()
+		notes = append(notes, failedMark.Render("not sent: "+m.sendErr.Error()))
 	case m.added != "":
-		left += " · " + m.added
+		notes = append(notes, activeMark.Render(m.added))
 	}
-	flags := "plain"
+	if len(notes) > 0 { // notices outrank the room info, which may be long
+		return ansi.Truncate(" "+strings.Join(notes, dim.Render(" · ")), m.width, "…")
+	}
+	left := m.hints()
+	right := "peer"
+	if m.room.e.s != nil {
+		right = m.room.e.v.ID + fmt.Sprintf(" · %d msgs", len(m.room.msgs))
+	}
 	if m.markdown {
-		flags = "md " + themes[m.theme]
+		right += " · md " + themes[m.theme]
+	} else {
+		right += " · plain"
 	}
-	right := flags + " │ ? help "
+	right = dim.Render(right) + " "
+	left = ansi.Truncate(" "+left, max(m.width-ansi.StringWidth(right)-1, 0), "…")
 	gap := max(m.width-ansi.StringWidth(left)-ansi.StringWidth(right), 1)
-	return statusBar.Render(ansi.Truncate(left+strings.Repeat(" ", gap)+right, m.width, ""))
+	return ansi.Truncate(left+strings.Repeat(" ", gap)+right, m.width, "")
 }
 
-// box frames content of width by height cells, cutting or padding each
-// line so that panes line up whatever they hold.
-func box(content string, width, height int, focused bool) string {
-	w, h := max(width-2, 1), max(height-2, 1)
+// hints are the keys worth showing for the focused pane.
+func (m *model) hints() string {
+	var pairs []string
+	if m.focus == focusRooms {
+		pairs = []string{"↑/↓", "navigate", "enter", "open", "x x", "close", "i", "message", "a", "add"}
+	} else {
+		pairs = []string{"↑/↓", "scroll", "/", "search"}
+		if m.active().query != "" {
+			pairs = append(pairs, "n/N", "match")
+		}
+		if m.focus == focusChat {
+			pairs = append(pairs, "[/]", "message", "i", "send")
+		} else if len(m.room.logRoles) > 1 {
+			pairs = append(pairs, "L", "next log")
+		}
+	}
+	return hints(append(pairs, "tab", "pane", "?", "help", "q", "quit")...)
+}
+
+// hints renders key and description pairs as "key desc · key desc".
+func hints(pairs ...string) string {
+	var out []string
+	for i := 0; i+1 < len(pairs); i += 2 {
+		out = append(out, keyStyle.Render(pairs[i])+" "+dim.Render(pairs[i+1]))
+	}
+	return strings.Join(out, dim.Render(" · "))
+}
+
+// fit cuts or pads content to width by height cells, so that panes line
+// up whatever they hold.
+func fit(content string, width, height int) string {
+	w, h := max(width, 1), max(height, 1)
 	lines := strings.Split(content, "\n")
 	lines = lines[:min(len(lines), h)]
 	for len(lines) < h {
@@ -1434,11 +1549,7 @@ func box(content string, width, height int, focused bool) string {
 	for i, line := range lines {
 		lines[i] = pad(ansi.Truncate(line, w, ""), w)
 	}
-	st := border
-	if focused {
-		st = st.BorderForeground(accent)
-	}
-	return st.Render(strings.Join(lines, "\n"))
+	return strings.Join(lines, "\n")
 }
 
 func pad(s string, w int) string {

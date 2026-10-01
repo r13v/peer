@@ -2,10 +2,12 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -251,7 +253,7 @@ func TestRoomListKeepsSelectionVisible(t *testing.T) {
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 20})
 	m.choose(7)
 	list := ansi.Strip(m.roomList())
-	if lines := strings.Split(list, "\n"); len(lines) != m.topH-2 || !strings.HasPrefix(lines[len(lines)-2], " ○ "+m.rooms[7].v.ID) {
+	if lines := strings.Split(list, "\n"); len(lines) != m.topH || !strings.HasPrefix(lines[len(lines)-2], "❯ ○ "+m.rooms[7].v.ID) {
 		t.Fatalf("selected room and its summary not both on screen:\n%s", list)
 	}
 }
@@ -649,5 +651,116 @@ func TestAddKeepsDescriptionWhenRoomEnds(t *testing.T) {
 	m.Update(cmd())
 	if m.sendErr == nil || m.addInput.Value() != "tech writer" || m.added != "" {
 		t.Fatalf("description %q, error %v, added %q after a failed send", m.addInput.Value(), m.sendErr, m.added)
+	}
+}
+
+func TestScrollbar(t *testing.T) {
+	thumbAt := func(bar []string) (first, n int) {
+		first = -1
+		for i, c := range bar {
+			if ansi.Strip(c) == "┃" {
+				if first < 0 {
+					first = i
+				}
+				n++
+			}
+		}
+		return first, n
+	}
+	for _, c := range []struct{ h, total, visible int }{{0, 5, 2}, {1, 0, 1}, {3, 3, 3}, {2, 1, 5}} {
+		if bar := scrollbar(c.h, c.total, c.visible, 0, " "); len(bar) != max(c.h, 0) || slices.ContainsFunc(bar, func(s string) bool { return s != " " }) {
+			t.Fatalf("%+v: %q", c, bar)
+		}
+	}
+	for _, h := range []int{1, 2, 10} {
+		prev := -1
+		for off := 0; off <= 90; off++ {
+			first, n := thumbAt(scrollbar(h, 100, 10, off, " "))
+			if n < 1 || first < prev || first+n > h {
+				t.Fatalf("h %d offset %d: thumb at %d size %d after %d", h, off, first, n, prev)
+			}
+			prev = first
+		}
+		if first, n := thumbAt(scrollbar(h, 100, 10, 90, " ")); first+n != h {
+			t.Fatalf("h %d: thumb does not reach the bottom at the last offset", h)
+		}
+	}
+}
+
+func TestRenderFitsWindow(t *testing.T) {
+	repo := testRepo(t)
+	for range 8 {
+		startRoom(t, repo, "r")
+	}
+	s, err := openStore(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := loaded(t, s)
+	for _, size := range [][2]int{{100, 30}, {80, 12}, {60, 8}} {
+		m.Update(tea.WindowSizeMsg{Width: size[0], Height: size[1]})
+		lines := strings.Split(m.zones.Scan(m.render()), "\n")
+		if len(lines) != size[1] {
+			t.Fatalf("%v: %d lines", size, len(lines))
+		}
+		for i, l := range lines {
+			if w := ansi.StringWidth(l); w > size[0] {
+				t.Fatalf("%v: line %d is %d wide: %q", size, i, w, ansi.Strip(l))
+			}
+		}
+	}
+}
+
+func TestNoticeOutranksLongRoomID(t *testing.T) {
+	repo := testRepo(t)
+	startRoom(t, repo, strings.Repeat("x", 40))
+	s, err := openStore(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := loaded(t, s)
+	m.Update(tea.WindowSizeMsg{Width: 60, Height: 8})
+	m.sendErr = errors.New("room ended")
+	if line := ansi.Strip(m.statusLine()); !strings.Contains(line, "not sent: room ended") {
+		t.Fatalf("notice hidden: %q", line)
+	}
+}
+
+func TestMouseOnTabsRoomsAndScrollbar(t *testing.T) {
+	repo := testRepo(t)
+	for range 3 {
+		startRoom(t, repo, "r")
+	}
+	s, err := openStore(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := loaded(t, s)
+	m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m.chat.setLines(slices.Repeat([]string{"line"}, 100))
+	// Zones are recorded off the update loop in order; the log is marked last.
+	m.zones.Scan(m.render())
+	for deadline := time.Now().Add(2 * time.Second); m.zones.Get("log").IsZero(); {
+		if time.Now().After(deadline) {
+			t.Fatal("zones not recorded")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	at := func(id string) (int, int) { z := m.zones.Get(id); return z.StartX, z.StartY }
+	x, y := at("tabLog")
+	m.Update(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
+	if m.focus != focusLog {
+		t.Fatalf("Log tab click left focus %d", m.focus)
+	}
+	off, z := m.chat.vp.YOffset(), m.zones.Get("chat")
+	m.Update(tea.MouseWheelMsg{X: z.EndX, Y: z.StartY + 5, Button: tea.MouseWheelUp})
+	if m.chat.vp.YOffset() >= off {
+		t.Fatalf("wheel over the chat scrollbar left offset %d", m.chat.vp.YOffset())
+	}
+	// Choosing a room replaces the chat pane, so this goes last.
+	x, y = at("room1")
+	m.Update(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
+	if m.sel != 1 || m.focus != focusRooms {
+		t.Fatalf("room click: sel %d focus %d", m.sel, m.focus)
 	}
 }
