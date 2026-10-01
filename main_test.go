@@ -150,7 +150,7 @@ func TestUpdateSkipsHomebrew(t *testing.T) {
 	if _, err := invoke(dir, "", "update", "extra"); err == nil {
 		t.Fatal("extra argument accepted")
 	}
-	for _, sub := range []string{"Caskroom/peer/0.1.2", "Cellar/peer/0.1.2/bin", "local/bin"} {
+	for _, sub := range []string{"Caskroom/peer/0.1.2", "Cellar/peer/0.1.2/bin", "Applications/Peer.app/Contents/Resources", "local/bin"} {
 		target := filepath.Join(dir, sub, "peer")
 		if err := os.MkdirAll(filepath.Dir(target), 0700); err != nil {
 			t.Fatal(err)

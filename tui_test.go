@@ -277,49 +277,6 @@ func TestEmptyRoomListReplacesLastRoom(t *testing.T) {
 	}
 }
 
-func TestNotifyWhenWatchedRoomEnds(t *testing.T) {
-	repo := testRepo(t)
-	v := startRoom(t, repo, "watched")
-	s, err := openStore(repo)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var got []string
-	old := notify
-	notify = func(_, text string) { got = append(got, text) }
-	t.Cleanup(func() { notify = old })
-	m := loaded(t, s)
-	if _, err := invoke(repo, "", "end", v.ID, "--as", "writer"); err != nil {
-		t.Fatal(err)
-	}
-	_, cmd := m.Update(m.poll()())
-	if len(got) != 0 {
-		t.Fatal("notified inside Update")
-	}
-	runAll(cmd)
-	if len(got) != 1 || !strings.HasPrefix(got[0], "Session ended: 1 message") {
-		t.Fatalf("want one end notification: %q", got)
-	}
-}
-
-// runAll runs cmd and any batch it returns, except ticks that would wait.
-func runAll(cmd tea.Cmd) {
-	if cmd == nil {
-		return
-	}
-	done := make(chan tea.Msg, 1)
-	go func() { done <- cmd() }()
-	select {
-	case msg := <-done:
-		if batch, ok := msg.(tea.BatchMsg); ok {
-			for _, c := range batch {
-				runAll(c)
-			}
-		}
-	case <-time.After(pollEvery / 2):
-	}
-}
-
 func TestEndedRoomStaysSelected(t *testing.T) {
 	repo := testRepo(t)
 	startRoom(t, repo, "older")

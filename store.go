@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -349,9 +350,8 @@ func (s *store) finish(v *session, reason string) error {
 	return writeJSON(s.sessionPath(v.ID), v)
 }
 
-func (s *store) start(name, agent string, out io.Writer) (session, error) {
-	var v session
-	err := s.locked(func() error {
+func (s *store) start(name, agent string, out io.Writer) error {
+	return s.locked(func() error {
 		if err := os.MkdirAll(filepath.Join(s.dir, "sessions"), 0700); err != nil {
 			return err
 		}
@@ -367,13 +367,12 @@ func (s *store) start(name, agent string, out io.Writer) (session, error) {
 			}
 			id = fmt.Sprintf("%s-%d", name, n)
 		}
-		v = session{ID: id, Repo: s.repo, Members: []member{{Role: writer, Agent: agent}}, StartedAt: time.Now().UTC().Format(time.RFC3339Nano)}
+		v := session{ID: id, Repo: s.repo, Members: []member{{Role: writer, Agent: agent}}, StartedAt: time.Now().UTC().Format(time.RFC3339Nano)}
 		if err := writeJSON(filepath.Join(dir, "session.json"), v); err != nil {
 			return err
 		}
 		return json.NewEncoder(out).Encode(v)
 	})
-	return v, err
 }
 
 // join adds m to active room id and tells the writer. A role that is
@@ -583,8 +582,18 @@ func (s *store) nextMessage(sid, as string) (*message, error) {
 }
 
 func (s *store) wait(sid, as string, timeout time.Duration, out io.Writer) error {
-	deadline := time.Now().Add(timeout)
+	return s.waitContext(context.Background(), sid, as, timeout, out)
+}
+
+// waitContext is wait that stops with ctx's error when ctx is done, as
+// when an MCP client cancels the call, without taking a message after.
+func (s *store) waitContext(ctx context.Context, sid, as string, timeout time.Duration, out io.Writer) error {
+	deadline, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		m, err := s.nextMessage(sid, as)
 		if err != nil {
 			return err
@@ -595,10 +604,14 @@ func (s *store) wait(sid, as string, timeout time.Duration, out io.Writer) error
 				Message message `json:"message"`
 			}{"message", *m})
 		}
-		if !time.Now().Before(deadline) {
+		select {
+		case <-deadline.Done():
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			return json.NewEncoder(out).Encode(map[string]string{"status": "timeout"})
+		case <-time.After(200 * time.Millisecond):
 		}
-		time.Sleep(200 * time.Millisecond)
 	}
 }
 

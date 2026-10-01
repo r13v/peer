@@ -13,7 +13,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"strings"
 	"time"
 
@@ -29,7 +28,7 @@ var memberInstructions []byte
 //go:embed instructions/writer.md
 var writerInstructions []byte
 
-const usage = "usage: peer, peer --version, peer update, peer skills flow|writer|member, peer start NAME, peer join|invite ID ROLE, peer send|wait|end ID --as ROLE, peer status [ID], peer history, or peer log ID"
+const usage = "usage: peer, peer --version, peer update, peer skills flow|writer|member, peer start NAME, peer join|invite ID ROLE, peer send|wait|end ID --as ROLE, peer status [ID], peer history, peer log ID, or peer mcp"
 
 // version is set at release build time.
 var version = "dev"
@@ -76,6 +75,15 @@ func run(args []string, in io.Reader, out io.Writer, cwd string) error {
 		}
 		_, err := out.Write(docs[args[1]])
 		return err
+	}
+	if args[0] == "app" { // hidden: the macOS app's interface
+		return appCommand(args[1:], in, out)
+	}
+	if args[0] == "mcp" {
+		if len(args) != 1 {
+			return errors.New("usage: peer mcp")
+		}
+		return serveMCP(cwd, in, out)
 	}
 	s, err := openStore(cwd)
 	if err != nil {
@@ -129,8 +137,7 @@ func run(args []string, in io.Reader, out io.Writer, cwd string) error {
 		if err := checkAgent(*agent); err != nil {
 			return err
 		}
-		_, err := s.start(id, *agent, out)
-		return err
+		return s.start(id, *agent, out)
 	case "join":
 		if err := needRole("join ID ROLE [--agent NAME]"); err != nil {
 			return err
@@ -224,14 +231,14 @@ func update(in io.Reader, out io.Writer) error {
 
 // installDir is the directory update replaces executable in. Homebrew owns
 // its copies, so replacing one would leave brew with a version it did not
-// install.
+// install; the copy inside Peer.app comes with the app.
 func installDir(executable string) (string, error) {
 	resolved, err := filepath.EvalSymlinks(executable)
 	if err != nil {
 		return "", err
 	}
 	for _, part := range strings.Split(filepath.ToSlash(resolved), "/") {
-		if part == "Caskroom" || part == "Cellar" {
+		if part == "Caskroom" || part == "Cellar" || strings.HasSuffix(part, ".app") {
 			return "", errors.New("installed with Homebrew; update it with brew upgrade --cask peer")
 		}
 	}
@@ -254,15 +261,6 @@ var (
 	boldSpan   = regexp.MustCompile(`\*\*([^*\n]+)\*\*`)
 	listMarker = regexp.MustCompile(`^(\s*)([-*]|\d+\.)(\s)`)
 )
-
-// notify shows a desktop notification; it is replaced in tests.
-var notify = func(title, text string) {
-	if runtime.GOOS != "darwin" {
-		return
-	}
-	// Pass text as arguments so it is never parsed as AppleScript.
-	_ = exec.Command("osascript", "-e", "on run argv", "-e", "display notification (item 2 of argv) with title (item 1 of argv)", "-e", "end run", title, text).Run()
-}
 
 // printer renders the transcript for people. Colors and links need a
 // terminal, so redirected logs stay plain; NO_COLOR turns them off.

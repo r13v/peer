@@ -519,9 +519,41 @@ func readLines(path string, offset int64) (lines [][]byte, next int64, exists bo
 	}
 }
 
-// roomStatus says what each participant of an active room is doing,
-// inferred from wait polling: a cursor touched in the last 2s means
-// waiting; otherwise the participant is busy.
+// memberState is what a participant of an active room is doing, inferred
+// from wait polling: a cursor touched in the last 2s means waiting;
+// otherwise the participant is busy since its last poll, or since the
+// room started.
+type memberState struct {
+	Role  string    `json:"role"`
+	Agent string    `json:"agent,omitempty"`
+	State string    `json:"state"` // waiting, busy, exited or ended
+	Since time.Time `json:"since"`
+}
+
+func memberStates(v session, dir string) []memberState {
+	states := make([]memberState, len(v.Members))
+	for i, m := range v.Members {
+		st := memberState{Role: m.Role, Agent: m.Agent, State: "busy"}
+		st.Since, _ = time.Parse(time.RFC3339Nano, v.StartedAt)
+		switch {
+		case v.EndedAt != "":
+			st.State = "ended"
+		case m.Exited:
+			st.State = "exited"
+		default:
+			if fi, err := os.Stat(filepath.Join(dir, "cursor-"+m.Role)); err == nil {
+				st.Since = fi.ModTime()
+				if time.Since(fi.ModTime()) < 2*time.Second {
+					st.State = "waiting"
+				}
+			}
+		}
+		states[i] = st
+	}
+	return states
+}
+
+// roomStatus says in one line what each participant is doing.
 func roomStatus(v session, dir string) string {
 	if v.EndedAt != "" {
 		if v.EndedReason != "" {
@@ -530,21 +562,13 @@ func roomStatus(v session, dir string) string {
 		return "ended"
 	}
 	var parts []string
-	for _, m := range v.Members {
-		name := m.Role
-		if m.Exited {
-			parts = append(parts, name+" exited")
-			continue
+	for _, st := range memberStates(v, dir) {
+		switch st.State {
+		case "busy":
+			parts = append(parts, st.Role+" busy "+humanDuration(time.Since(st.Since)))
+		default:
+			parts = append(parts, st.Role+" "+st.State)
 		}
-		since, _ := time.Parse(time.RFC3339Nano, v.StartedAt)
-		if st, err := os.Stat(filepath.Join(dir, "cursor-"+name)); err == nil {
-			if time.Since(st.ModTime()) < 2*time.Second {
-				parts = append(parts, name+" waiting")
-				continue
-			}
-			since = st.ModTime()
-		}
-		parts = append(parts, name+" busy "+humanDuration(time.Since(since)))
 	}
 	return strings.Join(parts, " · ")
 }
@@ -565,7 +589,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// room leaves the list when its session directory is removed.
 		cmds := []tea.Cmd{tea.Tick(pollEvery, func(time.Time) tea.Msg { return tickMsg{} })}
 		if msg.room != nil && msg.gen == m.gen && msg.room.e.key() == m.room.e.key() {
-			cmds = append(cmds, m.apply(msg.room))
+			m.apply(msg.room)
 		}
 		if msg.listed {
 			m.lastRooms = msg.polled
@@ -633,10 +657,8 @@ func (m *model) choose(i int) {
 	m.layout()
 }
 
-// apply shows what a poll read of the selected room; it returns a
-// notification when the room is seen to end.
-func (m *model) apply(r *room) tea.Cmd {
-	wasActive := m.room.loaded && m.room.e.v.EndedAt == ""
+// apply shows what a poll read of the selected room.
+func (m *model) apply(r *room) {
 	grew := len(r.msgs) != len(m.room.msgs) || r.e.v.EndedAt != m.room.e.v.EndedAt || !m.room.loaded
 	logGrew := len(r.logs) != len(m.room.logs) || r.logRole != m.room.logRole || !m.room.loaded
 	r.starts = m.room.starts // a render since the poll may have moved them
@@ -647,11 +669,6 @@ func (m *model) apply(r *room) tea.Cmd {
 	if logGrew {
 		m.renderLog()
 	}
-	if wasActive && r.e.v.EndedAt != "" {
-		text := "Session ended: " + m.tally()
-		return func() tea.Msg { notify("peer", text); return nil }
-	}
-	return nil
 }
 
 // tally counts the room's messages by author, e.g.

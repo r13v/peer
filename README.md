@@ -86,7 +86,7 @@ Codex can still write files in the checkout. For Codex and for other members, th
 
 ## Watch rooms
 
-Run `peer` with no arguments. The left pane lists all rooms from all checkouts, active rooms first. The right pane shows the transcript of the selected room. The bottom pane shows the log of a background member, with the time of each message and command. Press `L` to switch to the next background member. `peer` works outside a checkout too. Press `i` to send a message as `user` to everyone in the room or to one participant. Each agent reads it on its next `peer wait`. The name `user` is reserved for these messages. Press `a` to ask the writer to add a member: pick `claude` or `codex` and describe the role in a few words, such as `security reviewer`. The writer picks the role name, expands the description into a brief and runs `peer invite` on its next `peer wait`. On macOS, it sends a notification when the room that you watch ends.
+Run `peer` with no arguments. The left pane lists all rooms from all checkouts, active rooms first. The right pane shows the transcript of the selected room. The bottom pane shows the log of a background member, with the time of each message and command. Press `L` to switch to the next background member. `peer` works outside a checkout too. Press `i` to send a message as `user` to everyone in the room or to one participant. Each agent reads it on its next `peer wait`. The name `user` is reserved for these messages. Press `a` to ask the writer to add a member: pick `claude` or `codex` and describe the role in a few words, such as `security reviewer`. The writer picks the role name, expands the description into a brief and runs `peer invite` on its next `peer wait`.
 
 | Key | Action |
 | --- | --- |
@@ -99,6 +99,30 @@ Run `peer` with no arguments. The left pane lists all rooms from all checkouts, 
 | a | Ask the writer of the selected active room to add a member; Tab switches the agent, Enter moves on to the role description and then sends, Esc cancels |
 | ? | Show all keys |
 | q | Quit |
+
+### macOS app
+
+`make app` builds `Peer.app` (macOS 26 or later) with the CLI inside it. The app adds a menu bar icon that lists active rooms and opens a window with:
+
+- Rooms from all checkouts, grouped by project, with an All, Active or Ended filter and a search field; ⌘K jumps to the search.
+- The transcript rendered as Markdown, with diffs colored. Paths to files in the checkout open in an editor; Settings sets its URL, such as `vscode://file/{path}:{line}`. A message's context menu copies it or reveals or previews a file it names.
+- An inspector with each member's state (waiting, busy and for how long, exited), the room's end reason, and when the app last read peer. Click a member to show its log.
+- A background member's log; long output collapses, and when only the latest entries are shown, Load Earlier reads further back.
+- Lists that follow new messages only while you are at the end; otherwise a button counts what is new.
+- Messages as `user` to everyone or one member, with a draft kept per room and recipient, closing a room and asking the writer to add a member.
+- A notification when a room ends or a member exits; clicking it opens the room. A room's context menu mutes its notifications.
+
+The app reads rooms through its own copy of `peer` when the store changes, and never moves an agent's place in the transcript. Quitting the app leaves rooms and members running.
+
+## MCP
+
+`peer mcp` serves the room commands as MCP tools over stdio: `peer_start`, `peer_join`, `peer_invite`, `peer_send`, `peer_wait`, `peer_status`, `peer_end` and `peer_skills`. Each tool takes the room and role as parameters, and an optional `repo` path; without it, the tool uses the directory that the MCP client started `peer mcp` in. `peer_wait` waits up to 55 seconds, 45 by default, so it stays within Codex's 60-second tool timeout. For example, in Claude Code:
+
+```sh
+claude mcp add peer -- peer mcp
+```
+
+Agents still follow the peer skill; the tools only replace the shell commands.
 
 ## Commands
 
@@ -116,6 +140,7 @@ Run these commands inside the shared Git checkout.
 | `peer history` | List all rooms in this checkout |
 | `peer log ROOM` | Print a transcript |
 | `peer skills flow\|writer\|member` | Print the agent instructions |
+| `peer mcp` | Serve the room commands as MCP tools over stdio |
 | `peer update` | Update an installer copy of the CLI |
 | `peer --version` | Print the version |
 

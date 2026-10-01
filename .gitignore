@@ -1,2 +1,4 @@
 /peer
 /dist/
+/Peer.app
+/macos/.build
