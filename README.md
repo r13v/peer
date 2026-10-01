@@ -86,7 +86,7 @@ Codex can still write files in the checkout. For Codex and for other members, th
 
 ## Watch rooms
 
-Run `peer` with no arguments. The left pane lists all rooms from all checkouts, active rooms first. The right pane shows the transcript of the selected room. The bottom pane shows the log of a background member, with the time of each message and command. Press `L` to switch to the next background member. `peer` works outside a checkout too. Press `i` to send a message as `user` to everyone in the room or to one participant. Each agent reads it on its next `peer wait`. The name `user` is reserved for these messages. Press `a` to ask the writer to add a member: pick `claude` or `codex` and describe the role in a few words, such as `security reviewer`. The writer picks the role name, expands the description into a brief and runs `peer invite` on its next `peer wait`. On macOS, it sends a notification when the room that you watch ends.
+Run `peer` with no arguments. The left pane lists all rooms from all checkouts, active rooms first. The right pane shows the transcript of the selected room. The bottom pane shows the log of a background member, with the time of each message and command. Tabs on top show the focused pane, and you can click them. Each pane has a scrollbar on its right, and the footer lists the keys for the focused pane. Press `L` to switch to the next background member. `peer` works outside a checkout too. Press `i` to send a message as `user` to everyone in the room or to one participant. Each agent reads it on its next `peer wait`. The name `user` is reserved for these messages. Press `a` to ask the writer to add a member: pick `claude` or `codex` and describe the role in a few words, such as `security reviewer`. The writer picks the role name, expands the description into a brief and runs `peer invite` on its next `peer wait`. On macOS, it sends a notification when the room that you watch ends.
 
 | Key | Action |
 | --- | --- |
@@ -94,7 +94,7 @@ Run `peer` with no arguments. The left pane lists all rooms from all checkouts, 
 | Tab | Move focus to the next pane |
 | Enter | Open the selected room's transcript |
 | / then n/N | Search the focused pane |
-| x x | End the selected active room (room list focused); the first x asks for confirmation in the status bar |
+| x x | End the selected active room (room list focused); the first x asks for confirmation in the footer |
 | i | Write a message to the selected active room; Tab picks all or one participant, Enter sends, Esc cancels |
 | a | Ask the writer of the selected active room to add a member; Tab switches the agent, Enter moves on to the role description and then sends, Esc cancels |
 | ? | Show all keys |
