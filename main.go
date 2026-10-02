@@ -30,12 +30,12 @@ var memberInstructions []byte
 //go:embed instructions/writer.md
 var writerInstructions []byte
 
-const usage = "usage: peer, peer --version, peer update, peer skills flow|writer|member, peer start NAME, peer join|invite ID ROLE, peer send|wait|end ID --as ROLE, peer status [ID], peer history, or peer log ID"
+const usage = "usage: peer, peer --version, peer update, peer skills flow|writer|member, peer start NAME, peer join|invite ID ROLE, peer send|wait|end ID --as ROLE, peer wait ID --as ROLE --timeout DURATION, peer status [ID], peer history, or peer log ID"
 
 // version is set at release build time.
 var version = "dev"
 
-// waitTimeout bounds one wait call below Claude Code's two-minute Bash
+// waitTimeout is wait's default bound, below Claude Code's two-minute Bash
 // limit; it is replaced in tests.
 var waitTimeout = 90 * time.Second
 
@@ -89,6 +89,7 @@ func run(args []string, in io.Reader, out io.Writer, cwd string) error {
 	agent := fs.String("agent", "", "app behind the participant")
 	brief := fs.String("brief", "", "extra instructions for invite")
 	headed := fs.Bool("headed", false, "open the member's desktop app for invite")
+	timeout := fs.Duration("timeout", waitTimeout, "how long wait waits; 0 waits for a message")
 	// The room name or ID and, for join and invite, the role come first,
 	// as in peer join ID ROLE; Go's flag parsing would stop at them, so
 	// they are taken off before the flags.
@@ -178,7 +179,10 @@ func run(args []string, in io.Reader, out io.Writer, cwd string) error {
 		if err := checkName(*actor); err != nil {
 			return err
 		}
-		return s.wait(id, *actor, waitTimeout, out)
+		if *timeout < 0 {
+			return errors.New("usage: peer wait ID --as ROLE [--timeout DURATION]; the timeout cannot be negative")
+		}
+		return s.wait(id, *actor, *timeout, out)
 	case "end":
 		if err := needID("end"); err != nil {
 			return err

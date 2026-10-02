@@ -35,7 +35,7 @@ func TestMain(m *testing.M) {
 	appRunning = func(string) bool { return false }
 	realStartMember = startMember
 	startMember = func([]string, string, string, string) error { return nil }
-	waitTimeout = 0
+	waitTimeout = time.Nanosecond
 	os.Exit(m.Run())
 }
 
@@ -704,11 +704,71 @@ func TestCloseRoom(t *testing.T) {
 	}
 }
 
+func TestWaitWithoutTimeoutWaitsForMessageOrEnd(t *testing.T) {
+	repo := testRepo(t)
+	v := startRoom(t, repo, "patient")
+	if _, err := invoke(repo, "", "wait", v.ID, "--as", "reader", "--timeout", "-1s"); err == nil {
+		t.Fatal("wait accepted a negative timeout")
+	}
+	done := make(chan error, 1)
+	var text string
+	go func() {
+		var err error
+		text, err = invoke(repo, "", "wait", v.ID, "--as", "reader", "--timeout", "0")
+		done <- err
+	}()
+	time.Sleep(300 * time.Millisecond)
+	if _, err := invoke(repo, "ready", "send", v.ID, "--as", "writer"); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil || !strings.Contains(text, `"text":"ready"`) {
+		t.Fatalf("wait --timeout 0 = %q, %v; want the message", text, err)
+	}
+	go func() {
+		_, err := invoke(repo, "", "wait", v.ID, "--as", "reader", "--timeout", "0")
+		done <- err
+	}()
+	time.Sleep(300 * time.Millisecond)
+	if _, err := invoke(repo, "", "end", v.ID, "--as", "writer"); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err == nil || !strings.Contains(err.Error(), "ended") {
+		t.Fatalf("wait --timeout 0 in an ended room: %v", err)
+	}
+}
+
+func TestFailedDeliveryKeepsMessage(t *testing.T) {
+	repo := testRepo(t)
+	v := startRoom(t, repo, "retry")
+	s, err := openStore(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.post(v.ID, "reader", "once"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.wait(v.ID, "reader", time.Nanosecond, failingWriter{}); err == nil {
+		t.Fatal("wait hid the write error")
+	}
+	var out bytes.Buffer
+	if err := s.wait(v.ID, "reader", time.Nanosecond, &out); err != nil || !strings.Contains(out.String(), `"text":"once"`) {
+		t.Fatalf("wait after a failed write = %q, %v", out.String(), err)
+	}
+	if m, err := s.nextMessage(v.ID, "reader"); err != nil || m != nil {
+		t.Fatalf("delivered message came again: %+v, %v", m, err)
+	}
+}
+
+// failingWriter fails every write, as a closed stdout does.
+type failingWriter struct{}
+
+func (failingWriter) Write([]byte) (int, error) { return 0, errors.New("stdout closed") }
+
 func TestWaitReceivesLaterMessage(t *testing.T) {
 	repo := testRepo(t)
 	v := startRoom(t, repo, "later")
 	waitTimeout = 2 * time.Second
-	t.Cleanup(func() { waitTimeout = 0 })
+	t.Cleanup(func() { waitTimeout = time.Nanosecond })
 	done := make(chan struct {
 		text string
 		err  error

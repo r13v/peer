@@ -521,7 +521,21 @@ func (s *store) appendMessage(v session, from, to, text string) (message, error)
 
 func (s *store) nextMessage(sid, as string) (*message, error) {
 	var found *message
-	err := s.locked(func() error {
+	err := s.deliverNext(sid, as, func(m message) error {
+		found = &m
+		return nil
+	})
+	return found, err
+}
+
+// deliverNext passes as's next message to deliver and only then moves
+// as's cursor past it, so a wait killed while printing leaves the message
+// for the next wait; a repeat is better than a loss. deliver runs under the
+// checkout's lock, so a stalled stdout holds up every room here; give each
+// role its own delivery lock if that ever matters.
+func (s *store) deliverNext(sid, as string, deliver func(message) error) error {
+	return s.locked(func() error {
+		var found *message
 		v, err := s.load(sid)
 		if err != nil {
 			return err
@@ -577,25 +591,32 @@ func (s *store) nextMessage(sid, as string) (*message, error) {
 		if found == nil && v.EndedAt != "" {
 			return endedError(v)
 		}
+		if found != nil {
+			if err := deliver(*found); err != nil {
+				return err
+			}
+		}
 		return writeAtomic(cursorPath, []byte(strconv.FormatInt(offset, 10)+"\n"))
 	})
-	return found, err
 }
 
+// wait prints as's next message, or a timeout once timeout passes; a
+// zero timeout waits until a message comes or the session ends.
 func (s *store) wait(sid, as string, timeout time.Duration, out io.Writer) error {
 	deadline := time.Now().Add(timeout)
 	for {
-		m, err := s.nextMessage(sid, as)
-		if err != nil {
-			return err
-		}
-		if m != nil {
+		delivered := false
+		err := s.deliverNext(sid, as, func(m message) error {
+			delivered = true
 			return json.NewEncoder(out).Encode(struct {
 				Status  string  `json:"status"`
 				Message message `json:"message"`
-			}{"message", *m})
+			}{"message", m})
+		})
+		if err != nil || delivered {
+			return err
 		}
-		if !time.Now().Before(deadline) {
+		if timeout > 0 && !time.Now().Before(deadline) {
 			return json.NewEncoder(out).Encode(map[string]string{"status": "timeout"})
 		}
 		time.Sleep(200 * time.Millisecond)
