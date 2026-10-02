@@ -30,7 +30,10 @@ var memberInstructions []byte
 //go:embed instructions/writer.md
 var writerInstructions []byte
 
-const usage = "usage: peer, peer --version, peer update, peer skills flow|writer|member, peer start NAME, peer join|invite ID ROLE, peer send|wait|end ID --as ROLE, peer wait ID --as ROLE --timeout DURATION, peer status [ID], peer history, or peer log ID"
+//go:embed instructions/worker.md
+var workerInstructions []byte
+
+const usage = "usage: peer, peer --version, peer update, peer skills flow|writer|member|worker, peer start NAME, peer join|invite ID ROLE, peer send|wait|end ID --as ROLE, peer wait ID --as ROLE --timeout DURATION, peer status [ID], peer history, or peer log ID"
 
 // version is set at release build time.
 var version = "dev"
@@ -71,9 +74,9 @@ func run(args []string, in io.Reader, out io.Writer, cwd string) error {
 		return stamp(in, out)
 	}
 	if args[0] == "skills" {
-		docs := map[string][]byte{"flow": flowInstructions, "writer": writerInstructions, "member": memberInstructions}
+		docs := map[string][]byte{"flow": flowInstructions, "writer": writerInstructions, "member": memberInstructions, "worker": workerInstructions}
 		if len(args) != 2 || docs[args[1]] == nil {
-			return errors.New("usage: peer skills flow|writer|member")
+			return errors.New("usage: peer skills flow|writer|member|worker")
 		}
 		_, err := out.Write(docs[args[1]])
 		return err
@@ -88,7 +91,9 @@ func run(args []string, in io.Reader, out io.Writer, cwd string) error {
 	to := fs.String("to", everyone, "recipient role for send")
 	agent := fs.String("agent", "", "app behind the participant")
 	brief := fs.String("brief", "", "extra instructions for invite")
-	headed := fs.Bool("headed", false, "open the member's desktop app for invite")
+	worker := fs.Bool("worker", false, "let the invited member edit files")
+	worktree := fs.Bool("worktree", false, "give the invited worker its own worktree")
+	model := fs.String("model", "", "model for the invited member's CLI")
 	timeout := fs.Duration("timeout", waitTimeout, "how long wait waits; 0 waits for a message")
 	// The room name or ID and, for join and invite, the role come first,
 	// as in peer join ID ROLE; Go's flag parsing would stop at them, so
@@ -142,13 +147,16 @@ func run(args []string, in io.Reader, out io.Writer, cwd string) error {
 		}
 		return s.join(id, member{Role: role, Agent: *agent}, out)
 	case "invite":
-		if err := needRole("invite ID ROLE --as writer --agent codex|claude|pi [--brief TEXT] [--headed]"); err != nil {
+		if err := needRole("invite ID ROLE --as writer --agent codex|claude|pi [--worker [--worktree]] [--model MODEL] [--brief TEXT]"); err != nil {
 			return err
 		}
 		if !slices.Contains(inviteAgents, *agent) {
 			return errors.New("invite launches codex, claude or pi; to add another agent, give it a join prompt")
 		}
-		return s.invite(id, *actor, member{Role: role, Agent: *agent}, *brief, *headed, out)
+		if *worktree && !*worker {
+			return errors.New("--worktree is for a worker; add --worker")
+		}
+		return s.invite(id, *actor, member{Role: role, Agent: *agent, Worker: *worker, Model: *model}, *brief, *worktree, out)
 	case "status":
 		return s.status(id, out)
 	case "send":

@@ -42,6 +42,15 @@ type member struct {
 	Agent string `json:"agent,omitempty"`
 	// Exited is set once a launched member's process has stopped.
 	Exited bool `json:"exited,omitempty"`
+	// Worker is set for a launched member that edits files.
+	Worker bool `json:"worker,omitempty"`
+	// Model is the model a launched member's CLI was asked to use.
+	Model string `json:"model,omitempty"`
+	// Worktree, Branch and Base are set for a worker in its own linked
+	// worktree: its path, its branch and the commit it started from.
+	Worktree string `json:"worktree,omitempty"`
+	Branch   string `json:"branch,omitempty"`
+	Base     string `json:"base,omitempty"`
 }
 
 type message struct {
@@ -147,7 +156,12 @@ func (s session) check(role string) error {
 	return nil
 }
 
+// openStore opens the store of cwd's checkout, or of PEER_REPO when it is
+// set, so a worker in its own worktree reaches the room it was invited to.
 func openStore(cwd string) (*store, error) {
+	if r := os.Getenv("PEER_REPO"); r != "" {
+		cwd = r
+	}
 	repo, err := repoRoot(cwd)
 	if err != nil {
 		return nil, err

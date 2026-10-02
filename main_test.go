@@ -6,22 +6,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 )
 
-// realStartMember and realAppRunning are the hooks TestMain replaces.
-var (
-	realStartMember func([]string, string, string, string) error
-	realAppRunning  func(string) bool
-)
+// realStartMember is the hook TestMain replaces.
+var realStartMember func([]string, string, []string, string, string) error
 
 func TestMain(m *testing.M) {
 	if len(os.Args) > 1 && os.Args[1] == "stamp" { // startMember runs the test binary as peer
@@ -30,11 +25,11 @@ func TestMain(m *testing.M) {
 		}
 		os.Exit(0)
 	}
-	openURL = func(string) error { return nil }
-	realAppRunning = appRunning
-	appRunning = func(string) bool { return false }
+	// A member that runs these tests inherits PEER_REPO, which would send
+	// every fixture checkout to the member's room store.
+	os.Unsetenv("PEER_REPO")
 	realStartMember = startMember
-	startMember = func([]string, string, string, string) error { return nil }
+	startMember = func([]string, string, []string, string, string) error { return nil }
 	waitTimeout = time.Nanosecond
 	os.Exit(m.Run())
 }
@@ -58,7 +53,7 @@ func invoke(repo, input string, args ...string) (string, error) {
 
 func TestRoleInstructions(t *testing.T) {
 	cwd := t.TempDir() // Skill docs must work before a checkout or session exists.
-	for role, want := range map[string]string{"flow": "peer skills writer", "member": "peer wait ID --as ROLE", "writer": "peer wait ID --as writer"} {
+	for role, want := range map[string]string{"flow": "peer skills worker", "member": "peer wait ID --as ROLE", "writer": "peer wait ID --as writer", "worker": "done:"} {
 		got, err := invoke(cwd, "", "skills", role)
 		if err != nil || !strings.HasPrefix(got, "# ") || !strings.Contains(got, want) {
 			t.Fatalf("%s instructions unavailable: %s, %v", role, got, err)
@@ -174,15 +169,6 @@ func TestUpdateSkipsHomebrew(t *testing.T) {
 	}
 }
 
-func TestAppRunningOffMacOS(t *testing.T) {
-	if runtime.GOOS == "darwin" {
-		t.Skip("macOS asks the app itself")
-	}
-	if realAppRunning("codex") {
-		t.Fatal("reported a desktop app off macOS")
-	}
-}
-
 func TestMemberLogLine(t *testing.T) {
 	for line, want := range map[string][]logEntry{
 		"codex plain progress\n":             {{Kind: logRaw, Text: "codex plain progress"}},
@@ -219,7 +205,7 @@ func TestMemberLogLine(t *testing.T) {
 func TestStartMemberStampsOutputAndKeepsStatus(t *testing.T) {
 	dir := t.TempDir()
 	logPath, exitPath := filepath.Join(dir, "member.log"), filepath.Join(dir, "member.exit")
-	if err := realStartMember([]string{"sh", "-c", "echo out; echo err >&2; printf tail; exit 3"}, dir, logPath, exitPath); err != nil {
+	if err := realStartMember([]string{"sh", "-c", "echo out; echo err >&2; printf tail; exit 3"}, dir, nil, logPath, exitPath); err != nil {
 		t.Fatal(err)
 	}
 	var data []byte
@@ -472,7 +458,7 @@ func TestMemberExit(t *testing.T) {
 	}
 	exit := func(role string, status int) {
 		t.Helper()
-		if err := realStartMember([]string{"sh", "-c", fmt.Sprintf("exit %d", status)}, repo, s.logPath(v.ID, role), s.exitPath(v.ID, role)); err != nil {
+		if err := realStartMember([]string{"sh", "-c", fmt.Sprintf("exit %d", status)}, repo, nil, s.logPath(v.ID, role), s.exitPath(v.ID, role)); err != nil {
 			t.Fatal(err)
 		}
 		want := fmt.Sprintf("%d\n", status)
@@ -522,37 +508,28 @@ func TestMemberExit(t *testing.T) {
 }
 
 func TestInvite(t *testing.T) {
-	var links []string
 	var launched [][]string
-	var logs []string
-	running := false
+	var dirs, logs []string
+	var envs [][]string
 	fail := false
-	openURL = func(link string) error { links = append(links, link); return nil }
-	appRunning = func(string) bool { return running }
-	startMember = func(argv []string, _, logPath, _ string) error {
+	startMember = func(argv []string, dir string, env []string, logPath, _ string) error {
 		if fail {
 			return errors.New("not installed")
 		}
-		launched, logs = append(launched, argv), append(logs, logPath)
+		launched, dirs, envs, logs = append(launched, argv), append(dirs, dir), append(envs, env), append(logs, logPath)
 		return nil
 	}
-	t.Cleanup(func() {
-		openURL = func(string) error { return nil }
-		appRunning = func(string) bool { return false }
-		startMember = func([]string, string, string, string) error { return nil }
-	})
+	t.Cleanup(func() { startMember = func([]string, string, []string, string, string) error { return nil } })
 	for _, tc := range []struct {
-		agent, host, pathKey, promptKey string
-		headed, running                 bool
+		agent, model, focus string
+		worker              bool
 	}{
-		{"codex", "threads", "path", "prompt", true, true},
-		{"claude", "code", "folder", "q", true, true},
-		{"codex", "", "", "", false, true},
-		{"codex", "", "", "", true, false},
-		{"claude", "", "", "", false, false},
-		{"pi", "", "", "", true, true},
+		{"codex", "", "Follow peer skills member.", false},
+		{"claude", "opus", "Follow peer skills member.", false},
+		{"pi", "", "a worker in the shared checkout", true},
+		{"codex", "gpt-5", "a worker in the shared checkout", true},
 	} {
-		links, launched, logs, running = nil, nil, nil, tc.running
+		launched, dirs, envs, logs = nil, nil, nil, nil
 		repo := filepath.Join(t.TempDir(), "my repo & co")
 		if out, err := exec.Command("git", "init", "-q", repo).CombinedOutput(); err != nil {
 			t.Fatalf("git init: %v: %s", err, out)
@@ -563,36 +540,29 @@ func TestInvite(t *testing.T) {
 			t.Fatalf("start output is not one session: %q, %v", started, err)
 		}
 		args := []string{"invite", v.ID, "test-expert", "--as", "writer", "--agent", tc.agent, "--brief", "edge cases"}
-		if tc.headed {
-			args = append(args, "--headed")
+		if tc.worker {
+			args = append(args, "--worker")
+		}
+		if tc.model != "" {
+			args = append(args, "--model", tc.model)
 		}
 		if out, err := invoke(repo, "", args...); err != nil || !strings.Contains(out, `"role":"test-expert","agent":"`+tc.agent+`"`) {
 			t.Fatalf("invite: %q, %v", out, err)
 		}
 		resolved, _ := filepath.EvalSymlinks(repo)
-		if tc.host == "" {
-			if len(links) != 0 || len(launched) != 1 || launched[0][0] != tc.agent || filepath.Base(logs[0]) != "test-expert.log" || filepath.Base(filepath.Dir(logs[0])) != v.ID {
-				t.Fatalf("%+v: want one headless %s, got links %q, argv %q, logs %q", tc, tc.agent, links, launched, logs)
-			}
-			prompt := launched[0][len(launched[0])-1]
-			if !strings.Contains(prompt, "the test-expert in peer room "+v.ID) || !strings.Contains(prompt, "edge cases") || !strings.Contains(prompt, "Nobody reads this chat") {
-				t.Fatalf("wrong headless prompt: %q", prompt)
-			}
-			if tc.agent == "codex" && !strings.Contains(strings.Join(launched[0], " "), "-C "+resolved) {
-				t.Fatalf("codex runs outside the checkout: %q", launched[0])
-			}
-			continue
+		if len(launched) != 1 || launched[0][0] != tc.agent || dirs[0] != resolved || !slices.Equal(envs[0], []string{"PEER_REPO=" + resolved}) || filepath.Base(logs[0]) != "test-expert.log" || filepath.Base(filepath.Dir(logs[0])) != v.ID {
+			t.Fatalf("%+v: want one %s in the checkout, got argv %q, dirs %q, env %q, logs %q", tc, tc.agent, launched, dirs, envs, logs)
 		}
-		if len(links) != 1 || len(launched) != 0 {
-			t.Fatalf("want one %s link, got %q, argv %q", tc.agent, links, launched)
+		joined := strings.Join(launched[0], " ")
+		prompt := launched[0][len(launched[0])-1]
+		if !strings.Contains(prompt, "the test-expert in peer room "+v.ID) || !strings.Contains(prompt, tc.focus) || !strings.Contains(prompt, "edge cases") || !strings.Contains(prompt, "Nobody reads this chat") {
+			t.Fatalf("wrong prompt: %q", prompt)
 		}
-		u, err := url.Parse(links[0])
-		if err != nil || u.Scheme != tc.agent || u.Host != tc.host || u.Path != "/new" {
-			t.Fatalf("wrong %s link: %s, %v", tc.agent, links[0], err)
+		if tc.agent == "codex" && !strings.Contains(joined, "-C "+resolved) {
+			t.Fatalf("codex runs outside the checkout: %q", launched[0])
 		}
-		prompt := u.Query().Get(tc.promptKey)
-		if u.Query().Get(tc.pathKey) != resolved || !strings.Contains(prompt, "the test-expert in peer room "+v.ID) || strings.HasPrefix(prompt, "/") || strings.Contains(prompt, "Nobody reads") {
-			t.Fatalf("wrong %s query: %v", tc.agent, u.Query())
+		if tc.model != "" && !strings.Contains(joined, " "+tc.model+" ") {
+			t.Fatalf("model %s not passed: %q", tc.model, launched[0])
 		}
 	}
 	repo := testRepo(t)
@@ -602,6 +572,9 @@ func TestInvite(t *testing.T) {
 		{"invite", v.ID, "docs", "--as", "writer", "--agent", "copilot"},
 		{"invite", v.ID, "reader", "--as", "writer", "--agent", "codex"},
 		{"invite", v.ID, "--as", "writer", "--agent", "codex"},
+		{"invite", v.ID, "docs", "--as", "writer", "--agent", "codex", "--headed"},
+		{"invite", v.ID, "docs", "--as", "writer", "--agent", "codex", "--worktree"},
+		{"invite", v.ID, "docs", "--as", "writer", "--agent", "codex", "--worker", "--worktree"}, // no commit yet
 	} {
 		if _, err := invoke(repo, "", args...); err == nil {
 			t.Fatalf("%q accepted", args)
@@ -618,14 +591,80 @@ func TestInvite(t *testing.T) {
 	if _, err := invoke(repo, "", "invite", v.ID, "docs", "--as", "writer", "--agent", "codex"); err != nil {
 		t.Fatalf("role not free after a failed launch: %v", err)
 	}
-	running = true
-	openURL = func(string) error { return errors.New("no app") }
-	if _, err := invoke(repo, "", "invite", v.ID, "ux", "--as", "writer", "--agent", "claude", "--headed"); err == nil || !strings.Contains(err.Error(), "no app") {
-		t.Fatalf("failed desktop launch reported %v", err)
+}
+
+// TestWorktreeWorker runs a worker in its own worktree: it reaches the
+// writer's room through PEER_REPO, and a worker invited again in its role
+// finds the edits left behind.
+func TestWorktreeWorker(t *testing.T) {
+	var dir string
+	var env []string
+	startMember = func(_ []string, d string, e []string, _, _ string) error { dir, env = d, e; return nil }
+	t.Cleanup(func() { startMember = func([]string, string, []string, string, string) error { return nil } })
+	repo := testRepo(t)
+	if out, err := exec.Command("git", "-C", repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "base").CombinedOutput(); err != nil {
+		t.Fatalf("git commit: %v: %s", err, out)
 	}
-	openURL = func(string) error { return nil }
-	if _, err := invoke(repo, "", "invite", v.ID, "ux", "--as", "writer", "--agent", "claude", "--headed"); err != nil {
-		t.Fatalf("role not free after a failed desktop launch: %v", err)
+	v := startRoom(t, repo, "split")
+	if _, err := invoke(repo, "", "invite", v.ID, "api", "--as", "writer", "--agent", "claude", "--worker", "--worktree"); err != nil {
+		t.Fatal(err)
+	}
+	s, _ := openStore(repo)
+	cur, _ := s.load(v.ID)
+	m := cur.member("api")
+	head, _ := exec.Command("git", "-C", repo, "rev-parse", "HEAD").Output()
+	if m == nil || !m.Worker || m.Worktree != dir || m.Base != strings.TrimSpace(string(head)) || !strings.HasPrefix(m.Branch, "peer/") || !strings.HasSuffix(m.Branch, "/"+v.ID+"/api") {
+		t.Fatalf("worker = %+v, launched in %s", m, dir)
+	}
+	if branch, _ := exec.Command("git", "-C", dir, "branch", "--show-current").Output(); strings.TrimSpace(string(branch)) != m.Branch {
+		t.Fatalf("worktree is on %q, want %s", branch, m.Branch)
+	}
+	// The worker's peer commands run in its worktree with the env it got.
+	if !slices.Equal(env, []string{"PEER_REPO=" + s.repo}) {
+		t.Fatalf("worker env = %q", env)
+	}
+	t.Setenv("PEER_REPO", s.repo)
+	if _, err := invoke(dir, "hello", "send", v.ID, "--as", "api"); err != nil {
+		t.Fatalf("worker cannot reach its room: %v", err)
+	}
+	t.Setenv("PEER_REPO", "")
+	if got, _ := invoke(repo, "", "log", v.ID); !strings.Contains(got, "hello") {
+		t.Fatalf("writer's room lacks the worker's message: %s", got)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "api.go"), []byte("package api\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(s.exitPath(v.ID, "api"), []byte("1\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := invoke(repo, "", "invite", v.ID, "api", "--as", "writer", "--agent", "codex", "--worker"); err == nil {
+		t.Fatal("worktree role invited again into the shared checkout")
+	}
+	if _, err := invoke(repo, "", "invite", v.ID, "api", "--as", "writer", "--agent", "codex", "--worker", "--worktree"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "api.go")); err != nil || dir != m.Worktree {
+		t.Fatalf("invited again in %s, edits lost: %v", dir, err)
+	}
+	// A worktree switched to another branch is not reused, and stays.
+	if out, err := exec.Command("git", "-C", dir, "switch", "-q", "-c", "other").CombinedOutput(); err != nil {
+		t.Fatalf("git switch: %v: %s", err, out)
+	}
+	if err := os.WriteFile(s.exitPath(v.ID, "api"), []byte("1\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	dir = ""
+	if _, err := invoke(repo, "", "invite", v.ID, "api", "--as", "writer", "--agent", "codex", "--worker", "--worktree"); err == nil || dir != "" {
+		t.Fatalf("reused a worktree on another branch: %v, launched in %q", err, dir)
+	}
+	if _, err := os.Stat(filepath.Join(m.Worktree, "api.go")); err != nil {
+		t.Fatalf("refused reuse lost the edits: %v", err)
+	}
+	if _, err := invoke(repo, "", "end", v.ID, "--as", "writer"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(m.Worktree); err != nil {
+		t.Fatalf("end removed the worktree: %v", err)
 	}
 }
 
@@ -916,7 +955,7 @@ func TestPostFromUser(t *testing.T) {
 }
 
 func TestClaudeMemberIsSandboxedWithoutEditTools(t *testing.T) {
-	argv, err := memberArgs(&store{dir: "/store/room"}, "claude", "p")
+	argv, err := memberArgs(&store{dir: "/store/room"}, member{Agent: "claude"}, "/repo", "p")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -961,7 +1000,7 @@ func TestClaudeMemberIsSandboxedWithoutEditTools(t *testing.T) {
 }
 
 func TestCodexMemberHasNetwork(t *testing.T) {
-	argv, err := memberArgs(&store{dir: "/store/room"}, "codex", "p")
+	argv, err := memberArgs(&store{dir: "/store/room"}, member{Agent: "codex"}, "/repo", "p")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -971,7 +1010,7 @@ func TestCodexMemberHasNetwork(t *testing.T) {
 }
 
 func TestPiMemberHasNoEditTools(t *testing.T) {
-	argv, err := memberArgs(&store{dir: "/store/room"}, "pi", "p")
+	argv, err := memberArgs(&store{dir: "/store/room"}, member{Agent: "pi"}, "/repo", "p")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -984,10 +1023,19 @@ func TestPiMemberHasNoEditTools(t *testing.T) {
 }
 
 func TestUnknownAgentHasNoLaunch(t *testing.T) {
-	if _, err := memberArgs(&store{}, "copilot", "p"); err == nil {
+	if _, err := memberArgs(&store{}, member{Agent: "copilot"}, "/repo", "p"); err == nil {
 		t.Fatal("memberArgs accepted copilot")
 	}
-	if _, err := memberLink("/repo", "copilot", "p"); err == nil {
-		t.Fatal("memberLink accepted copilot")
+}
+
+func TestWorkerGetsEditTools(t *testing.T) {
+	for agent, want := range map[string]string{"claude": "--allowedTools Read Grep Glob Skill WebFetch WebSearch Task TaskCreate TaskGet TaskList TaskUpdate TaskStop LSP ToolSearch Edit Write NotebookEdit --", "pi": "--tools read,grep,find,ls,bash,edit,write --"} {
+		argv, err := memberArgs(&store{dir: "/store/room"}, member{Agent: agent, Worker: true}, "/repo", "p")
+		if err != nil || !strings.Contains(strings.Join(argv, " "), want) {
+			t.Errorf("%s worker argv = %q, %v", agent, argv, err)
+		}
+	}
+	if !slices.Equal(claudeTools[len(claudeTools)-1:], []string{"ToolSearch"}) {
+		t.Error("a worker's tools leaked into claudeTools")
 	}
 }

@@ -1,6 +1,6 @@
 # peer
 
-`peer` lets local coding agents work on one task in one Git checkout. The writer edits the code. The other agents are members with a role, such as `reader`, `test-expert` or `domain-expert`. They discuss the approach and review the diff. All messages stay on your machine. You do not need an MCP server or a model API key.
+`peer` lets local coding agents work on one task in one Git checkout. The writer leads and edits the code. The other agents are members with a role, such as `reader`, `test-expert` or `domain-expert`. They discuss the approach and review the diff. The writer can also invite workers: agents that edit their own part of the task, as subagents do, but with any of the supported CLIs and models. All messages stay on your machine. You do not need an MCP server or a model API key.
 
 ## Install
 
@@ -53,7 +53,9 @@ To add experts, name them in the task, for example `/peer add CSV export; also i
 
 To add any agent yourself, for example Copilot, paste the writer's join prompt into that agent's chat in the same checkout. Change the role in it and add your own instructions after it. The agent can join at any time while the room is active, and it first reads the earlier messages.
 
-To see a member's chat in its desktop app on macOS, ask the writer to add `--headed` to `peer invite`. The app must already be open. `peer` opens a new chat with the prompt filled in, but you must press Enter. If the app is not open, or the agent is `pi`, which has no desktop app, the member runs in the background.
+To pick a member's model, name it in the task, for example `invite a reader on codex with gpt-5`. The writer passes it to the agent's CLI with `--model`.
+
+To split the work, ask for workers, for example `/peer split the reports refactor between two codex workers`. See [Workers](#workers).
 
 To watch the conversation, run `peer` in a terminal.
 
@@ -62,7 +64,7 @@ To watch the conversation, run `peer` in a terminal.
 1. **Start.** The writer runs `peer start ROOM`. This creates a room for the task.
 2. **Add members.** The writer runs `peer invite ROOM ROLE --as writer --agent codex` to start `codex`, `claude` or `pi` in the background in the same checkout. Any other agent runs `peer join ROOM ROLE`. The writer gets a notice from `peer` for each member that joins.
 3. **Discuss.** The agents send messages with `peer send` and receive them with `peer wait`. A message goes to all participants, or to one with `--to ROLE`. `wait` returns one message, or a timeout after 90 seconds. The agent then calls `wait` again. With `--timeout 0`, `wait` waits until a message comes or the room ends. A writer whose agent can run a background command and wake when it exits, such as Claude Code, uses it between turns, so it reads what you send from `peer`. The agents write in the language that you use with the writer.
-4. **Implement.** Only the writer edits files.
+4. **Implement.** The writer edits files, and so do the workers that it invited.
 5. **Review.** The members inspect the diff and report findings. The writer fixes them and asks for another review.
 6. **End.** The writer runs `peer end`. After this, nobody can send messages to the room. Start a new room for the next task.
 
@@ -75,15 +77,30 @@ A room does not end when a background member stops. The writer gets a notice fro
 
 `peer` does not type into idle chats. Each agent must call `wait` when it needs a reply. Several rooms can be active in one checkout at the same time.
 
+### Workers
+
+`peer invite ROOM ROLE --as writer --agent AGENT --worker` starts a worker. It has the edit tools and the `peer skills worker` instructions. The writer gives each worker a task and a zone, the files that it may change. Workers do not commit or touch the Git index; the writer commits when every worker has reported. A worker ends each part with a `done:` message that lists its files, what it did and the checks it ran.
+
+By default a worker edits the shared checkout, next to the writer and other workers, so you see its changes at once. Its builds and tests also see their unfinished work. Add `--worktree` for isolation, when you ask for it or when the parts would touch the same files. The worker then gets a linked Git worktree in the `peer` store on the branch `peer/HASH/ROOM/ROLE`, started from the writer's current commit. Know these limits:
+
+- Uncommitted changes in the checkout are not in the worktree.
+- Files that Git ignores, such as `.env`, local settings and installed dependencies, are not there either. The worker asks the writer how to run the project.
+- Only the files are isolated. The Git history, databases, services, ports and credentials are shared, so two workers that reset one database still conflict.
+- The writer reviews the worker's changes, including new files, commits them in the worktree and merges or cherry-picks the branch. `peer status ROOM` shows each worker's `worktree`, `branch` and `base`.
+- `peer end` keeps the worktree and the branch, because they can hold work that is not merged yet. Remove them yourself once the work is merged: `git worktree remove PATH` and `git branch -d BRANCH`. If you cherry-picked the commits, Git cannot tell that the branch is merged and refuses `-d`; check the work and then use `-D`.
+- A role keeps its worktree: a worker invited again in that role finds the edits that its predecessor left.
+
+The `peer` commands of a launched member run with `PEER_REPO` set to the checkout, so a worker in a worktree reaches its room.
+
 ### Member permissions
 
-A background member gets an instruction not to edit files. It can run any shell command, such as tests or scripts. Codex and Claude Code run commands in their sandbox. By default, the sandbox lets commands write only the checkout, temp directories and the checkout's `peer` store. Commands can use the network, including `localhost`, so a member can send what it reads anywhere. The agent's user settings can widen these limits. Neither agent asks for approval.
+A background member gets an instruction not to edit files; a worker gets the edit tools instead. It can run any shell command, such as tests or scripts. Codex and Claude Code run commands in their sandbox. By default, the sandbox lets commands write only the checkout or the worker's worktree, temp directories and the checkout's `peer` store, which holds the worktrees. Commands can use the network, including `localhost`, so a member can send what it reads anywhere. The agent's user settings can widen these limits. Neither agent asks for approval.
 
 - **Codex** runs in its `workspace-write` sandbox.
-- **Claude Code** runs Bash in its sandbox and stops if the sandbox is not available. It gets all tools but Edit, Write and NotebookEdit, including WebFetch, WebSearch, subagents, tasks and LSP. It loads no MCP servers and ignores the checkout's `.claude` settings.
-- **Pi** runs without a sandbox, because pi has none. It gets the `read`, `grep`, `find`, `ls` and `bash` tools, but not `edit` and `write`. It loads your global extensions and skills, uses your default model and ignores the checkout's `.pi` settings. Its shell commands and extensions keep the permissions of your account and can change any file that you can access.
+- **Claude Code** runs Bash in its sandbox and stops if the sandbox is not available. It gets all tools but Edit, Write and NotebookEdit, including WebFetch, WebSearch, subagents, tasks and LSP; a worker gets the edit tools too. It loads no MCP servers and ignores the checkout's `.claude` settings.
+- **Pi** runs without a sandbox, because pi has none. It gets the `read`, `grep`, `find`, `ls` and `bash` tools, and a worker also gets `edit` and `write`. It loads your global extensions and skills, uses your default model unless the writer passes `--model` and ignores the checkout's `.pi` settings. Its shell commands and extensions keep the permissions of your account and can change any file that you can access.
 
-Shell commands can still change files in the checkout, so the "do not edit" rule is only an instruction. If you need a guarantee, use the agent's read-only or Plan mode.
+Shell commands can still change files in the checkout, so the "do not edit" rule is only an instruction. So are a worker's zone and the ban on commits: a worker in a worktree can still change the checkout or another worktree through its tools or the shared Git history. If you need a guarantee, use the agent's read-only or Plan mode.
 
 ## Watch rooms
 
@@ -108,7 +125,7 @@ Run these commands inside the shared Git checkout.
 | Command | Action |
 | --- | --- |
 | `peer start ROOM [--agent NAME]` | Start a room with you as the writer and print it as JSON |
-| `peer invite ROOM ROLE --as writer --agent codex\|claude\|pi [--brief TEXT] [--headed]` | Add a member and start its agent |
+| `peer invite ROOM ROLE --as writer --agent codex\|claude\|pi [--worker [--worktree]] [--model MODEL] [--brief TEXT]` | Add a member or a worker and start its agent |
 | `peer join ROOM ROLE [--agent NAME]` | Join a room as a member |
 | `peer send ROOM --as ROLE [--to ROLE]` | Send a message from stdin to all participants or to one |
 | `peer wait ROOM --as ROLE [--timeout DURATION]` | Wait for one message, up to 90 seconds by default; `0` waits until one comes or the room ends |
@@ -116,7 +133,7 @@ Run these commands inside the shared Git checkout.
 | `peer status [ROOM]` | Show active rooms, or one room |
 | `peer history` | List all rooms in this checkout |
 | `peer log ROOM` | Print a transcript |
-| `peer skills flow\|writer\|member` | Print the agent instructions |
+| `peer skills flow\|writer\|member\|worker` | Print the agent instructions |
 | `peer update` | Update an installer copy of the CLI |
 | `peer --version` | Print the version |
 
@@ -129,5 +146,6 @@ If the name given to `start` is already in use, `peer` adds `-2`, `-3`, and so o
 | Variable | Effect |
 | --- | --- |
 | `PEER_HOME` | Use a different store directory. Both agents must use the same value. |
+| `PEER_REPO` | Use the room store of this checkout instead of the current one. `peer` sets it for the members it launches. |
 | `PEER_EDITOR_URL` | Open file links from `peer log` in an editor, for example `vscode://file/{path}:{line}` |
 | `NO_COLOR=1` | Turn off colors in `peer log` |

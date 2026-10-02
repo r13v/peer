@@ -2,71 +2,72 @@ package main
 
 import (
 	"bufio"
+	"bytes"
+	"cmp"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"net/url"
 	"os"
 	"os/exec"
-	"runtime"
+	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
 )
 
-// openURL is replaced in tests.
-var openURL = func(link string) error { return exec.Command("open", link).Run() }
-
-// memberPrompt starts an invited member's chat. A headless member has
-// nobody to ask, so it is told to keep waiting on its own.
-func memberPrompt(v session, role, brief string, headless bool) string {
-	prompt := fmt.Sprintf("Use the peer skill. You are the %s in peer room %s in this checkout; you have already joined, so do not run peer join. Follow peer skills member.", role, v.ID)
+// memberPrompt starts an invited member's chat. Nobody reads it, so the
+// member is told to keep waiting on its own.
+func memberPrompt(v session, m member, brief string) string {
+	prompt := fmt.Sprintf("Use the peer skill. You are the %s in peer room %s in this checkout; you have already joined, so do not run peer join.", m.Role, v.ID)
+	switch {
+	case m.Worktree != "":
+		prompt += fmt.Sprintf(" You are a worker in your own worktree %s, your working directory, which started from commit %s. Follow peer skills worker.", m.Worktree, m.Base)
+	case m.Worker:
+		prompt += " You are a worker in the shared checkout. Follow peer skills worker."
+	default:
+		prompt += " Follow peer skills member."
+	}
 	if brief != "" {
 		prompt += " Your focus: " + brief
 	}
-	if headless {
-		prompt += " Nobody reads this chat: do not ask the user anything, run peer and git directly rather than through wrapper commands, and keep calling peer wait until the writer ends the session. Once peer reports that the session has ended, stop."
-	}
-	return prompt
+	return prompt + " Nobody reads this chat: do not ask the user anything, run peer and git directly rather than through wrapper commands, and keep calling peer wait until the writer ends the session. Once peer reports that the session has ended, stop."
 }
 
 // inviteAgents are the agents peer invite launches.
 var inviteAgents = []string{"claude", "codex", "pi"}
 
-// appBundles maps each agent with a desktop app to its macOS bundle ID.
-var appBundles = map[string]string{"codex": "com.openai.codex", "claude": "com.anthropic.claudefordesktop"}
-
-// appRunning reports whether agent's desktop app is open without
-// launching it; it is replaced in tests. The desktop apps and their deep
-// links exist only on macOS, so other systems report false and run the
-// member headless.
-var appRunning = func(agent string) bool {
-	if runtime.GOOS != "darwin" {
-		return false
-	}
-	out, err := exec.Command("osascript", "-e", `application id "`+appBundles[agent]+`" is running`).Output()
-	return err == nil && strings.TrimSpace(string(out)) == "true"
-}
-
 // claudeTools are a Claude member's tools: everything but the edit tools.
 // Its subagents get no more.
 var claudeTools = []string{"Read", "Grep", "Glob", "Skill", "WebFetch", "WebSearch", "Task", "TaskCreate", "TaskGet", "TaskList", "TaskUpdate", "TaskStop", "LSP", "ToolSearch"}
 
-// piTools are a pi member's tools: its built-in tools but edit and write.
+// claudeEditTools are the tools a Claude worker gets on top.
+var claudeEditTools = []string{"Edit", "Write", "NotebookEdit"}
+
+// piTools are a pi member's tools: its built-in tools but edit and write,
+// which a pi worker gets too.
 var piTools = "read,grep,find,ls,bash"
 
-// memberArgs runs the agent's CLI without a chat window. Codex and Claude
-// run any shell command, with the network, in a sandbox that by default
-// writes only the checkout, temp directories and the peer store. Claude's
-// sandbox covers only Bash, so it also gets no edit tools and no MCP
-// servers, and it skips the checkout's settings, which could widen the
-// sandbox. Pi has no sandbox: it gets no edit tools and skips the
-// checkout's settings, but its shell keeps the user's permissions.
-func memberArgs(s *store, agent, prompt string) ([]string, error) {
-	switch agent {
+// memberArgs runs m's CLI without a chat window in dir, the checkout or
+// m's worktree. Codex and Claude run any shell command, with the network,
+// in a sandbox that by default writes only dir, temp directories and the
+// peer store. Claude's sandbox covers only Bash, so it also gets no MCP
+// servers and skips the checkout's settings, which could widen the
+// sandbox, and only a worker gets the edit tools. Pi has no sandbox: it
+// skips the checkout's settings, but its shell keeps the user's
+// permissions, and only a worker gets edit and write.
+func memberArgs(s *store, m member, dir, prompt string) ([]string, error) {
+	var argv []string
+	switch m.Agent {
 	case "codex":
-		return []string{"codex", "exec", "--json", "-C", s.repo, "-s", "workspace-write", "-c", "sandbox_workspace_write.network_access=true", "--add-dir", s.dir, "-c", "approval_policy=never", prompt}, nil
+		argv = []string{"codex", "exec", "--json", "-C", dir, "-s", "workspace-write", "-c", "sandbox_workspace_write.network_access=true", "--add-dir", s.dir, "-c", "approval_policy=never"}
+		if m.Model != "" {
+			argv = append(argv, "-m", m.Model)
+		}
+		return append(argv, prompt), nil
 	case "claude":
 		sandbox := map[string]any{"sandbox": map[string]any{
 			"enabled":                  true,
@@ -77,22 +78,39 @@ func memberArgs(s *store, agent, prompt string) ([]string, error) {
 			"network":                  map[string]any{"allowedDomains": []string{"*"}, "allowLocalBinding": true},
 		}}
 		settings, _ := json.Marshal(sandbox)
-		argv := []string{"claude", "-p", "--verbose", "--output-format", "stream-json", "--permission-mode", "dontAsk", "--permission-prompts", "none", "--strict-mcp-config", "--setting-sources", "user", "--settings", string(settings), "--tools", "Bash"}
-		argv = append(argv, claudeTools...)
+		tools := claudeTools
+		if m.Worker {
+			tools = append(slices.Clone(claudeTools), claudeEditTools...)
+		}
+		argv = []string{"claude", "-p", "--verbose", "--output-format", "stream-json", "--permission-mode", "dontAsk", "--permission-prompts", "none", "--strict-mcp-config", "--setting-sources", "user", "--settings", string(settings)}
+		if m.Model != "" {
+			argv = append(argv, "--model", m.Model)
+		}
+		argv = append(argv, "--tools", "Bash")
+		argv = append(argv, tools...)
 		argv = append(argv, "--allowedTools")
-		argv = append(argv, claudeTools...)
+		argv = append(argv, tools...)
 		return append(argv, "--", prompt), nil
 	case "pi":
-		return []string{"pi", "-p", "--mode", "json", "--no-session", "--no-approve", "--tools", piTools, "--", prompt}, nil
+		tools := piTools
+		if m.Worker {
+			tools += ",edit,write"
+		}
+		argv = []string{"pi", "-p", "--mode", "json", "--no-session", "--no-approve", "--tools", tools}
+		if m.Model != "" {
+			argv = append(argv, "--model", m.Model)
+		}
+		return append(argv, "--", prompt), nil
 	}
-	return nil, fmt.Errorf("peer cannot launch %s", agent)
+	return nil, fmt.Errorf("peer cannot launch %s", m.Agent)
 }
 
-// startMember runs argv in dir in its own process session, so it
-// outlives the writer's command, and appends its output and exit status
-// to logPath. The status also goes to exitPath, which load turns into the
-// member leaving; it is replaced in tests.
-var startMember = func(argv []string, dir, logPath, exitPath string) error {
+// startMember runs argv in dir with env added to its environment, in its
+// own process session, so it outlives the writer's command, and appends
+// its output and exit status to logPath. The status also goes to
+// exitPath, which load turns into the member leaving; it is replaced in
+// tests.
+var startMember = func(argv []string, dir string, env []string, logPath, exitPath string) error {
 	if _, err := exec.LookPath(argv[0]); err != nil {
 		return err
 	}
@@ -109,6 +127,7 @@ var startMember = func(argv []string, dir, logPath, exitPath string) error {
 	script := `exit_file=$1; self=$2; shift 2; { "$@"; status=$?; echo "[peer] exited with status $status"; echo "$status" > "$exit_file"; } 2>&1 | "$self" stamp`
 	cmd := exec.Command("sh", append([]string{"-c", script, "sh", exitPath, self}, argv...)...)
 	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), env...)
 	cmd.Stdout, cmd.Stderr = log, log
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := cmd.Start(); err != nil {
@@ -140,35 +159,85 @@ func stamp(in io.Reader, out io.Writer) error {
 	}
 }
 
-// memberLink builds a desktop deep link that opens a new codex or claude
-// chat in repo with prompt prefilled. Neither app submits the prompt by itself.
-func memberLink(repo, agent, prompt string) (string, error) {
-	switch agent {
-	case "codex":
-		return (&url.URL{Scheme: "codex", Host: "threads", Path: "/new", RawQuery: url.Values{"path": {repo}, "prompt": {prompt}}.Encode()}).String(), nil
-	case "claude":
-		return (&url.URL{Scheme: "claude", Host: "code", Path: "/new", RawQuery: url.Values{"folder": {repo}, "q": {prompt}}.Encode()}).String(), nil
+// worktree prepares m's linked worktree: it reuses the one left by an
+// earlier member with the role, if it is still a worktree of this
+// checkout on m's branch, or adds it on m's branch at m's base.
+func (s *store) worktree(m member) error {
+	if _, err := os.Stat(m.Worktree); err == nil {
+		git := func(args ...string) string {
+			out, _ := exec.Command("git", append([]string{"-C", m.Worktree}, args...)...).Output()
+			return strings.TrimSpace(string(out))
+		}
+		top, _ := filepath.EvalSymlinks(m.Worktree)
+		common, _ := exec.Command("git", "-C", s.repo, "rev-parse", "--path-format=absolute", "--git-common-dir").Output()
+		if git("rev-parse", "--show-toplevel") != top || git("rev-parse", "--path-format=absolute", "--git-common-dir") != strings.TrimSpace(string(common)) || git("branch", "--show-current") != m.Branch {
+			return fmt.Errorf("%s is no longer a worktree of this checkout on %s; fix or remove it, or use another role", m.Worktree, m.Branch)
+		}
+		return nil
 	}
-	return "", fmt.Errorf("%s has no desktop link", agent)
+	if err := os.MkdirAll(filepath.Dir(m.Worktree), 0700); err != nil {
+		return err
+	}
+	if out, err := exec.Command("git", "-C", s.repo, "worktree", "add", "-q", "-b", m.Branch, m.Worktree, m.Base).CombinedOutput(); err != nil {
+		return fmt.Errorf("git worktree add: %s", bytes.TrimSpace(out))
+	}
+	return nil
 }
 
-// invite adds m to room id for its writer and launches m's agent in a
-// desktop chat when headed and the app is open, otherwise headless.
-func (s *store) invite(id, as string, m member, brief string, headed bool, out io.Writer) error {
+// invite adds m to room id for its writer and launches m's agent
+// headless, in its own worktree when isolated.
+func (s *store) invite(id, as string, m member, brief string, isolated bool, out io.Writer) error {
 	if as != writer {
 		return errors.New("only the writer can invite; run peer invite ID ROLE --as writer")
 	}
 	var v session
 	err := s.locked(func() error {
-		var err error
+		cur, err := s.load(id)
+		if err != nil {
+			return err
+		}
+		// A role keeps its workspace, so a worker invited again finds
+		// the edits its predecessor left.
+		if old := cur.member(m.Role); old != nil && old.Exited {
+			if (old.Worktree != "") != isolated {
+				return fmt.Errorf("%s worked in %s; invite it again with the same workspace, or use another role", m.Role, cmp.Or(old.Worktree, "the shared checkout"))
+			}
+			m.Worktree, m.Branch, m.Base = old.Worktree, old.Branch, old.Base
+		}
+		if isolated && m.Worktree == "" {
+			head, err := exec.Command("git", "-C", s.repo, "rev-parse", "--verify", "HEAD^{commit}").Output()
+			if err != nil {
+				return errors.New("a worktree starts from a commit, and the checkout has none")
+			}
+			key := sha256.Sum256([]byte(s.repo))
+			m.Worktree = filepath.Join(s.dir, "worktrees", id, m.Role)
+			m.Branch = "peer/" + hex.EncodeToString(key[:4]) + "/" + id + "/" + m.Role
+			m.Base = strings.TrimSpace(string(head))
+			if dirty, _ := exec.Command("git", "-C", s.repo, "status", "--porcelain").Output(); len(dirty) > 0 {
+				fmt.Fprintf(os.Stderr, "peer: uncommitted changes in the checkout stay out of %s's worktree\n", m.Role)
+			}
+		}
 		v, err = s.add(id, m)
 		return err
 	})
 	if err != nil {
 		return err
 	}
-	// failed marks the member exited, so the role can be invited again.
-	failed := func() {
+	logPath := s.logPath(v.ID, m.Role)
+	dir := s.repo
+	if m.Worktree != "" {
+		dir = m.Worktree
+		err = s.worktree(m)
+	}
+	var argv []string
+	if err == nil {
+		argv, err = memberArgs(s, m, dir, memberPrompt(v, m, brief))
+	}
+	if err == nil {
+		err = startMember(argv, dir, []string{"PEER_REPO=" + s.repo}, logPath, s.exitPath(v.ID, m.Role))
+	}
+	if err != nil {
+		// Marking the member exited frees the role to be invited again.
 		_ = s.locked(func() error {
 			cur, err := s.load(v.ID)
 			if err != nil || cur.EndedAt != "" || cur.member(m.Role) == nil {
@@ -181,36 +250,11 @@ func (s *store) invite(id, as string, m member, brief string, headed bool, out i
 			_, err = s.appendMessage(cur, system, writer, m.Role+" failed to start")
 			return err
 		})
-	}
-	if headed && appBundles[m.Agent] != "" && appRunning(m.Agent) {
-		link, err := memberLink(s.repo, m.Agent, memberPrompt(v, m.Role, brief, false))
-		if err == nil {
-			err = openURL(link)
-		}
-		if err != nil {
-			failed()
-			return fmt.Errorf("opening %s failed: %w; invite %s again", m.Agent, err, m.Role)
-		}
-		return json.NewEncoder(out).Encode(v)
-	}
-	if headed {
-		why := m.Agent + " is not open"
-		if appBundles[m.Agent] == "" {
-			why = m.Agent + " has no desktop app"
-		} else if runtime.GOOS != "darwin" {
-			why = "desktop chats open only on macOS"
-		}
-		fmt.Fprintf(os.Stderr, "peer: %s, so %s runs headless\n", why, m.Role)
-	}
-	logPath := s.logPath(v.ID, m.Role)
-	argv, err := memberArgs(s, m.Agent, memberPrompt(v, m.Role, brief, true))
-	if err == nil {
-		err = startMember(argv, s.repo, logPath, s.exitPath(v.ID, m.Role))
-	}
-	if err != nil {
-		failed()
 		return fmt.Errorf("launching %s failed: %w", m.Agent, err)
 	}
 	fmt.Fprintf(os.Stderr, "peer: %s runs headless; watch it in peer, or read %s\n", m.Role, logPath)
+	if m.Worktree != "" {
+		fmt.Fprintf(os.Stderr, "peer: %s works in %s on branch %s; peer end keeps it\n", m.Role, m.Worktree, m.Branch)
+	}
 	return json.NewEncoder(out).Encode(v)
 }
