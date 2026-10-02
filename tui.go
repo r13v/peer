@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"charm.land/bubbles/v2/help"
 	"charm.land/bubbles/v2/key"
@@ -20,6 +21,8 @@ import (
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/glamour/v2"
+	gansi "charm.land/glamour/v2/ansi"
+	"charm.land/glamour/v2/styles"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/term"
@@ -32,28 +35,106 @@ const (
 	roomsEvery = time.Second
 )
 
-// themes are the glamour styles T cycles through; auto follows the
-// terminal's background.
-var themes = []string{"auto", "dracula", "tokyo-night", "pink"}
+// themes are the glamour styles T cycles through; peer is the palette's
+// own, for the terminal's background.
+var themes = []string{"peer", "dracula", "tokyo-night", "pink"}
+
+// palette holds the colors for one terminal background, after GitHub's
+// Primer, with code colors after its syntax theme.
+type palette struct {
+	fg, muted, subtle, line, surface, surface2, blue, green, yellow, red, purple string
+	keyword, str, fn, num, builtin, tag, deleted                                 string
+}
 
 var (
-	accent       = lipgloss.Color("#d19a66")
-	dim          = lipgloss.NewStyle().Faint(true)
-	title        = lipgloss.NewStyle().Foreground(accent)
-	writerStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6"))
-	readerStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("5"))
-	humanStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("3"))
-	activeMark   = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
-	failedMark   = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
-	selected     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("2")).Background(lipgloss.Color("#161b22"))
-	matchStyle   = lipgloss.NewStyle().Reverse(true)
-	currentMatch = lipgloss.NewStyle().Background(lipgloss.Color("3")).Foreground(lipgloss.Color("0"))
-	tabOn        = lipgloss.NewStyle().Bold(true).Padding(0, 1).Foreground(lipgloss.Color("#ffffff")).Background(lipgloss.Color("#1f6feb"))
-	tabOff       = lipgloss.NewStyle().Padding(0, 1).Foreground(lipgloss.Color("#c9d1d9")).Background(lipgloss.Color("#21262d"))
-	thumb        = lipgloss.NewStyle().Foreground(lipgloss.Color("#8b949e"))
-	rule         = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
-	keyStyle     = lipgloss.NewStyle().Bold(true)
+	darkPalette = palette{
+		fg: "#e6edf3", muted: "#8b949e", subtle: "#6e7681", line: "#545d68", surface: "#161b22", surface2: "#21262d",
+		blue: "#4493f8", green: "#3fb950", yellow: "#d29922", red: "#f85149", purple: "#ab7df8",
+		keyword: "#ff7b72", str: "#a5d6ff", fn: "#d2a8ff", num: "#79c0ff", builtin: "#ffa657", tag: "#7ee787", deleted: "#ffa198",
+	}
+	lightPalette = palette{
+		fg: "#1f2328", muted: "#59636e", subtle: "#818b98", line: "#d1d9e0", surface: "#f6f8fa", surface2: "#eff2f5",
+		blue: "#0969da", green: "#1a7f37", yellow: "#9a6700", red: "#d1242f", purple: "#8250df",
+		keyword: "#cf222e", str: "#0a3069", fn: "#8250df", num: "#0550ae", builtin: "#953800", tag: "#116329", deleted: "#82071e",
+	}
 )
+
+// The styles below follow the palette that applyPalette last set.
+var (
+	pal                                          palette
+	dim, subtle, title, keyStyle, rule           lipgloss.Style
+	writerStyle, readerStyle, humanStyle         lipgloss.Style
+	activeMark, failedMark, toolMark, pick, blue lipgloss.Style
+	matchStyle, currentMatch                     lipgloss.Style
+	thumbOn, thumbOff                            lipgloss.Style
+)
+
+func init() { applyPalette(true) }
+
+// applyPalette sets the styles for a dark or light background.
+func applyPalette(dark bool) {
+	p := lightPalette
+	if dark {
+		p = darkPalette
+	}
+	pal = p
+	c, s := lipgloss.Color, lipgloss.NewStyle
+	dim, subtle, rule = s().Foreground(c(p.muted)), s().Foreground(c(p.subtle)), s().Foreground(c(p.line))
+	title, keyStyle = s().Bold(true).Foreground(c(p.fg)), s().Bold(true).Foreground(c(p.fg))
+	writerStyle = s().Bold(true).Foreground(c(p.blue))
+	readerStyle = s().Bold(true).Foreground(c(p.purple))
+	humanStyle = s().Bold(true).Foreground(c(p.green))
+	activeMark, failedMark, toolMark = s().Foreground(c(p.green)), s().Foreground(c(p.red)), s().Foreground(c(p.yellow))
+	pick, blue = s().Bold(true).Foreground(c(p.green)), s().Foreground(c(p.blue))
+	matchStyle = s().Foreground(c(p.yellow)).Background(c(p.surface2)).Underline(true)
+	currentMatch = s().Bold(true).Foreground(c(p.surface)).Background(c(p.yellow))
+	// The thumb is brighter than the border it rides on.
+	thumbOn, thumbOff = s().Bold(true).Foreground(c(p.fg)), s().Foreground(c(p.muted))
+}
+
+// glamourStyle is glamour's dark or light style in the palette's colors.
+func glamourStyle(dark bool) gansi.StyleConfig {
+	cfg, p := styles.LightStyleConfig, lightPalette
+	if dark {
+		cfg, p = styles.DarkStyleConfig, darkPalette
+	}
+	yes := true
+	cfg.Document.Color = &p.fg
+	cfg.Heading.Color, cfg.H6.Color = &p.blue, nil
+	cfg.H1.Color, cfg.H1.BackgroundColor, cfg.H1.Prefix, cfg.H1.Suffix, cfg.H1.Bold = &p.blue, nil, "# ", "", &yes
+	cfg.Code.Color, cfg.Code.BackgroundColor = &p.fg, &p.surface2
+	cfg.Link.Color, cfg.LinkText.Color = &p.blue, &p.blue
+	cfg.BlockQuote.Color = &p.muted
+	cfg.HorizontalRule.Color = &p.line
+	cfg.Item.Color, cfg.Enumeration.Color = &p.fg, &p.muted
+	cfg.CodeBlock.Color = &p.fg
+	ch := *cfg.CodeBlock.Chroma
+	for _, f := range []struct {
+		dst *gansi.StylePrimitive
+		c   *string
+	}{
+		{&ch.Text, &p.fg}, {&ch.Name, &p.fg}, {&ch.Comment, &p.muted}, {&ch.CommentPreproc, &p.keyword},
+		{&ch.Keyword, &p.keyword}, {&ch.KeywordReserved, &p.keyword}, {&ch.KeywordNamespace, &p.keyword}, {&ch.KeywordType, &p.keyword},
+		{&ch.Operator, &p.keyword}, {&ch.Punctuation, &p.fg}, {&ch.NameBuiltin, &p.builtin}, {&ch.NameTag, &p.tag},
+		{&ch.NameAttribute, &p.num}, {&ch.NameClass, &p.builtin}, {&ch.NameConstant, &p.num}, {&ch.NameDecorator, &p.fn},
+		{&ch.NameFunction, &p.fn}, {&ch.NameOther, &p.fg}, {&ch.Literal, &p.num}, {&ch.LiteralNumber, &p.num},
+		{&ch.LiteralString, &p.str}, {&ch.LiteralStringEscape, &p.num}, {&ch.GenericDeleted, &p.deleted},
+		{&ch.GenericInserted, &p.tag}, {&ch.GenericSubheading, &p.fn}, {&ch.Error, &p.red},
+	} {
+		f.dst.Color = f.c
+	}
+	ch.Background.BackgroundColor, ch.Error.BackgroundColor = nil, nil
+	cfg.CodeBlock.Chroma = &ch
+	return cfg
+}
+
+// onSurface paints line, padded to width cells, on the surface color,
+// keeping it under the resets that styled spans inside line end with.
+func onSurface(line string, width int) string {
+	on := ansi.NewStyle().BackgroundColor(lipgloss.Color(pal.surface)).String()
+	line = strings.NewReplacer("\x1b[m", "\x1b[m"+on, "\x1b[0m", "\x1b[0m"+on).Replace(line)
+	return on + pad(line, width) + "\x1b[m"
+}
 
 // entry is a session with the store that holds it and its message count.
 type entry struct {
@@ -194,6 +275,7 @@ func newPane() pane {
 	vp.KeyMap.Left = key.NewBinding(key.WithKeys("left"))
 	vp.KeyMap.Right = key.NewBinding(key.WithKeys("right"))
 	vp.MouseWheelEnabled = true
+	vp.MouseWheelDelta = 1 // trackpads send many events; a line each reads smoothly
 	vp.FillHeight = true
 	return pane{vp: vp, cur: -1}
 }
@@ -323,6 +405,7 @@ type model struct {
 	gen       int // bumped on each room switch, so late reads are dropped
 	room      room
 	chat, log pane
+	logDone   logDone
 	focus     focus
 	showLog   bool
 	showRooms bool
@@ -372,13 +455,19 @@ var inviteAgents = []string{"claude", "codex"}
 func newModel(local *store) *model {
 	in := textinput.New()
 	in.Prompt = "/"
-	h := help.New()
-	h.Styles.FullKey, h.Styles.FullDesc = keyStyle, dim
+	applyPalette(true)
 	return &model{
-		local: local, zones: zone.New(), keys: newKeyMap(), help: h, input: in, compose: textinput.New(), addInput: textinput.New(),
+		local: local, zones: zone.New(), keys: newKeyMap(), help: newHelp(), input: in, compose: textinput.New(), addInput: textinput.New(),
 		chat: newPane(), log: newPane(), showLog: true, showRooms: true, markdown: true, dark: true,
 		rendered: map[string]string{}, counts: map[string]int{},
 	}
+}
+
+// newHelp is the key list in the current palette.
+func newHelp() help.Model {
+	h := help.New()
+	h.Styles.FullKey, h.Styles.FullDesc, h.Styles.FullSeparator = keyStyle, dim, subtle
+	return h
 }
 
 type tickMsg struct{}
@@ -561,6 +650,8 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.layout()
 	case tea.BackgroundColorMsg:
 		m.dark = msg.IsDark()
+		applyPalette(m.dark)
+		m.help = newHelp()
 		m.restyle()
 	case tickMsg:
 		return m, m.poll()
@@ -591,9 +682,13 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.added = "asked the writer to add " + msg.agent
 		}
 	case tea.MouseWheelMsg:
-		m.wheel(msg)
+		if !m.showHelp { // the panes under the key list stay put
+			m.wheel(msg)
+		}
 	case tea.MouseClickMsg:
-		m.click(msg)
+		if !m.showHelp {
+			m.click(msg)
+		}
 	case tea.KeyPressMsg:
 		return m, m.press(msg)
 	default:
@@ -688,14 +783,14 @@ func (m *model) tally() string {
 	return fmt.Sprintf("%d %s (%s) in %s", len(m.room.msgs), noun, strings.Join(parts, ", "), humanDuration(end.Sub(start)))
 }
 
-// layout sizes the panes: tabs on top, rooms on the left, the transcript
-// on the right, the member log across the bottom, then a rule and the
-// key hints. Each pane keeps two columns on its right for its scrollbar.
+// layout sizes the framed panes: rooms on the left, the transcript on the
+// right, the member log across the bottom and the key hints below. Each
+// frame takes two rows and, with a column of margin, three columns.
 func (m *model) layout() {
 	if m.width == 0 {
 		return
 	}
-	h := m.height - 3
+	h := m.height - 1
 	m.logH = 0
 	if m.showLog && h >= 12 { // too short for both, the log gives way
 		m.logH = max(h/3, 6)
@@ -709,13 +804,13 @@ func (m *model) layout() {
 		m.sideW = min(max(m.width/4, 28), 44)
 	}
 	chatW := m.width - m.sideW
-	resized := m.chat.vp.Width() != chatW-2 || m.log.vp.Width() != m.width-2
-	m.chat.vp.SetWidth(chatW - 2)
-	m.chat.vp.SetHeight(max(m.topH-1, 1))
-	m.log.vp.SetWidth(m.width - 2)
-	m.log.vp.SetHeight(max(m.logH-1, 1))
+	resized := m.chat.vp.Width() != chatW-3 || m.log.vp.Width() != m.width-3
+	m.chat.vp.SetWidth(chatW - 3)
+	m.chat.vp.SetHeight(max(m.topH-2, 1))
+	m.log.vp.SetWidth(m.width - 3)
+	m.log.vp.SetHeight(max(m.logH-2, 1))
 	if resized {
-		m.renderer, m.logGlam, m.rendered = nil, nil, map[string]string{}
+		m.renderer, m.logGlam, m.rendered, m.logDone = nil, nil, map[string]string{}, logDone{}
 		m.renderChat()
 		m.renderLog()
 	}
@@ -723,7 +818,7 @@ func (m *model) layout() {
 
 // restyle drops rendered markdown after a theme or background change.
 func (m *model) restyle() {
-	m.renderer, m.logGlam, m.rendered = nil, nil, map[string]string{}
+	m.renderer, m.logGlam, m.rendered, m.logDone = nil, nil, map[string]string{}, logDone{}
 	m.renderChat()
 	m.renderLog()
 }
@@ -731,23 +826,32 @@ func (m *model) restyle() {
 // author names a message's sender or recipient; withAgent appends the
 // member's app, dimmed, after its role.
 func (m *model) author(v session, name string, withAgent bool) string {
-	st := readerStyle
-	switch name {
-	case everyone:
+	if name == everyone {
 		return "all"
-	case human:
-		return humanStyle.Render(name)
-	case system:
-		return dim.Render(name)
-	case writer:
-		st = writerStyle
 	}
-	out := st.Render(name)
+	out := roleStyle(name).Render(name)
 	if mem := v.member(name); withAgent && mem != nil && mem.Agent != "" {
 		out += " " + dim.Render(mem.Agent)
 	}
 	return out
 }
+
+// roleStyle colors a participant: the writer blue, the user green, peer
+// itself dim and every other member purple.
+func roleStyle(name string) lipgloss.Style {
+	switch name {
+	case human:
+		return humanStyle
+	case system:
+		return subtle
+	case writer:
+		return writerStyle
+	}
+	return readerStyle
+}
+
+// dot is the bullet before a message from name.
+func dot(name string) string { return roleStyle(name).UnsetBold().Render("●") }
 
 func (m *model) renderChat() {
 	if !m.room.loaded {
@@ -762,11 +866,17 @@ func (m *model) renderChat() {
 		at = at.Local()
 		if d := at.Format("Mon, 2 Jan 2006"); d != day {
 			day = d
-			lines = append(lines, dim.Render("── "+d+" ──"), "")
+			lines = append(lines, subtle.Render("── "+d+" ──"), "")
 		}
 		m.room.starts = append(m.room.starts, len(lines))
-		lines = append(lines, dim.Render(at.Format("15:04:05"))+"  "+m.author(v, msg.From, true)+dim.Render(" → ")+m.author(v, msg.To, false))
-		lines = append(lines, strings.Split(m.body(&m.renderer, msg.ID, msg.Text, w), "\n")...)
+		lines = append(lines, subtle.Render(at.Format("15:04:05"))+"  "+dot(msg.From)+" "+m.author(v, msg.From, true)+subtle.Render(" → ")+m.author(v, msg.To, false))
+		body := strings.Split(m.body(&m.renderer, msg.ID, msg.Text, w), "\n")
+		if msg.From == human { // the user's words stand out like a prompt
+			for i, l := range body {
+				body[i] = onSurface(blue.Render("▎")+" "+ansi.TruncateLeft(l, 2, ""), w)
+			}
+		}
+		lines = append(lines, body...)
 		lines = append(lines, "")
 	}
 	if len(m.room.msgs) == 0 {
@@ -778,7 +888,7 @@ func (m *model) renderChat() {
 		if v.EndedReason != "" {
 			t += ": " + v.EndedReason
 		}
-		lines = append(lines, dim.Render(t+" ──"), m.tally())
+		lines = append(lines, subtle.Render(t+" ──"), dim.Render(m.tally()))
 	}
 	m.chat.setLines(lines)
 }
@@ -795,14 +905,11 @@ func (m *model) body(r **glamour.TermRenderer, id, text string, width int) strin
 		return out
 	}
 	if *r == nil {
-		style := themes[m.theme]
-		if style == "auto" {
-			style = "light"
-			if m.dark {
-				style = "dark"
-			}
+		style := glamour.WithStandardStyle(themes[m.theme])
+		if themes[m.theme] == "peer" {
+			style = glamour.WithStyles(glamourStyle(m.dark))
 		}
-		g, err := glamour.NewTermRenderer(glamour.WithStandardStyle(style), glamour.WithWordWrap(max(width-4, 10)))
+		g, err := glamour.NewTermRenderer(style, glamour.WithWordWrap(max(width-4, 10)))
 		if err != nil {
 			m.err = err
 			m.markdown = false
@@ -819,19 +926,37 @@ func (m *model) body(r **glamour.TermRenderer, id, text string, width int) strin
 	return out
 }
 
+// logDone is how far renderLog got through a member's log, so that a
+// poll renders only the entries added since: a long log takes a quarter
+// second to render whole, which would stall scrolling while it grows.
+type logDone struct {
+	key    string // room, role and the heading that names its agent
+	n      int    // entries rendered
+	lines  []string
+	day    string
+	prev   logKind
+	prevAt time.Time
+}
+
 func (m *model) renderLog() {
 	if !m.room.loaded {
 		return
 	}
 	if m.room.logRole == "" {
+		m.logDone = logDone{}
 		m.log.setLines([]string{dim.Render("No member runs headless, so there is no log here.")})
 		return
 	}
 	v, w := m.room.e.v, max(m.log.vp.Width(), 10)
-	var lines []string
+	d := m.logDone
+	// A role invited again may come back as another agent.
+	if key := m.room.e.key() + "\x00" + m.author(v, m.room.logRole, true); d.key != key || d.n > len(m.room.logs) {
+		d = logDone{key: key, prev: logKind(-1)}
+	}
+	lines := d.lines
 	add := func(st lipgloss.Style, prefix, text string, width int) {
 		for _, l := range strings.Split(ansi.Wrap(text, width, ""), "\n") {
-			lines = append(lines, st.Render(prefix+l))
+			lines = append(lines, subtle.Render(prefix)+st.Render(l))
 		}
 	}
 	gap := func() { // one blank line between blocks
@@ -839,34 +964,34 @@ func (m *model) renderLog() {
 			lines = append(lines, "")
 		}
 	}
-	day, prev, prevAt := "", logKind(-1), time.Time{}
-	for _, e := range m.room.logs {
+	day, prev, prevAt := d.day, d.prev, d.prevAt
+	for _, e := range m.room.logs[d.n:] {
 		at := ""
 		if !e.At.IsZero() { // logs written before stamping have no times
 			local := e.At.Local()
 			if d := local.Format("Mon, 2 Jan 2006"); d != day {
 				day = d
 				gap()
-				lines = append(lines, dim.Render("── "+d+" ──"), "")
+				lines = append(lines, subtle.Render("── "+d+" ──"), "")
 			}
-			at = dim.Render(local.Format("15:04:05")) + "  "
+			at = subtle.Render(local.Format("15:04:05")) + "  "
 		}
 		switch e.Kind {
 		case logText:
 			gap()
-			lines = append(lines, at+m.author(v, m.room.logRole, true))
+			lines = append(lines, at+dot(m.room.logRole)+" "+m.author(v, m.room.logRole, true))
 			lines = append(lines, strings.Split(m.body(&m.logGlam, "log\x00"+e.Text, e.Text, w), "\n")...)
 		case logTool:
 			gap()
-			head := at + title.Render("$ "+e.Text)
+			head := at + toolMark.Render("●") + " " + e.Text
 			if e.Failed {
-				head += " " + failedMark.Render("✗ failed")
+				head = at + failedMark.Render("●") + " " + e.Text + " " + failedMark.Render("✗ failed")
 			}
 			lines = append(lines, strings.Split(ansi.Wrap(head, w, ""), "\n")...)
 		case logOutput:
 			if at != "" && !e.At.Equal(prevAt) { // claude's result is its own event
 				gap()
-				lines = append(lines, at+dim.Render("↳ output"))
+				lines = append(lines, at+subtle.Render("↳ output"))
 			}
 			st := dim
 			if e.Failed {
@@ -885,6 +1010,7 @@ func (m *model) renderLog() {
 		}
 		prev, prevAt = e.Kind, e.At
 	}
+	m.logDone = logDone{d.key, len(m.room.logs), lines, day, prev, prevAt}
 	m.log.setLines(lines)
 }
 
@@ -999,16 +1125,16 @@ func (m *model) pressAdd(msg tea.KeyPressMsg) tea.Cmd {
 }
 
 func (m *model) press(msg tea.KeyPressMsg) tea.Cmd {
-	armed := m.closeArmed()
+	armed, nav := m.closeArmed(), latin(msg)
 	m.closeAt = time.Time{}
 	m.added = ""
-	if m.composing && msg.String() != "ctrl+c" {
+	if m.composing && nav.String() != "ctrl+c" {
 		return m.pressCompose(msg)
 	}
-	if m.adding != addOff && msg.String() != "ctrl+c" {
+	if m.adding != addOff && nav.String() != "ctrl+c" {
 		return m.pressAdd(msg)
 	}
-	if m.searching && msg.String() != "ctrl+c" {
+	if m.searching && nav.String() != "ctrl+c" {
 		switch msg.String() {
 		case "esc":
 			m.searching = false
@@ -1028,6 +1154,7 @@ func (m *model) press(msg tea.KeyPressMsg) tea.Cmd {
 		}
 		return nil
 	}
+	msg = nav // the text inputs above take the keys as typed
 	if m.showHelp {
 		m.showHelp = false
 		if !key.Matches(msg, m.keys.Quit) {
@@ -1066,6 +1193,7 @@ func (m *model) press(msg tea.KeyPressMsg) tea.Cmd {
 		m.layout()
 	case key.Matches(msg, k.Markdown):
 		m.markdown = !m.markdown
+		m.logDone = logDone{}
 		m.renderChat()
 		m.renderLog()
 	case key.Matches(msg, k.Theme):
@@ -1186,12 +1314,6 @@ func (m *model) click(msg tea.MouseClickMsg) {
 	if m.composing { // the draft stays with its room
 		return
 	}
-	for _, f := range m.panes() {
-		if m.zones.Get("tab" + paneNames[f]).InBounds(msg) {
-			m.focus = f
-			return
-		}
-	}
 	for i := range m.rooms {
 		if m.zones.Get("room" + strconv.Itoa(i)).InBounds(msg) {
 			m.choose(i)
@@ -1210,46 +1332,62 @@ func (m *model) click(msg tea.MouseClickMsg) {
 }
 
 func (m *model) View() tea.View {
-	v := tea.NewView(m.zones.Scan(m.render()))
+	// Zones are read from the panes alone: bubblezone cannot see through
+	// the compositor that lays the key list over them.
+	content := m.zones.Scan(m.render())
+	if m.showHelp && m.width > 0 {
+		modal := m.helpModal()
+		x := max((m.width-lipgloss.Width(modal))/2, 0)
+		y := max((m.height-lipgloss.Height(modal))/2, 0)
+		content = lipgloss.NewCompositor(lipgloss.NewLayer(content), lipgloss.NewLayer(modal).X(x).Y(y).Z(1)).Render()
+	}
+	v := tea.NewView(content)
 	v.AltScreen = true
+	v.WindowTitle = "peer"
+	if m.room.e.s != nil {
+		v.WindowTitle = "peer · " + m.room.e.v.ID
+	}
 	v.MouseMode = tea.MouseModeCellMotion
 	return v
+}
+
+// helpModal is the key list in a frame, for the middle of the screen. A
+// short screen drops the padding, then the list's last lines, so that the
+// frame always shows whole.
+func (m *model) helpModal() string {
+	m.help.SetWidth(max(m.width-10, 20))
+	lines := strings.Split(title.Render("Keys")+"\n\n"+m.help.FullHelpView(m.keys.FullHelp())+"\n\n"+subtle.Render("any key closes"), "\n")
+	padY := 1
+	if len(lines)+4 > m.height {
+		padY = 0
+	}
+	if avail := max(m.height-2-2*padY, 1); len(lines) > avail {
+		lines = append(lines[:avail-1], subtle.Render("…"))
+	}
+	return lipgloss.NewStyle().Border(lipgloss.NormalBorder()).BorderForeground(lipgloss.Color(pal.blue)).Padding(padY, 3).
+		MaxWidth(m.width).Render(strings.Join(lines, "\n"))
 }
 
 func (m *model) render() string {
 	if m.width == 0 {
 		return ""
 	}
-	chatW := m.width - m.sideW
-	var chat string
-	if m.showHelp {
-		m.help.SetWidth(chatW - 2)
-		chat = fit(" "+title.Render("Keys")+"\n\n"+m.help.FullHelpView(m.keys.FullHelp()), chatW, m.topH)
-	} else {
-		chat = fit(" "+m.chatTitle(), chatW, 1) + "\n" + m.chat.view()
-	}
-	top := m.zones.Mark("chat", chat)
+	top := m.zones.Mark("chat", m.chat.view(m.width-m.sideW, m.topH, m.focus == focusChat, paneState(&m.chat)))
 	if m.showRooms {
 		top = lipgloss.JoinHorizontal(lipgloss.Top, m.zones.Mark("rooms", m.roomList()), top)
 	}
-	parts := []string{m.tabs(), top}
+	parts := []string{top}
 	if m.logH > 0 {
-		name := "member"
-		if m.room.logRole != "" {
-			name = m.room.e.v.label(m.room.logRole)
+		label := paneState(&m.log)
+		if n := len(m.room.logRoles); n > 1 { // name the log only when there is a choice
+			who := fmt.Sprintf("%s %d/%d · L next", m.room.e.v.label(m.room.logRole), slices.Index(m.room.logRoles, m.room.logRole)+1, n)
+			label = strings.TrimSuffix(who+" · "+label, " · ")
 		}
-		head := title.Render(name + " log")
-		if n := len(m.room.logRoles); n > 1 {
-			head += dim.Render(fmt.Sprintf(" %d/%d · L next", slices.Index(m.room.logRoles, m.room.logRole)+1, n))
-		}
-		head += paneState(&m.log)
-		parts = append(parts, m.zones.Mark("log", divider(head, m.width)+"\n"+m.log.view()))
+		parts = append(parts, m.zones.Mark("log", m.log.view(m.width, m.logH, m.focus == focusLog, label)))
 	}
-	parts = append(parts, divider("", m.width), m.statusLine())
+	parts = append(parts, m.statusLine())
 	return strings.Join(parts, "\n")
 }
-
-var paneNames = map[focus]string{focusRooms: "Rooms", focusChat: "Chat", focusLog: "Log"}
 
 // panes lists the shown panes in Tab order.
 func (m *model) panes() []focus {
@@ -1263,33 +1401,44 @@ func (m *model) panes() []focus {
 	return order
 }
 
-// tabs names the shown panes, the focused one highlighted.
-func (m *model) tabs() string {
-	var out []string
-	for _, f := range m.panes() {
-		st := tabOff
-		if f == m.focus {
-			st = tabOn
-		}
-		out = append(out, m.zones.Mark("tab"+paneNames[f], st.Render(paneNames[f])))
-	}
-	return " " + strings.Join(out, " ")
+// view is the pane's viewport framed in width by height cells.
+func (p *pane) view(width, height int, focused bool, label string) string {
+	h := p.vp.Height()
+	return box(strings.Split(fit(p.vp.View(), p.vp.Width(), h), "\n"), width, height, focused, label,
+		func(track string, thumb lipgloss.Style) []string {
+			return scrollbar(h, p.vp.TotalLineCount(), h, p.vp.YOffset(), track, thumb)
+		})
 }
 
-// view is the pane's viewport with its scrollbar on the right.
-func (p *pane) view() string {
-	w, h := p.vp.Width(), p.vp.Height()
-	lines := strings.Split(fit(p.vp.View(), w, h), "\n")
-	bar := scrollbar(h, p.vp.TotalLineCount(), h, p.vp.YOffset(), " ")
-	for i := range lines {
-		lines[i] += " " + bar[i]
+// box frames lines in a thin border width by height cells, blue when
+// focused, with label, if any, dim in its top border. The right border
+// is the scrollbar that bar draws on the given track.
+func box(lines []string, width, height int, focused bool, label string, bar func(string, lipgloss.Style) []string) string {
+	inner, w, h := max(width-2, 1), max(width-3, 1), max(height-2, 1)
+	edge, thumb := rule, thumbOff
+	if focused {
+		edge, thumb = blue, thumbOn
 	}
-	return strings.Join(lines, "\n")
+	top := edge.Render("┌" + strings.Repeat("─", inner) + "┐")
+	if label = ansi.Truncate(label, max(inner-4, 0), "…"); label != "" {
+		top = edge.Render("┌"+strings.Repeat("─", max(inner-ansi.StringWidth(label)-3, 0))+" ") + dim.Render(label) + edge.Render(" ─┐")
+	}
+	right := bar(edge.Render("│"), thumb)
+	out := []string{top}
+	for i := range h {
+		line := ""
+		if i < len(lines) {
+			line = lines[i]
+		}
+		out = append(out, edge.Render("│")+" "+pad(ansi.Truncate(line, w, ""), w)+right[i])
+	}
+	return strings.Join(append(out, edge.Render("└"+strings.Repeat("─", inner)+"┘")), "\n")
 }
 
 // scrollbar draws a column of h cells on track, with a thumb sized and
-// placed by which visible lines from offset of total are on screen.
-func scrollbar(h, total, visible, offset int, track string) []string {
+// placed by which visible lines from offset of total are on screen. The
+// thumb moves by half cells, its ends drawn with half lines.
+func scrollbar(h, total, visible, offset int, track string, thumb lipgloss.Style) []string {
 	bar := make([]string, max(h, 0))
 	for i := range bar {
 		bar[i] = track
@@ -1297,64 +1446,104 @@ func scrollbar(h, total, visible, offset int, track string) []string {
 	if h <= 0 || total <= visible {
 		return bar
 	}
-	size := min(max(h*visible/total, 1), h)
-	pos := (h - size) * min(max(offset, 0), total-visible) / (total - visible)
-	for i := pos; i < pos+size; i++ {
-		bar[i] = thumb.Render("┃")
+	n := 2 * h
+	size := min(max(n*visible/total, 2), n)
+	pos := (n - size) * min(max(offset, 0), total-visible) / (total - visible)
+	in := func(half int) bool { return half >= pos && half < pos+size }
+	for i := range bar {
+		switch top, bottom := in(2*i), in(2*i+1); {
+		case top && bottom:
+			bar[i] = thumb.Render("┃")
+		case top:
+			bar[i] = thumb.Render("╹")
+		case bottom:
+			bar[i] = thumb.Render("╻")
+		}
 	}
 	return bar
 }
 
-// divider is a rule width cells wide, with head, if any, near its start.
-func divider(head string, width int) string {
-	if head == "" {
-		return rule.Render(strings.Repeat("─", max(width, 0)))
+// qwerty maps the Russian layout to the US keys in the same places.
+var qwerty = func() map[rune]rune {
+	m := map[rune]rune{}
+	for _, row := range [][2]string{
+		{"йцукенгшщзхъфывапролджэячсмитьбю.ё", "qwertyuiop[]asdfghjkl;'zxcvbnm,./`"},
+		{"ЙЦУКЕНГШЩЗХЪФЫВАПРОЛДЖЭЯЧСМИТЬБЮ,Ё", "QWERTYUIOP{}ASDFGHJKL:\"ZXCVBNM<>?~"},
+	} {
+		us := []rune(row[1])
+		for i, r := range []rune(row[0]) {
+			m[r] = us[i]
+		}
 	}
-	head = ansi.Truncate(head, max(width-4, 0), "…")
-	return rule.Render("── ") + head + " " + rule.Render(strings.Repeat("─", max(width-ansi.StringWidth(head)-4, 0)))
+	return m
+}()
+
+// usShift is what shift gives on a US layout key.
+func usShift(r rune) rune {
+	if i := strings.IndexRune("`1234567890-=[]\\;',./", r); i >= 0 {
+		return []rune("~!@#$%^&*()_+{}|:\"<>?")[i]
+	}
+	return unicode.ToUpper(r)
 }
 
-func (m *model) chatTitle() string {
-	if m.room.e.s == nil {
-		return title.Render("peer")
+// latin returns msg as the key in the same place on a US layout, so
+// shortcuts work whatever layout is on. Terminals with the kitty keyboard
+// protocol report that key; for the rest the Russian layout is mapped.
+func latin(msg tea.KeyPressMsg) tea.KeyPressMsg {
+	k := tea.Key(msg)
+	shift := k.Mod.Contains(tea.ModShift)
+	typed := []rune(k.Text)
+	var r rune
+	switch {
+	case k.BaseCode > ' ' && k.BaseCode < unicode.MaxASCII: // the terminal knows the key
+		r = k.BaseCode
+		if len(typed) == 1 && unicode.IsLetter(typed[0]) { // the case typed covers caps lock
+			shift = unicode.IsUpper(typed[0])
+		}
+	case len(typed) == 1 && qwerty[typed[0]] != 0:
+		r, shift = qwerty[typed[0]], false // the text is already shifted
+	case qwerty[k.Code] != 0:
+		r = qwerty[k.Code]
+	default:
+		return msg
 	}
-	v := m.room.e.v
-	return title.Render(filepath.Base(v.Repo)+" · "+v.ID) + "  " + dim.Render(m.room.status) + paneState(&m.chat)
+	if shift {
+		r = usShift(r)
+	}
+	mod := k.Mod &^ tea.ModShift
+	text := ""
+	if mod == 0 {
+		text = string(r)
+	}
+	return tea.KeyPressMsg{Code: r, Text: text, Mod: mod}
 }
 
 // paneState shows a pane's search and whether it has news below.
 func paneState(p *pane) string {
-	s := ""
+	var s []string
 	if p.query != "" {
-		s += fmt.Sprintf("  /%s %d/%d", p.query, p.cur+1, len(p.matches))
+		s = append(s, fmt.Sprintf("/%s %d/%d", p.query, p.cur+1, len(p.matches)))
 	}
 	if p.unread {
-		s += "  ↓ new"
+		s = append(s, "↓ new")
 	}
-	return s
+	return strings.Join(s, " · ")
 }
 
-// roomList renders the rooms, scrolled so the selected one stays visible,
-// with a scrollbar that doubles as the rule beside the transcript.
+// roomList frames the rooms, scrolled so the selected one stays visible.
 func (m *model) roomList() string {
-	w, h := m.sideW-2, max(m.topH, 1)
+	w, h := m.sideW-3, max(m.topH-2, 1)
 	var lines []string
 	var owner []int // the room each line belongs to, or -1
 	add := func(i int, line string) {
 		lines, owner = append(lines, line), append(owner, i)
 	}
 	now := time.Now()
-	active := 0
-	for _, e := range m.rooms {
-		if e.v.EndedAt == "" {
-			active++
-		}
-	}
 	at, section := 0, ""
 	for i, e := range m.rooms {
 		start, _ := time.Parse(time.RFC3339Nano, e.v.StartedAt)
 		start = start.Local()
-		t := fmt.Sprintf("Active · %d", active)
+		t := "Active"
 		if e.v.EndedAt != "" {
 			t = dayLabel(start, now)
 		}
@@ -1363,7 +1552,7 @@ func (m *model) roomList() string {
 			if len(lines) > 0 {
 				add(-1, "")
 			}
-			add(-1, title.Render(t)+" "+dim.Render(strings.Repeat("─", max(w-ansi.StringWidth(t)-1, 0))))
+			add(-1, title.Render(t)+" "+rule.Render(strings.Repeat("─", max(w-ansi.StringWidth(t)-1, 0))))
 		}
 		// The room ID gets the room; the repo takes at most what is left,
 		// but never less than a third, so it stays recognizable.
@@ -1371,35 +1560,42 @@ func (m *model) roomList() string {
 		if e.v.EndedReason != "" {
 			mark, markStyle = "✕", failedMark
 		} else if e.v.EndedAt != "" {
-			mark, markStyle = "○", dim
+			mark, markStyle = "○", subtle
 		}
-		repo, avail := filepath.Base(e.v.Repo), max(w-5, 2)
-		rw := min(ansi.StringWidth(repo), max(avail-ansi.StringWidth(e.v.ID)-1, avail/3))
-		id := pad(ansi.Truncate(e.v.ID, avail-rw-1, "…"), avail-rw-1)
-		repo = ansi.Truncate(repo, rw, "…")
-		repoStyle := dim
+		// Rooms of this checkout go without their repo, which is known.
+		repo, avail := filepath.Base(e.v.Repo), max(w-4, 2)
 		if m.local != nil && e.v.Repo == m.local.repo {
-			repoStyle = title
+			repo = ""
 		}
-		row := "  " + markStyle.Render(mark) + " " + id + " " + repoStyle.Render(repo)
+		rw := min(ansi.StringWidth(repo), max(avail-ansi.StringWidth(e.v.ID)-1, avail/3))
+		idW := avail
+		if repo != "" {
+			idW = avail - rw - 1
+		}
+		id := pad(ansi.Truncate(e.v.ID, idW, "…"), idW)
+		repo = ansi.Truncate(repo, rw, "…")
+		row := "  " + markStyle.Render(mark) + " " + id
 		if i == m.sel {
-			row, at = selected.Render(pad("❯ "+mark+" "+id+" "+repo, w)), len(lines)
+			row, at = pick.Render("❯")+" "+markStyle.Render(mark)+" "+pick.Render(id), len(lines)
 		}
-		// Short fields first, so a narrow list keeps them; the pair is
-		// usually the same and goes last. An ended room's day is in its
-		// header; an active one's age is its duration, so it has no time.
+		if repo != "" {
+			row += " " + subtle.Render(repo)
+		}
+		// An ended room's day is in its header; an active one's age is its
+		// duration, so it has no time. ✕ tells a failed end; the transcript
+		// says why.
 		end, when := now, ""
 		if e.v.EndedAt != "" {
 			end, _ = time.Parse(time.RFC3339Nano, e.v.EndedAt)
 			when = start.Format("15:04") + " · "
 		}
-		detail := dim.Render(fmt.Sprintf("    %s%d msgs · %s · ", when, e.count, humanDuration(end.Sub(start))))
-		if e.v.EndedReason != "" {
-			detail += failedMark.Render(e.v.EndedReason) + dim.Render(" · ")
+		detail := dim.Render(fmt.Sprintf("    %s%d msgs · %s", when, e.count, humanDuration(end.Sub(start))))
+		detail = ansi.Truncate(detail, w, "…")
+		if i == m.sel { // the selected room is a card
+			row, detail = onSurface(row, w), onSurface(detail, w)
 		}
-		detail += dim.Render(strings.Join(e.v.members(), ", "))
 		add(i, row)
-		add(i, ansi.Truncate(detail, w, "…"))
+		add(i, detail)
 	}
 	if len(m.rooms) == 0 {
 		add(-1, dim.Render("No rooms. Start one with /peer in an agent chat."))
@@ -1407,12 +1603,12 @@ func (m *model) roomList() string {
 	// Keep both lines of the selected room on screen, fill the height, add
 	// the scrollbar, then mark the visible lines of each room as one zone.
 	first := min(max(at-h+2, 0), max(len(lines)-h, 0))
-	bar := scrollbar(h, len(lines), h, first, rule.Render("│"))
+	total := len(lines)
 	for len(lines) < first+h {
 		add(-1, "")
 	}
 	for j := first; j < first+h; j++ {
-		lines[j] = pad(ansi.Truncate(lines[j], w, ""), w) + " " + bar[j-first]
+		lines[j] = pad(ansi.Truncate(lines[j], w, ""), w)
 	}
 	last := first + h
 	var out []string
@@ -1428,7 +1624,8 @@ func (m *model) roomList() string {
 		out = append(out, block)
 		j = k
 	}
-	return strings.Join(out, "\n")
+	return box(strings.Split(strings.Join(out, "\n"), "\n"), m.sideW, m.topH, m.focus == focusRooms, "",
+		func(track string, thumb lipgloss.Style) []string { return scrollbar(h, total, h, first, track, thumb) })
 }
 
 // dayLabel names t's local calendar day relative to now: Today,
@@ -1466,10 +1663,10 @@ func (m *model) statusLine() string {
 	}
 	switch m.adding {
 	case addPick:
-		line := " " + title.Render("add ›")
+		line := " " + blue.Bold(true).Render("add ›")
 		for i, a := range inviteAgents {
 			if i == m.addAgent {
-				a = selected.Render("[" + a + "]")
+				a = pick.Render("[" + a + "]")
 			}
 			line += " " + a
 		}
@@ -1484,7 +1681,7 @@ func (m *model) statusLine() string {
 	}
 	switch {
 	case m.sending:
-		notes = append(notes, dim.Render("sending…"))
+		notes = append(notes, toolMark.Render("sending…"))
 	case m.sendErr != nil:
 		notes = append(notes, failedMark.Render("not sent: "+m.sendErr.Error()))
 	case m.added != "":
@@ -1494,16 +1691,12 @@ func (m *model) statusLine() string {
 		return ansi.Truncate(" "+strings.Join(notes, dim.Render(" · ")), m.width, "…")
 	}
 	left := m.hints()
-	right := "peer"
-	if m.room.e.s != nil {
-		right = m.room.e.v.ID + fmt.Sprintf(" · %d msgs", len(m.room.msgs))
+	// The room's state; its ID too when the list that shows it is hidden.
+	right := m.room.status
+	if m.room.e.s != nil && !m.showRooms {
+		right = strings.TrimSuffix(m.room.e.v.ID+" · "+right, " · ")
 	}
-	if m.markdown {
-		right += " · md " + themes[m.theme]
-	} else {
-		right += " · plain"
-	}
-	right = dim.Render(right) + " "
+	right = subtle.Render(right) + " "
 	left = ansi.Truncate(" "+left, max(m.width-ansi.StringWidth(right)-1, 0), "…")
 	gap := max(m.width-ansi.StringWidth(left)-ansi.StringWidth(right), 1)
 	return ansi.Truncate(left+strings.Repeat(" ", gap)+right, m.width, "")
@@ -1534,7 +1727,7 @@ func hints(pairs ...string) string {
 	for i := 0; i+1 < len(pairs); i += 2 {
 		out = append(out, keyStyle.Render(pairs[i])+" "+dim.Render(pairs[i+1]))
 	}
-	return strings.Join(out, dim.Render(" · "))
+	return strings.Join(out, subtle.Render(" · "))
 }
 
 // fit cuts or pads content to width by height cells, so that panes line

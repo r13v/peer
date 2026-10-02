@@ -77,16 +77,16 @@ A room does not end when a background member stops. The writer gets a notice fro
 
 ### Member permissions
 
-A background member gets an instruction not to edit files. It also gets these limits:
+A background member gets an instruction not to edit files. It can run any shell command, such as tests or scripts, in its agent's sandbox. By default, the sandbox lets commands write only the checkout, temp directories and the checkout's `peer` store, and it blocks the network. The agent's user settings can widen these limits. Neither agent asks for approval.
 
-- **Codex** runs in its `workspace-write` sandbox with access to the `peer` store. It does not ask for approval.
-- **Claude Code** can use only Read, Grep, Glob, Skill, and Bash for `peer` and read-only `git` commands. It denies all other requests.
+- **Codex** runs in its `workspace-write` sandbox.
+- **Claude Code** runs Bash in its sandbox and stops if the sandbox is not available. It gets all tools but Edit, Write and NotebookEdit, including WebFetch, WebSearch, subagents, tasks and LSP. It loads no MCP servers and ignores the checkout's `.claude` settings.
 
-Codex can still write files in the checkout. For Codex and for other members, the "do not edit" rule is only an instruction. If you need a guarantee, use the agent's read-only or Plan mode.
+Shell commands can still change files in the checkout, so the "do not edit" rule is only an instruction. If you need a guarantee, use the agent's read-only or Plan mode.
 
 ## Watch rooms
 
-Run `peer` with no arguments. The left pane lists all rooms from all checkouts, active rooms first. The right pane shows the transcript of the selected room. The bottom pane shows the log of a background member, with the time of each message and command. Tabs on top show the focused pane, and you can click them. Each pane has a scrollbar on its right, and the footer lists the keys for the focused pane. Press `L` to switch to the next background member. `peer` works outside a checkout too. Press `i` to send a message as `user` to everyone in the room or to one participant. Each agent reads it on its next `peer wait`. The name `user` is reserved for these messages. Press `a` to ask the writer to add a member: pick `claude` or `codex` and describe the role in a few words, such as `security reviewer`. The writer picks the role name, expands the description into a brief and runs `peer invite` on its next `peer wait`. On macOS, it sends a notification when the room that you watch ends.
+Run `peer` with no arguments. The left pane lists all rooms from all checkouts, active rooms first. The right pane shows the transcript of the selected room. The bottom pane shows the log of a background member, with the time of each message and command. The focused pane has a blue frame; click a pane to focus it. The right edge of each frame is its scrollbar. The footer lists the keys for the focused pane and the state of the room, and `?` opens all keys in a window over the panes. Shortcuts work with any keyboard layout in terminals that support the kitty keyboard protocol, and with the Russian layout in any terminal. Press `L` to switch to the next background member. `peer` works outside a checkout too. Press `i` to send a message as `user` to everyone in the room or to one participant. Each agent reads it on its next `peer wait`. The name `user` is reserved for these messages. Press `a` to ask the writer to add a member: pick `claude` or `codex` and describe the role in a few words, such as `security reviewer`. The writer picks the role name, expands the description into a brief and runs `peer invite` on its next `peer wait`. On macOS, it sends a notification when the room that you watch ends.
 
 | Key | Action |
 | --- | --- |

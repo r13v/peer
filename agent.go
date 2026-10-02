@@ -46,15 +46,33 @@ var appRunning = func(agent string) bool {
 	return err == nil && strings.TrimSpace(string(out)) == "true"
 }
 
-// memberArgs runs the agent's CLI without a chat window. Codex's sandbox
-// also lets it write the peer store outside the checkout; Claude gets no
-// edit tools and only peer and read-only git in Bash.
+// claudeTools are a Claude member's tools: everything but the edit tools.
+// Its subagents get no more.
+var claudeTools = []string{"Read", "Grep", "Glob", "Skill", "WebFetch", "WebSearch", "Task", "TaskCreate", "TaskGet", "TaskList", "TaskUpdate", "TaskStop", "LSP", "ToolSearch"}
+
+// memberArgs runs the agent's CLI without a chat window. Both agents run
+// any shell command in a sandbox that by default writes only the checkout,
+// temp directories and the peer store, with no network. Claude's sandbox
+// covers only Bash, so it also gets no edit tools and no MCP servers, and
+// it skips the checkout's settings, which could widen the sandbox.
 func memberArgs(s *store, agent, prompt string) ([]string, error) {
 	switch agent {
 	case "codex":
 		return []string{"codex", "exec", "--json", "-C", s.repo, "-s", "workspace-write", "--add-dir", s.dir, "-c", "approval_policy=never", prompt}, nil
 	case "claude":
-		return []string{"claude", "-p", "--verbose", "--output-format", "stream-json", "--permission-mode", "dontAsk", "--permission-prompts", "none", "--tools", "Bash", "Read", "Grep", "Glob", "Skill", "--allowedTools", "Skill", "Bash(peer:*)", "Bash(git diff:*)", "Bash(git status:*)", "Bash(git log:*)", "Bash(git show:*)", "Read", "Grep", "Glob", "--", prompt}, nil
+		sandbox := map[string]any{"sandbox": map[string]any{
+			"enabled":                  true,
+			"failIfUnavailable":        true,
+			"allowUnsandboxedCommands": false,
+			"autoAllowBashIfSandboxed": true,
+			"filesystem":               map[string]any{"allowWrite": []string{s.dir}},
+		}}
+		settings, _ := json.Marshal(sandbox)
+		argv := []string{"claude", "-p", "--verbose", "--output-format", "stream-json", "--permission-mode", "dontAsk", "--permission-prompts", "none", "--strict-mcp-config", "--setting-sources", "user", "--settings", string(settings), "--tools", "Bash"}
+		argv = append(argv, claudeTools...)
+		argv = append(argv, "--allowedTools")
+		argv = append(argv, claudeTools...)
+		return append(argv, "--", prompt), nil
 	}
 	return nil, fmt.Errorf("peer cannot launch %s", agent)
 }

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/exp/teatest/v2"
 )
@@ -253,7 +254,7 @@ func TestRoomListKeepsSelectionVisible(t *testing.T) {
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 20})
 	m.choose(7)
 	list := ansi.Strip(m.roomList())
-	if lines := strings.Split(list, "\n"); len(lines) != m.topH || !strings.HasPrefix(lines[len(lines)-2], "❯ ○ "+m.rooms[7].v.ID) {
+	if lines := strings.Split(list, "\n"); len(lines) != m.topH || !strings.HasPrefix(lines[len(lines)-3], "│ ❯ ○ "+m.rooms[7].v.ID) {
 		t.Fatalf("selected room and its summary not both on screen:\n%s", list)
 	}
 }
@@ -344,7 +345,7 @@ func TestEndedRoomStaysSelected(t *testing.T) {
 		t.Fatalf("the ended room did not move below the active one, selected: %+v sel %d", m.room, m.sel)
 	}
 	list := ansi.Strip(m.roomList())
-	if !strings.Contains(list, "Active · 1") || !strings.Contains(list, "Today") || !strings.Contains(list, "2 msgs") {
+	if !strings.Contains(list, "Active ─") || strings.Contains(list, "writer") || strings.Contains(list, "reader") || !strings.Contains(list, "Today") || !strings.Contains(list, "2 msgs") {
 		t.Fatalf("list lacks its sections or count:\n%s", list)
 	}
 }
@@ -359,7 +360,7 @@ func TestNarrowRoomListKeepsCountAndDuration(t *testing.T) {
 	m.rooms = []entry{{s: &store{}, v: old, count: 123}, {s: &store{}, v: done, count: 8}}
 	m.sel = -1
 	list := ansi.Strip(m.roomList())
-	if !strings.Contains(list, "123 msgs · 24h 3m ·") || !strings.Contains(list, "8 msgs · 1m ·") {
+	if !strings.Contains(list, "123 msgs · 24h 3m") || !strings.Contains(list, "8 msgs · 1m") {
 		t.Fatalf("a narrow list clipped counts or durations:\n%s", list)
 	}
 }
@@ -541,7 +542,7 @@ func TestLogSwitchesMembersAndShowsBlocks(t *testing.T) {
 	m := loaded(t, s)
 	out := ansi.Strip(strings.Join(m.log.lines, "\n"))
 	stamp := time.Date(2026, 10, 1, 9, 8, 7, 0, time.UTC).Local().Format("15:04:05")
-	for _, want := range []string{stamp + "  reader", "reader says", stamp + "  $ go test ✗ failed", "  │ FAIL"} {
+	for _, want := range []string{stamp + "  ● reader", "reader says", stamp + "  ● go test ✗ failed", "  │ FAIL"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("log misses %q:\n%s", want, out)
 		}
@@ -560,11 +561,11 @@ func TestLogSwitchesMembersAndShowsBlocks(t *testing.T) {
 		t.Fatalf("a late read of the previous log was shown: %s %+v", m.room.logRole, m.room.logs)
 	}
 	m.Update(m.poll()())
-	if len(m.room.logs) != 3 || m.room.logs[0].Text != "tester plain" || !strings.Contains(ansi.Strip(m.render()), "tester log 2/2") {
+	if len(m.room.logs) != 3 || m.room.logs[0].Text != "tester plain" || !strings.Contains(strings.Join(strings.Fields(ansi.Strip(m.render())), " "), "2/2 · L next") {
 		t.Fatalf("L did not show the tester's log: %+v", m.room.logs)
 	}
 	result := time.Date(2026, 10, 1, 9, 9, 37, 0, time.UTC).Local().Format("15:04:05")
-	if out := ansi.Strip(strings.Join(m.log.lines, "\n")); !strings.Contains(out, stamp+"  $ Bash make\n\n"+result+"  ↳ output\n  │ built") {
+	if out := ansi.Strip(strings.Join(m.log.lines, "\n")); !strings.Contains(out, stamp+"  ● Bash make\n\n"+result+"  ↳ output\n  │ built") {
 		t.Fatalf("a later result lost its time:\n%s", out)
 	}
 	m.press(tea.KeyPressMsg{Code: 'L', Text: "L"})
@@ -655,33 +656,41 @@ func TestAddKeepsDescriptionWhenRoomEnds(t *testing.T) {
 }
 
 func TestScrollbar(t *testing.T) {
+	// thumbAt returns the thumb's first half cell and its size in halves.
 	thumbAt := func(bar []string) (first, n int) {
 		first = -1
 		for i, c := range bar {
-			if ansi.Strip(c) == "┃" {
-				if first < 0 {
-					first = i
+			for j, half := range map[string][]bool{"┃": {true, true}, "╹": {true, false}, "╻": {false, true}}[ansi.Strip(c)] {
+				if half {
+					if first < 0 {
+						first = 2*i + j
+					}
+					n++
 				}
-				n++
 			}
 		}
 		return first, n
 	}
 	for _, c := range []struct{ h, total, visible int }{{0, 5, 2}, {1, 0, 1}, {3, 3, 3}, {2, 1, 5}} {
-		if bar := scrollbar(c.h, c.total, c.visible, 0, " "); len(bar) != max(c.h, 0) || slices.ContainsFunc(bar, func(s string) bool { return s != " " }) {
+		if bar := scrollbar(c.h, c.total, c.visible, 0, " ", thumbOn); len(bar) != max(c.h, 0) || slices.ContainsFunc(bar, func(s string) bool { return s != " " }) {
 			t.Fatalf("%+v: %q", c, bar)
 		}
+	}
+	// Ten rows show 18 halves of travel over 90 offsets, so offset 5 is
+	// half a cell down: the thumb straddles two cells.
+	if bar := scrollbar(10, 100, 10, 5, " ", thumbOn); ansi.Strip(bar[0]) != "╻" || ansi.Strip(bar[1]) != "╹" {
+		t.Fatalf("thumb does not move by half cells: %q", bar[:3])
 	}
 	for _, h := range []int{1, 2, 10} {
 		prev := -1
 		for off := 0; off <= 90; off++ {
-			first, n := thumbAt(scrollbar(h, 100, 10, off, " "))
-			if n < 1 || first < prev || first+n > h {
+			first, n := thumbAt(scrollbar(h, 100, 10, off, " ", thumbOn))
+			if n < 1 || first < prev || first+n > 2*h {
 				t.Fatalf("h %d offset %d: thumb at %d size %d after %d", h, off, first, n, prev)
 			}
 			prev = first
 		}
-		if first, n := thumbAt(scrollbar(h, 100, 10, 90, " ")); first+n != h {
+		if first, n := thumbAt(scrollbar(h, 100, 10, 90, " ", thumbOn)); first+n != 2*h {
 			t.Fatalf("h %d: thumb does not reach the bottom at the last offset", h)
 		}
 	}
@@ -726,7 +735,7 @@ func TestNoticeOutranksLongRoomID(t *testing.T) {
 	}
 }
 
-func TestMouseOnTabsRoomsAndScrollbar(t *testing.T) {
+func TestMouseOnPanesRoomsAndScrollbar(t *testing.T) {
 	repo := testRepo(t)
 	for range 3 {
 		startRoom(t, repo, "r")
@@ -747,14 +756,14 @@ func TestMouseOnTabsRoomsAndScrollbar(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	at := func(id string) (int, int) { z := m.zones.Get(id); return z.StartX, z.StartY }
-	x, y := at("tabLog")
+	x, y := at("log")
 	m.Update(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
 	if m.focus != focusLog {
-		t.Fatalf("Log tab click left focus %d", m.focus)
+		t.Fatalf("log click left focus %d", m.focus)
 	}
 	off, z := m.chat.vp.YOffset(), m.zones.Get("chat")
 	m.Update(tea.MouseWheelMsg{X: z.EndX, Y: z.StartY + 5, Button: tea.MouseWheelUp})
-	if m.chat.vp.YOffset() >= off {
+	if off-m.chat.vp.YOffset() != 1 { // a line a step scrolls smoothly
 		t.Fatalf("wheel over the chat scrollbar left offset %d", m.chat.vp.YOffset())
 	}
 	// Choosing a room replaces the chat pane, so this goes last.
@@ -762,5 +771,195 @@ func TestMouseOnTabsRoomsAndScrollbar(t *testing.T) {
 	m.Update(tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft})
 	if m.sel != 1 || m.focus != focusRooms {
 		t.Fatalf("room click: sel %d focus %d", m.sel, m.focus)
+	}
+}
+
+func TestUserBarAndPaletteSwitch(t *testing.T) {
+	t.Cleanup(func() { applyPalette(true) })
+	repo := testRepo(t)
+	v := startRoom(t, repo, "r")
+	s, err := openStore(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.post(v.ID, everyone, "привет `peer wait` готово"); err != nil {
+		t.Fatal(err)
+	}
+	m := loaded(t, s)
+	userLines := func() string {
+		var out []string
+		for _, l := range m.chat.lines {
+			if w := ansi.StringWidth(l); w > m.chat.vp.Width() {
+				t.Fatalf("line %d wide in a %d pane: %q", w, m.chat.vp.Width(), ansi.Strip(l))
+			}
+			if strings.HasPrefix(ansi.Strip(l), "▎ ") {
+				out = append(out, l)
+			}
+		}
+		return strings.Join(out, "\n")
+	}
+	for _, md := range []bool{true, false} {
+		m.markdown = md
+		m.renderChat()
+		if got := ansi.Strip(userLines()); !strings.Contains(got, "привет") || !strings.Contains(got, "peer wait") || !strings.Contains(got, "готово") {
+			t.Fatalf("markdown %v: user body lost text: %q", md, got)
+		}
+	}
+	m.markdown = true // repaint the cached markdown, not just plain text
+	m.renderChat()
+	dark := userLines()
+	id := m.room.msgs[slices.IndexFunc(m.room.msgs, func(msg message) bool { return msg.From == human })].ID
+	darkBody := m.rendered[id]
+	m.Update(tea.BackgroundColorMsg{Color: lipgloss.Color("#ffffff")})
+	if lightBody := m.rendered[id]; lightBody == darkBody || ansi.Strip(lightBody) != ansi.Strip(darkBody) {
+		t.Fatal("the cached markdown was not rendered again in the light palette")
+	}
+	if pal != lightPalette || m.help.Styles.FullKey.GetForeground() != lipgloss.Color(lightPalette.fg) {
+		t.Fatal("light background did not switch the palette and the help")
+	}
+	if light := userLines(); light == dark || ansi.Strip(light) != ansi.Strip(dark) {
+		t.Fatal("the transcript was not repainted in the light palette")
+	}
+}
+
+func TestFramesAndKeyModal(t *testing.T) {
+	repo := testRepo(t)
+	for range 2 {
+		startRoom(t, repo, "r")
+	}
+	s, err := openStore(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := loaded(t, s)
+	m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m.focus = focusChat
+	rows := strings.Split(m.zones.Scan(m.render()), "\n")
+	corner := func(st lipgloss.Style) int {
+		return strings.Index(rows[0], strings.TrimSuffix(st.Render("┌"), "\x1b[m"))
+	}
+	// Rooms take the left of the top row, the transcript its right.
+	if r, c := corner(rule), corner(blue); r != 0 || c <= r {
+		t.Fatalf("only the focused frame should be blue: %q", rows[0])
+	}
+	base := m.zones.Scan(m.render())
+	m.showHelp = true
+	out := strings.Split(m.View().Content, "\n")
+	if len(out) != 30 || !strings.Contains(m.View().Content, "Keys") || !strings.Contains(ansi.Strip(m.View().Content), "any key closes") {
+		t.Fatalf("key list not laid over the %d-row frame", len(out))
+	}
+	// The key list sits in the middle: the frame's edges show around it.
+	if ansi.Strip(out[0]) != ansi.Strip(strings.Split(base, "\n")[0]) || strings.Contains(ansi.Strip(out[15]), "No messages") {
+		t.Fatal("the key list is not centered over the panes")
+	}
+	for deadline := time.Now().Add(2 * time.Second); m.zones.Get("room1").IsZero(); {
+		if time.Now().After(deadline) {
+			t.Fatal("zones not recorded")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	z := m.zones.Get("room1")
+	m.Update(tea.MouseClickMsg{X: z.StartX, Y: z.StartY, Button: tea.MouseLeft})
+	m.Update(tea.MouseWheelMsg{X: z.StartX, Y: z.StartY, Button: tea.MouseWheelDown})
+	if m.sel != 0 {
+		t.Fatalf("the mouse chose room %d under the key list", m.sel)
+	}
+	// However short the screen, the key list's frame shows whole.
+	for _, size := range [][2]int{{80, 12}, {60, 8}} {
+		m.Update(tea.WindowSizeMsg{Width: size[0], Height: size[1]})
+		modal := strings.Split(ansi.Strip(m.helpModal()), "\n")
+		if len(modal) > size[1] || !strings.HasPrefix(modal[len(modal)-1], "└") {
+			t.Fatalf("%v: the key list's frame is cut: %d rows", size, len(modal))
+		}
+	}
+}
+
+func TestShortcutsWorkInRussianLayout(t *testing.T) {
+	for in, want := range map[tea.KeyPressMsg]string{
+		press('о'): "j", press('Т'): "N", press('Д'): "L", press('.'): "/", press(','): "?", press('х'): "[",
+		{Code: 'т', Mod: tea.ModShift}: "N",
+		{Code: 'й', Mod: tea.ModCtrl}:  "ctrl+q", {Code: 'й', Mod: tea.ModAlt}: "alt+q",
+		{Code: 'г', Mod: tea.ModCtrl}:                 "ctrl+u",
+		{Code: 'с', Mod: tea.ModCtrl, BaseCode: 'c'}:  "ctrl+c",
+		{Code: 'ю', Mod: tea.ModShift, BaseCode: '.'}: ">",
+		{Code: 'о', Text: "о", BaseCode: 'k'}:         "k", {Code: '.', Text: ".", BaseCode: '.'}: ".", {Code: 'т', Text: "Т", BaseCode: 'n'}: "N", {Code: 'т', Text: "т", Mod: tea.ModShift, BaseCode: 'n'}: "n",
+		{Code: 'ق', Text: "ق", BaseCode: 'f'}: "f", // Arabic, from the kitty protocol
+		press('q'):                            "q", {Code: tea.KeyEnter}: "enter",
+	} {
+		if got := latin(in).String(); got != want {
+			t.Errorf("%q gave %q, want %q", in.String(), got, want)
+		}
+	}
+	repo := testRepo(t)
+	for range 3 {
+		startRoom(t, repo, "r")
+	}
+	s, err := openStore(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := loaded(t, s)
+	m.Update(press('о'))
+	if m.sel != 1 {
+		t.Fatalf("о did not move down the rooms: sel %d", m.sel)
+	}
+	m.Update(m.poll()()) // read the room it moved to
+	m.Update(press('ш'))
+	for _, r := range "привет" {
+		m.Update(press(r))
+	}
+	if !m.composing || m.compose.Value() != "привет" {
+		t.Fatalf("composer took %q, composing %v", m.compose.Value(), m.composing)
+	}
+	m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	m.Update(press('.'))
+	if !m.searching {
+		t.Fatal(". did not open the search")
+	}
+	m.Update(tea.KeyPressMsg{Code: tea.KeyEscape})
+	if _, cmd := m.Update(press('й')); cmd == nil || cmd() != tea.Quit() {
+		t.Fatal("й did not quit")
+	}
+}
+
+func TestLogGrowsAsIfRenderedWhole(t *testing.T) {
+	repo := testRepo(t)
+	v := startRoom(t, repo, "grow")
+	s, err := openStore(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(s.dir, "sessions", v.ID, "reader.log")
+	cmd := "2026-10-01T09:08:07Z\t" + `{"type":"item.completed","item":{"type":"command_execution","command":"go test","aggregated_output":"ok\n","exit_code":0,"status":"completed"}}` + "\n"
+	if err := os.WriteFile(path, []byte(cmd+"raw one\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	m := loaded(t, s)
+	// The added entries continue the last raw block, then start a new day.
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString("raw two\n2026-10-03T10:00:00Z\t" + `{"type":"item.completed","item":{"type":"agent_message","text":"next day"}}` + "\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	m.Update(m.poll()())
+	grown := slices.Clone(m.log.lines)
+	if !strings.Contains(ansi.Strip(strings.Join(grown, "\n")), "next day") {
+		t.Fatalf("the poll did not extend the log: %q", grown)
+	}
+	m.logDone = logDone{}
+	m.renderLog()
+	if !slices.Equal(grown, m.log.lines) {
+		t.Fatalf("extended log differs from a whole render:\n%q\n%q", grown, m.log.lines)
+	}
+	// The role invited again as claude names claude in every heading.
+	m.room.e.v.member("reader").Agent = "claude"
+	m.renderLog()
+	if out := ansi.Strip(strings.Join(m.log.lines, "\n")); !strings.Contains(out, "reader claude") {
+		t.Fatalf("the log kept the old agent: %s", out)
 	}
 }
