@@ -39,16 +39,16 @@ func stamped(line []byte) (time.Time, []byte) {
 	return time.Time{}, line
 }
 
-// memberLogLine turns one log line into entries. Both apps write JSON
-// events: codex exec --json and claude stream-json. Anything else, such
-// as stderr, older plain codex logs or an event it does not know, is
-// shown as it is.
+// memberLogLine turns one log line into entries. The apps write JSON
+// events: codex exec --json, claude stream-json and pi --mode json.
+// Anything else, such as stderr, older plain codex logs or an event it
+// does not know, is shown as it is.
 func memberLogLine(line []byte) []logEntry {
 	var ev struct {
 		Type    string          `json:"type"`
-		Message json.RawMessage `json:"message"` // claude's message, or codex's error text
+		Message json.RawMessage `json:"message"` // claude's or pi's message, or codex's error text
 		Subtype string          `json:"subtype"`
-		Result  string          `json:"result"`
+		Result  json.RawMessage `json:"result"` // claude's text, or a pi tool's result
 		Errors  []string        `json:"errors"`
 		IsError bool            `json:"is_error"`
 		Error   struct {
@@ -151,15 +151,75 @@ func memberLogLine(line []byte) []logEntry {
 		return out
 	case "result": // claude; its text repeats the last message
 		if ev.IsError {
-			why := cmp.Or(ev.Result, strings.Join(ev.Errors, "; "), ev.Subtype)
+			var result string
+			_ = json.Unmarshal(ev.Result, &result)
+			why := cmp.Or(result, strings.Join(ev.Errors, "; "), ev.Subtype)
 			return []logEntry{{Kind: logRaw, Text: "result: " + why, Failed: true}}
 		}
 		return nil
+	case "message_end": // pi; the message's other events repeat it
+		return piMessage(ev.Message)
 	case "system", // claude
-		"thread.started", "turn.started", "turn.completed", "item.started", "item.updated": // codex
+		"thread.started", "turn.started", "turn.completed", "item.started", "item.updated", // codex
+		"session", "agent_start", "agent_end", "agent_settled", "turn_start", "turn_end", "message_start", "message_update", // pi
+		"tool_execution_start", "tool_execution_update", "tool_execution_end", "queue_update":
 		return nil
 	}
 	return []logEntry{{Kind: logRaw, Text: raw}}
+}
+
+// piMessage turns a finished pi message into entries: the assistant's
+// words, tool calls and error, and what each tool returned.
+func piMessage(raw json.RawMessage) []logEntry {
+	var msg struct {
+		Role    string `json:"role"`
+		Content []struct {
+			Type      string          `json:"type"`
+			Text      string          `json:"text"`
+			Name      string          `json:"name"`
+			Arguments json.RawMessage `json:"arguments"`
+		} `json:"content"`
+		IsError      bool   `json:"isError"`
+		StopReason   string `json:"stopReason"`
+		ErrorMessage string `json:"errorMessage"`
+	}
+	if json.Unmarshal(raw, &msg) != nil {
+		return nil
+	}
+	var out []logEntry
+	switch msg.Role {
+	case "assistant":
+		for _, c := range msg.Content {
+			switch c.Type {
+			case "text":
+				out = append(out, logEntry{Kind: logText, Text: c.Text})
+			case "toolCall":
+				var in struct {
+					Command string `json:"command"`
+				}
+				arg := string(c.Arguments)
+				if json.Unmarshal(c.Arguments, &in) == nil && in.Command != "" {
+					arg = in.Command
+				}
+				out = append(out, logEntry{Kind: logTool, Text: c.Name + " " + ansi.Truncate(arg, 200, "…")})
+			}
+		}
+		// Pi exits with status 0 after a model error in json mode.
+		if msg.StopReason == "error" || msg.StopReason == "aborted" {
+			out = append(out, logEntry{Kind: logRaw, Text: cmp.Or(msg.ErrorMessage, msg.StopReason), Failed: true})
+		}
+	case "toolResult":
+		var parts []string
+		for _, c := range msg.Content {
+			if c.Type == "text" {
+				parts = append(parts, c.Text)
+			}
+		}
+		if text := strings.TrimRight(strings.Join(parts, "\n"), "\n"); text != "" || msg.IsError {
+			out = append(out, logEntry{Kind: logOutput, Text: text, Failed: msg.IsError})
+		}
+	}
+	return out
 }
 
 // toolResult is the text of a claude tool result, which is a string or

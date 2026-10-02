@@ -4,7 +4,7 @@
 
 ## Install
 
-You need macOS or Linux (amd64 or arm64), Git, and at least two agents that can run shell commands, for example Claude Code and Codex. For a background member, install its CLI (`claude` or `codex`) and put it on your `PATH`.
+You need macOS or Linux (amd64 or arm64), Git, and at least two agents that can run shell commands, for example Claude Code and Codex. For a background member, install its CLI (`claude`, `codex` or [`pi`](https://github.com/earendil-works/pi)) and put it on your `PATH`.
 
 1. Install the CLI.
 
@@ -53,14 +53,14 @@ To add experts, name them in the task, for example `/peer add CSV export; also i
 
 To add any agent yourself, for example Copilot, paste the writer's join prompt into that agent's chat in the same checkout. Change the role in it and add your own instructions after it. The agent can join at any time while the room is active, and it first reads the earlier messages.
 
-To see a member's chat in its desktop app on macOS, ask the writer to add `--headed` to `peer invite`. The app must already be open. `peer` opens a new chat with the prompt filled in, but you must press Enter. If the app is not open, the member runs in the background.
+To see a member's chat in its desktop app on macOS, ask the writer to add `--headed` to `peer invite`. The app must already be open. `peer` opens a new chat with the prompt filled in, but you must press Enter. If the app is not open, or the agent is `pi`, which has no desktop app, the member runs in the background.
 
 To watch the conversation, run `peer` in a terminal.
 
 ## How it works
 
 1. **Start.** The writer runs `peer start ROOM`. This creates a room for the task.
-2. **Add members.** The writer runs `peer invite ROOM ROLE --as writer --agent codex` to start `codex` or `claude` in the background in the same checkout. Any other agent runs `peer join ROOM ROLE`. The writer gets a notice from `peer` for each member that joins.
+2. **Add members.** The writer runs `peer invite ROOM ROLE --as writer --agent codex` to start `codex`, `claude` or `pi` in the background in the same checkout. Any other agent runs `peer join ROOM ROLE`. The writer gets a notice from `peer` for each member that joins.
 3. **Discuss.** The agents send messages with `peer send` and receive them with `peer wait`. A message goes to all participants, or to one with `--to ROLE`. `wait` returns one message, or a timeout after 90 seconds. The agent then calls `wait` again. The agents write in the language that you use with the writer.
 4. **Implement.** Only the writer edits files.
 5. **Review.** The members inspect the diff and report findings. The writer fixes them and asks for another review.
@@ -77,16 +77,17 @@ A room does not end when a background member stops. The writer gets a notice fro
 
 ### Member permissions
 
-A background member gets an instruction not to edit files. It can run any shell command, such as tests or scripts, in its agent's sandbox. By default, the sandbox lets commands write only the checkout, temp directories and the checkout's `peer` store. Commands can use the network, including `localhost`, so a member can send what it reads anywhere. The agent's user settings can widen these limits. Neither agent asks for approval.
+A background member gets an instruction not to edit files. It can run any shell command, such as tests or scripts. Codex and Claude Code run commands in their sandbox. By default, the sandbox lets commands write only the checkout, temp directories and the checkout's `peer` store. Commands can use the network, including `localhost`, so a member can send what it reads anywhere. The agent's user settings can widen these limits. Neither agent asks for approval.
 
 - **Codex** runs in its `workspace-write` sandbox.
 - **Claude Code** runs Bash in its sandbox and stops if the sandbox is not available. It gets all tools but Edit, Write and NotebookEdit, including WebFetch, WebSearch, subagents, tasks and LSP. It loads no MCP servers and ignores the checkout's `.claude` settings.
+- **Pi** runs without a sandbox, because pi has none. It gets the `read`, `grep`, `find`, `ls` and `bash` tools, but not `edit` and `write`. It loads your global extensions and skills, uses your default model and ignores the checkout's `.pi` settings. Its shell commands and extensions keep the permissions of your account and can change any file that you can access.
 
 Shell commands can still change files in the checkout, so the "do not edit" rule is only an instruction. If you need a guarantee, use the agent's read-only or Plan mode.
 
 ## Watch rooms
 
-Run `peer` with no arguments. The left pane lists all rooms from all checkouts, active rooms first. The right pane shows the transcript of the selected room. The bottom pane shows the log of a background member, with the time of each message and command. The focused pane has a blue frame; click a pane to focus it. The right edge of each frame is its scrollbar. The footer lists the keys for the focused pane and the state of the room, and `?` opens all keys in a window over the panes. Shortcuts work with any keyboard layout in terminals that support the kitty keyboard protocol, and with the Russian layout in any terminal. Press `L` to switch to the next background member. `peer` works outside a checkout too. Press `i` to send a message as `user` to everyone in the room or to one participant. Each agent reads it on its next `peer wait`. The name `user` is reserved for these messages. Press `a` to ask the writer to add a member: pick `claude` or `codex` and describe the role in a few words, such as `security reviewer`. The writer picks the role name, expands the description into a brief and runs `peer invite` on its next `peer wait`. On macOS, it sends a notification when the room that you watch ends.
+Run `peer` with no arguments. The left pane lists all rooms from all checkouts, active rooms first. The right pane shows the transcript of the selected room. The bottom pane shows the log of a background member, with the time of each message and command. The focused pane has a blue frame; click a pane to focus it. The right edge of each frame is its scrollbar. The footer lists the keys for the focused pane and the state of the room, and `?` opens all keys in a window over the panes. Shortcuts work with any keyboard layout in terminals that support the kitty keyboard protocol, and with the Russian layout in any terminal. Press `L` to switch to the next background member. `peer` works outside a checkout too. Press `i` to send a message as `user` to everyone in the room or to one participant. Each agent reads it on its next `peer wait`. The name `user` is reserved for these messages. Press `a` to ask the writer to add a member: pick `claude`, `codex` or `pi` and describe the role in a few words, such as `security reviewer`. The writer picks the role name, expands the description into a brief and runs `peer invite` on its next `peer wait`. On macOS, it sends a notification when the room that you watch ends.
 
 | Key | Action |
 | --- | --- |
@@ -107,7 +108,7 @@ Run these commands inside the shared Git checkout.
 | Command | Action |
 | --- | --- |
 | `peer start ROOM [--agent NAME]` | Start a room with you as the writer and print it as JSON |
-| `peer invite ROOM ROLE --as writer --agent codex\|claude [--brief TEXT] [--headed]` | Add a member and start its agent |
+| `peer invite ROOM ROLE --as writer --agent codex\|claude\|pi [--brief TEXT] [--headed]` | Add a member and start its agent |
 | `peer join ROOM ROLE [--agent NAME]` | Join a room as a member |
 | `peer send ROOM --as ROLE [--to ROLE]` | Send a message from stdin to all participants or to one |
 | `peer wait ROOM --as ROLE` | Wait up to 90 seconds for one message |

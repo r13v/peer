@@ -31,6 +31,9 @@ func memberPrompt(v session, role, brief string, headless bool) string {
 	return prompt
 }
 
+// inviteAgents are the agents peer invite launches.
+var inviteAgents = []string{"claude", "codex", "pi"}
+
 // appBundles maps each agent with a desktop app to its macOS bundle ID.
 var appBundles = map[string]string{"codex": "com.openai.codex", "claude": "com.anthropic.claudefordesktop"}
 
@@ -50,11 +53,16 @@ var appRunning = func(agent string) bool {
 // Its subagents get no more.
 var claudeTools = []string{"Read", "Grep", "Glob", "Skill", "WebFetch", "WebSearch", "Task", "TaskCreate", "TaskGet", "TaskList", "TaskUpdate", "TaskStop", "LSP", "ToolSearch"}
 
-// memberArgs runs the agent's CLI without a chat window. Both agents run
-// any shell command, with the network, in a sandbox that by default writes
-// only the checkout, temp directories and the peer store. Claude's sandbox
-// covers only Bash, so it also gets no edit tools and no MCP servers, and
-// it skips the checkout's settings, which could widen the sandbox.
+// piTools are a pi member's tools: its built-in tools but edit and write.
+var piTools = "read,grep,find,ls,bash"
+
+// memberArgs runs the agent's CLI without a chat window. Codex and Claude
+// run any shell command, with the network, in a sandbox that by default
+// writes only the checkout, temp directories and the peer store. Claude's
+// sandbox covers only Bash, so it also gets no edit tools and no MCP
+// servers, and it skips the checkout's settings, which could widen the
+// sandbox. Pi has no sandbox: it gets no edit tools and skips the
+// checkout's settings, but its shell keeps the user's permissions.
 func memberArgs(s *store, agent, prompt string) ([]string, error) {
 	switch agent {
 	case "codex":
@@ -74,6 +82,8 @@ func memberArgs(s *store, agent, prompt string) ([]string, error) {
 		argv = append(argv, "--allowedTools")
 		argv = append(argv, claudeTools...)
 		return append(argv, "--", prompt), nil
+	case "pi":
+		return []string{"pi", "-p", "--mode", "json", "--no-session", "--no-approve", "--tools", piTools, "--", prompt}, nil
 	}
 	return nil, fmt.Errorf("peer cannot launch %s", agent)
 }
@@ -172,7 +182,7 @@ func (s *store) invite(id, as string, m member, brief string, headed bool, out i
 			return err
 		})
 	}
-	if headed && appRunning(m.Agent) {
+	if headed && appBundles[m.Agent] != "" && appRunning(m.Agent) {
 		link, err := memberLink(s.repo, m.Agent, memberPrompt(v, m.Role, brief, false))
 		if err == nil {
 			err = openURL(link)
@@ -185,7 +195,9 @@ func (s *store) invite(id, as string, m member, brief string, headed bool, out i
 	}
 	if headed {
 		why := m.Agent + " is not open"
-		if runtime.GOOS != "darwin" {
+		if appBundles[m.Agent] == "" {
+			why = m.Agent + " has no desktop app"
+		} else if runtime.GOOS != "darwin" {
 			why = "desktop chats open only on macOS"
 		}
 		fmt.Fprintf(os.Stderr, "peer: %s, so %s runs headless\n", why, m.Role)
