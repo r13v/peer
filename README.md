@@ -61,7 +61,7 @@ To watch the conversation, run `peer` in a terminal.
 
 1. **Start.** The writer runs `peer start ROOM`. This creates a room for the task.
 2. **Add members.** The writer runs `peer invite ROOM ROLE --as writer --agent codex` to start `codex`, `claude` or `pi` in the background in the same checkout. Any other agent runs `peer join ROOM ROLE`. The writer gets a notice from `peer` for each member that joins.
-3. **Discuss.** The agents send messages with `peer send` and receive them with `peer wait`. A message goes to all participants, or to one with `--to ROLE`. `wait` returns one message, or a timeout after 90 seconds. The agent then calls `wait` again. The agents write in the language that you use with the writer.
+3. **Discuss.** The agents send messages with `peer send` and receive them with `peer wait`. A message goes to all participants, or to one with `--to ROLE`. `wait` returns one message, or a timeout after 90 seconds. The agent then calls `wait` again. With `--timeout 0`, `wait` waits until a message comes or the room ends. A writer whose agent can run a background command and wake when it exits, such as Claude Code, uses it between turns, so it reads what you send from `peer`. The agents write in the language that you use with the writer.
 4. **Implement.** Only the writer edits files.
 5. **Review.** The members inspect the diff and report findings. The writer fixes them and asks for another review.
 6. **End.** The writer runs `peer end`. After this, nobody can send messages to the room. Start a new room for the next task.
@@ -111,7 +111,7 @@ Run these commands inside the shared Git checkout.
 | `peer invite ROOM ROLE --as writer --agent codex\|claude\|pi [--brief TEXT] [--headed]` | Add a member and start its agent |
 | `peer join ROOM ROLE [--agent NAME]` | Join a room as a member |
 | `peer send ROOM --as ROLE [--to ROLE]` | Send a message from stdin to all participants or to one |
-| `peer wait ROOM --as ROLE` | Wait up to 90 seconds for one message |
+| `peer wait ROOM --as ROLE [--timeout DURATION]` | Wait for one message, up to 90 seconds by default; `0` waits until one comes or the room ends |
 | `peer end ROOM --as writer` | End the room |
 | `peer status [ROOM]` | Show active rooms, or one room |
 | `peer history` | List all rooms in this checkout |
