@@ -51,14 +51,14 @@ var appRunning = func(agent string) bool {
 var claudeTools = []string{"Read", "Grep", "Glob", "Skill", "WebFetch", "WebSearch", "Task", "TaskCreate", "TaskGet", "TaskList", "TaskUpdate", "TaskStop", "LSP", "ToolSearch"}
 
 // memberArgs runs the agent's CLI without a chat window. Both agents run
-// any shell command in a sandbox that by default writes only the checkout,
-// temp directories and the peer store, with no network. Claude's sandbox
+// any shell command, with the network, in a sandbox that by default writes
+// only the checkout, temp directories and the peer store. Claude's sandbox
 // covers only Bash, so it also gets no edit tools and no MCP servers, and
 // it skips the checkout's settings, which could widen the sandbox.
 func memberArgs(s *store, agent, prompt string) ([]string, error) {
 	switch agent {
 	case "codex":
-		return []string{"codex", "exec", "--json", "-C", s.repo, "-s", "workspace-write", "--add-dir", s.dir, "-c", "approval_policy=never", prompt}, nil
+		return []string{"codex", "exec", "--json", "-C", s.repo, "-s", "workspace-write", "-c", "sandbox_workspace_write.network_access=true", "--add-dir", s.dir, "-c", "approval_policy=never", prompt}, nil
 	case "claude":
 		sandbox := map[string]any{"sandbox": map[string]any{
 			"enabled":                  true,
@@ -66,6 +66,7 @@ func memberArgs(s *store, agent, prompt string) ([]string, error) {
 			"allowUnsandboxedCommands": false,
 			"autoAllowBashIfSandboxed": true,
 			"filesystem":               map[string]any{"allowWrite": []string{s.dir}},
+			"network":                  map[string]any{"allowedDomains": []string{"*"}, "allowLocalBinding": true},
 		}}
 		settings, _ := json.Marshal(sandbox)
 		argv := []string{"claude", "-p", "--verbose", "--output-format", "stream-json", "--permission-mode", "dontAsk", "--permission-prompts", "none", "--strict-mcp-config", "--setting-sources", "user", "--settings", string(settings), "--tools", "Bash"}
