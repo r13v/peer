@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 
@@ -140,11 +141,11 @@ func run(args []string, in io.Reader, out io.Writer, cwd string) error {
 		}
 		return s.join(id, member{Role: role, Agent: *agent}, out)
 	case "invite":
-		if err := needRole("invite ID ROLE --as writer --agent codex|claude [--brief TEXT] [--headed]"); err != nil {
+		if err := needRole("invite ID ROLE --as writer --agent codex|claude|pi [--brief TEXT] [--headed]"); err != nil {
 			return err
 		}
-		if appBundles[*agent] == "" {
-			return errors.New("invite launches codex or claude; to add another agent, give it a join prompt")
+		if !slices.Contains(inviteAgents, *agent) {
+			return errors.New("invite launches codex, claude or pi; to add another agent, give it a join prompt")
 		}
 		return s.invite(id, *actor, member{Role: role, Agent: *agent}, *brief, *headed, out)
 	case "status":

@@ -200,7 +200,15 @@ func TestMemberLogLine(t *testing.T) {
 		`{"type":"turn.completed","usage":{}}`:                                                                                                                         nil,
 		`{"type":"thread.started","thread_id":"t"}`:                                                                                                                    nil,
 		`{"type":"item.completed","item":{"type":"new_kind"}}`:                                                                                                         {{Kind: logRaw, Text: `{"type":"item.completed","item":{"type":"new_kind"}}`}},
-		`{"type":"new_event","x":1}`:                                                                                                                                   {{Kind: logRaw, Text: `{"type":"new_event","x":1}`}},
+		`{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"Hi"}}`:                                                                         nil,
+		`{"type":"tool_execution_end","toolName":"bash","result":{"content":[{"type":"text","text":"hi"}]},"isError":false}`:                                           nil,
+		`{"type":"message_end","message":{"role":"user","content":[{"type":"text","text":"prompt"}]}}`:                                                                 nil,
+		`{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Reviewing"},{"type":"toolCall","name":"bash","arguments":{"command":"peer wait"}}],"stopReason":"toolUse"}}`: {{Kind: logText, Text: "Reviewing"}, {Kind: logTool, Text: "bash peer wait"}},
+		`{"type":"message_end","message":{"role":"assistant","content":[{"type":"toolCall","name":"read","arguments":{"path":"main.go"}}]}}`:                                                                {{Kind: logTool, Text: `read {"path":"main.go"}`}},
+		`{"type":"message_end","message":{"role":"toolResult","toolName":"bash","content":[{"type":"text","text":"hi\n\nCommand exited with code 1"}],"isError":true}}`:                                     {{Kind: logOutput, Text: "hi\n\nCommand exited with code 1", Failed: true}},
+		`{"type":"message_end","message":{"role":"assistant","content":[],"stopReason":"error","errorMessage":"429 rate limited"}}`:                                                                         {{Kind: logRaw, Text: "429 rate limited", Failed: true}},
+		`{"type":"result","is_error":true,"result":"boom"}`: {{Kind: logRaw, Text: "result: boom", Failed: true}},
+		`{"type":"new_event","x":1}`:                        {{Kind: logRaw, Text: `{"type":"new_event","x":1}`}},
 	} {
 		if got := memberLogLine([]byte(line)); !slices.Equal(got, want) {
 			t.Fatalf("memberLogLine(%q) = %+v, want %+v", line, got, want)
@@ -542,6 +550,7 @@ func TestInvite(t *testing.T) {
 		{"codex", "", "", "", false, true},
 		{"codex", "", "", "", true, false},
 		{"claude", "", "", "", false, false},
+		{"pi", "", "", "", true, true},
 	} {
 		links, launched, logs, running = nil, nil, nil, tc.running
 		repo := filepath.Join(t.TempDir(), "my repo & co")
@@ -898,6 +907,19 @@ func TestCodexMemberHasNetwork(t *testing.T) {
 	}
 	if !slices.Contains(argv, "sandbox_workspace_write.network_access=true") {
 		t.Fatalf("codex runs without the network: %q", argv)
+	}
+}
+
+func TestPiMemberHasNoEditTools(t *testing.T) {
+	argv, err := memberArgs(&store{dir: "/store/room"}, "pi", "p")
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(argv, " ")
+	for _, want := range []string{"-p --mode json", "--no-session", "--no-approve", "--tools read,grep,find,ls,bash", "-- p"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("argv lacks %s: %s", want, joined)
+		}
 	}
 }
 

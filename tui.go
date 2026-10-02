@@ -449,9 +449,6 @@ const (
 	addDescribe
 )
 
-// inviteAgents are the agents peer invite launches.
-var inviteAgents = []string{"claude", "codex"}
-
 func newModel(local *store) *model {
 	in := textinput.New()
 	in.Prompt = "/"
@@ -1100,8 +1097,10 @@ func (m *model) pressAdd(msg tea.KeyPressMsg) tea.Cmd {
 	case k == "esc":
 		m.adding = addOff
 		m.addInput.Blur()
-	case m.adding == addPick && (k == "tab" || k == "left" || k == "right"):
+	case m.adding == addPick && (k == "tab" || k == "right"):
 		m.addAgent = (m.addAgent + 1) % len(inviteAgents)
+	case m.adding == addPick && k == "left":
+		m.addAgent = (m.addAgent + len(inviteAgents) - 1) % len(inviteAgents)
 	case k == "enter":
 		if m.adding == addPick {
 			m.adding = addDescribe
