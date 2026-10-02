@@ -866,13 +866,18 @@ func TestClaudeMemberIsSandboxedWithoutEditTools(t *testing.T) {
 			Enabled, FailIfUnavailable, AutoAllowBashIfSandboxed bool
 			AllowUnsandboxedCommands                             *bool
 			Filesystem                                           struct{ AllowWrite []string }
+			Network                                              struct {
+				AllowedDomains    []string
+				AllowLocalBinding bool
+			}
 		}
 	}
 	if err := json.Unmarshal([]byte(argv[i+1]), &settings); err != nil {
 		t.Fatal(err)
 	}
 	sb := settings.Sandbox
-	if !sb.Enabled || !sb.FailIfUnavailable || sb.AllowUnsandboxedCommands == nil || *sb.AllowUnsandboxedCommands || !sb.AutoAllowBashIfSandboxed || !slices.Equal(sb.Filesystem.AllowWrite, []string{"/store/room"}) {
+	if !sb.Enabled || !sb.FailIfUnavailable || sb.AllowUnsandboxedCommands == nil || *sb.AllowUnsandboxedCommands || !sb.AutoAllowBashIfSandboxed || !slices.Equal(sb.Filesystem.AllowWrite, []string{"/store/room"}) ||
+		!slices.Equal(sb.Network.AllowedDomains, []string{"*"}) || !sb.Network.AllowLocalBinding {
 		t.Errorf("sandbox settings = %+v", sb)
 	}
 	allowed := argv[slices.Index(argv, "--allowedTools")+1 : slices.Index(argv, "--")]
@@ -883,6 +888,16 @@ func TestClaudeMemberIsSandboxedWithoutEditTools(t *testing.T) {
 	}
 	if slices.Contains(allowed, "Bash") {
 		t.Error("Bash is allowed outright, not only in the sandbox")
+	}
+}
+
+func TestCodexMemberHasNetwork(t *testing.T) {
+	argv, err := memberArgs(&store{dir: "/store/room"}, "codex", "p")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(argv, "sandbox_workspace_write.network_access=true") {
+		t.Fatalf("codex runs without the network: %q", argv)
 	}
 }
 

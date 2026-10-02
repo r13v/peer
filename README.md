@@ -77,7 +77,7 @@ A room does not end when a background member stops. The writer gets a notice fro
 
 ### Member permissions
 
-A background member gets an instruction not to edit files. It can run any shell command, such as tests or scripts, in its agent's sandbox. By default, the sandbox lets commands write only the checkout, temp directories and the checkout's `peer` store, and it blocks the network. The agent's user settings can widen these limits. Neither agent asks for approval.
+A background member gets an instruction not to edit files. It can run any shell command, such as tests or scripts, in its agent's sandbox. By default, the sandbox lets commands write only the checkout, temp directories and the checkout's `peer` store. Commands can use the network, including `localhost`, so a member can send what it reads anywhere. The agent's user settings can widen these limits. Neither agent asks for approval.
 
 - **Codex** runs in its `workspace-write` sandbox.
 - **Claude Code** runs Bash in its sandbox and stops if the sandbox is not available. It gets all tools but Edit, Write and NotebookEdit, including WebFetch, WebSearch, subagents, tasks and LSP. It loads no MCP servers and ignores the checkout's `.claude` settings.
