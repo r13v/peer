@@ -846,6 +846,46 @@ func TestPostFromUser(t *testing.T) {
 	}
 }
 
+func TestClaudeMemberIsSandboxedWithoutEditTools(t *testing.T) {
+	argv, err := memberArgs(&store{dir: "/store/room"}, "claude", "p")
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(argv, " ")
+	for _, want := range []string{"--strict-mcp-config", "--setting-sources user"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("argv lacks %s: %s", want, joined)
+		}
+	}
+	i := slices.Index(argv, "--settings")
+	if i < 0 {
+		t.Fatalf("argv lacks --settings: %s", joined)
+	}
+	var settings struct {
+		Sandbox struct {
+			Enabled, FailIfUnavailable, AutoAllowBashIfSandboxed bool
+			AllowUnsandboxedCommands                             *bool
+			Filesystem                                           struct{ AllowWrite []string }
+		}
+	}
+	if err := json.Unmarshal([]byte(argv[i+1]), &settings); err != nil {
+		t.Fatal(err)
+	}
+	sb := settings.Sandbox
+	if !sb.Enabled || !sb.FailIfUnavailable || sb.AllowUnsandboxedCommands == nil || *sb.AllowUnsandboxedCommands || !sb.AutoAllowBashIfSandboxed || !slices.Equal(sb.Filesystem.AllowWrite, []string{"/store/room"}) {
+		t.Errorf("sandbox settings = %+v", sb)
+	}
+	allowed := argv[slices.Index(argv, "--allowedTools")+1 : slices.Index(argv, "--")]
+	for _, tool := range argv {
+		if tool == "Edit" || tool == "Write" || tool == "NotebookEdit" {
+			t.Errorf("argv grants %s", tool)
+		}
+	}
+	if slices.Contains(allowed, "Bash") {
+		t.Error("Bash is allowed outright, not only in the sandbox")
+	}
+}
+
 func TestUnknownAgentHasNoLaunch(t *testing.T) {
 	if _, err := memberArgs(&store{}, "copilot", "p"); err == nil {
 		t.Fatal("memberArgs accepted copilot")
