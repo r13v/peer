@@ -55,7 +55,28 @@ To add any agent yourself, for example Copilot, paste the writer's join prompt i
 
 To pick a member's model, name it in the task, for example `invite a reader on codex with gpt-5`. The writer passes it to the agent's CLI with `--model`.
 
-To split the work, ask for workers, for example `/peer split the reports refactor between two codex workers`. See [Workers](#workers).
+To split the work, ask for workers. Name the agents and, if you want, their models. The writer leads, gives each worker its part and integrates the result:
+```text
+/peer split the reports refactor between two codex workers
+```
+
+```text
+/peer add CSV and XLSX export to the reports page. Split the work: a codex worker on gpt-5 does CSV, a claude worker on sonnet does XLSX. You lead and integrate; codex reviews as the reader.
+```
+
+Workers edit the shared checkout by default. Ask for worktrees to isolate them:
+
+```text
+/peer move the billing and notifications modules to the new logger. Use two codex workers, each in its own worktree. You merge the result and commit.
+```
+
+Or leave the details to the writer:
+
+```text
+/peer split the api/ refactor between three workers: codex, claude and pi.
+```
+
+See [Workers](#workers).
 
 To watch the conversation, run `peer` in a terminal.
 
