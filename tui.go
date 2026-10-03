@@ -212,7 +212,7 @@ const (
 
 type keyMap struct {
 	Up, Down, Tab, Open, Log, LogNext, Rooms, Markdown, Theme, NextMsg, PrevMsg, Top, Bottom,
-	Page, Sideways, Search, Next, Prev, Close, Compose, Add, Esc, Help, Quit key.Binding
+	Page, Sideways, Search, Next, Prev, Close, Compose, Add, Kick, Esc, Help, Quit key.Binding
 }
 
 func newKeyMap() keyMap {
@@ -241,6 +241,7 @@ func newKeyMap() keyMap {
 		Close:    b([]string{"x"}, "x x", "close room"),
 		Compose:  b([]string{"i"}, "i", "message the room (Tab: recipient)"),
 		Add:      b([]string{"a"}, "a", "ask the writer to add a member"),
+		Kick:     b([]string{"d"}, "d", "kick a member"),
 		Esc:      b([]string{"esc"}, "Esc", "clear search / back"),
 		Help:     b([]string{"?"}, "?", "help"),
 		Quit:     b([]string{"q", "ctrl+c"}, "q", "quit"),
@@ -251,7 +252,7 @@ func (k keyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
 		{k.Up, k.Down, k.Page, k.Sideways, k.Top, k.Bottom, k.NextMsg, k.PrevMsg},
 		{k.Tab, k.Open, k.Log, k.LogNext, k.Rooms, k.Markdown, k.Theme},
-		{k.Search, k.Next, k.Prev, k.Esc, k.Close, k.Compose, k.Add, k.Help, k.Quit},
+		{k.Search, k.Next, k.Prev, k.Esc, k.Close, k.Compose, k.Add, k.Kick, k.Help, k.Quit},
 	}
 }
 
@@ -439,7 +440,22 @@ type model struct {
 	addRoom  entry
 	addInput textinput.Model
 	added    string // the last request sent, shown until the next key
+	// The kick form removes a member of the room it was opened in: first
+	// the role, then a confirmation naming it. The role is kept by name,
+	// so a poll that changes the room cannot shift the choice.
+	kicking  kickStep
+	kickRoom entry
+	kickRole string
+	kickErr  error // the last kick's failure, shown until the next key
 }
+
+type kickStep int
+
+const (
+	kickOff kickStep = iota
+	kickPick
+	kickConfirm
+)
 
 type addStep int
 
@@ -482,6 +498,12 @@ type pollMsg struct {
 type closedMsg struct{ err error }
 
 type sentMsg struct{ err error }
+
+// kickedMsg reports a kick from the TUI and what became of the process.
+type kickedMsg struct {
+	note string
+	err  error
+}
 
 // askedMsg reports whether the request to add agent reached the writer.
 type askedMsg struct {
@@ -623,6 +645,10 @@ func roomStatus(v session, dir string) string {
 	var parts []string
 	for _, m := range v.Members {
 		name := m.Role
+		if m.Kicked {
+			parts = append(parts, name+" kicked")
+			continue
+		}
 		if m.Exited {
 			parts = append(parts, name+" exited")
 			continue
@@ -678,6 +704,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.addInput.SetValue("")
 			m.added = "asked the writer to add " + msg.agent
 		}
+	case kickedMsg:
+		m.sending = false
+		m.added, m.kickErr = msg.note, msg.err
 	case tea.MouseWheelMsg:
 		if !m.showHelp { // the panes under the key list stay put
 			m.wheel(msg)
@@ -1022,7 +1051,13 @@ func (m *model) active() *pane {
 // targets lists who the composer can address: everyone, then each
 // participant of the room it was opened in.
 func (m *model) targets() []string {
-	return append([]string{everyone}, m.composeRoom.v.members()...)
+	roles := []string{everyone}
+	for _, p := range m.composeRoom.v.Members {
+		if !p.Kicked {
+			roles = append(roles, p.Role)
+		}
+	}
+	return roles
 }
 
 func (m *model) composePrompt() string {
@@ -1123,15 +1158,73 @@ func (m *model) pressAdd(msg tea.KeyPressMsg) tea.Cmd {
 	return nil
 }
 
+// kickable lists the members of v that can be kicked: those other than
+// the writer still in the room.
+func kickable(v session) []string {
+	var roles []string
+	for _, p := range v.Members[1:] {
+		if !p.Kicked && !p.Exited {
+			roles = append(roles, p.Role)
+		}
+	}
+	return roles
+}
+
+// startKick opens the kick form on the selected room.
+func (m *model) startKick() tea.Cmd {
+	if m.sending {
+		return nil
+	}
+	if !m.room.loaded || m.room.e.v.EndedAt != "" {
+		m.sendErr = errors.New("select an active room to kick a member")
+		return nil
+	}
+	roles := kickable(m.room.e.v)
+	if len(roles) == 0 {
+		m.sendErr = errors.New("no member to kick")
+		return nil
+	}
+	m.kicking, m.kickRoom, m.kickRole, m.sendErr = kickPick, m.room.e, roles[0], nil
+	return nil
+}
+
+func (m *model) pressKick(msg tea.KeyPressMsg) tea.Cmd {
+	roles := kickable(m.kickRoom.v)
+	i, n := slices.Index(roles, m.kickRole), len(roles)
+	switch k := msg.String(); {
+	case k == "esc":
+		m.kicking = kickOff
+	case m.kicking == kickPick && (k == "tab" || k == "right"):
+		m.kickRole = roles[(i+1)%n]
+	case m.kicking == kickPick && k == "left":
+		m.kickRole = roles[(i+n-1)%n]
+	case m.kicking == kickPick && k == "enter":
+		m.kicking = kickConfirm
+	case m.kicking == kickConfirm && (k == "y" || k == "enter"):
+		m.kicking, m.sending = kickOff, true
+		e, role := m.kickRoom, m.kickRole
+		return func() tea.Msg {
+			note, err := e.s.kick(e.v.ID, role, human)
+			return kickedMsg{note, err}
+		}
+	case m.kicking == kickConfirm: // any other key cancels
+		m.kicking = kickOff
+	}
+	return nil
+}
+
 func (m *model) press(msg tea.KeyPressMsg) tea.Cmd {
 	armed, nav := m.closeArmed(), latin(msg)
 	m.closeAt = time.Time{}
-	m.added = ""
+	m.added, m.kickErr = "", nil
 	if m.composing && nav.String() != "ctrl+c" {
 		return m.pressCompose(msg)
 	}
 	if m.adding != addOff && nav.String() != "ctrl+c" {
 		return m.pressAdd(msg)
+	}
+	if m.kicking != kickOff && nav.String() != "ctrl+c" {
+		return m.pressKick(nav)
 	}
 	if m.searching && nav.String() != "ctrl+c" {
 		switch msg.String() {
@@ -1209,6 +1302,8 @@ func (m *model) press(msg tea.KeyPressMsg) tea.Cmd {
 		return m.startCompose()
 	case key.Matches(msg, k.Add):
 		return m.startAdd()
+	case key.Matches(msg, k.Kick):
+		return m.startKick()
 	case key.Matches(msg, k.Next):
 		m.active().jump(1)
 	case key.Matches(msg, k.Prev):
@@ -1674,6 +1769,23 @@ func (m *model) statusLine() string {
 		m.addInput.SetWidth(m.width - 2 - ansi.StringWidth(m.addInput.Prompt))
 		return m.addInput.View()
 	}
+	switch m.kicking {
+	case kickPick:
+		line := " " + blue.Bold(true).Render("kick ›")
+		for _, r := range kickable(m.kickRoom.v) {
+			if r == m.kickRole {
+				r = pick.Render("[" + r + "]")
+			}
+			line += " " + r
+		}
+		return ansi.Truncate(line+"   "+hints("tab", "switch", "enter", "next", "esc", "cancel"), m.width, "")
+	case kickConfirm:
+		line := " " + failedMark.Render("kick "+m.kickRoom.v.label(m.kickRole)+"?")
+		if p := m.kickRoom.v.member(m.kickRole); p != nil && p.Worker {
+			line += dim.Render(" its edits stay")
+		}
+		return ansi.Truncate(line+"   "+hints("y", "kick", "esc", "cancel"), m.width, "")
+	}
 	var notes []string
 	if m.err != nil {
 		notes = append(notes, failedMark.Render(m.err.Error()))
@@ -1683,6 +1795,8 @@ func (m *model) statusLine() string {
 		notes = append(notes, toolMark.Render("sending…"))
 	case m.sendErr != nil:
 		notes = append(notes, failedMark.Render("not sent: "+m.sendErr.Error()))
+	case m.kickErr != nil:
+		notes = append(notes, failedMark.Render(m.kickErr.Error()))
 	case m.added != "":
 		notes = append(notes, activeMark.Render(m.added))
 	}

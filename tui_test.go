@@ -963,3 +963,45 @@ func TestLogGrowsAsIfRenderedWhole(t *testing.T) {
 		t.Fatalf("the log kept the old agent: %s", out)
 	}
 }
+
+func TestKickFromTUI(t *testing.T) {
+	repo := testRepo(t)
+	v := startRoom(t, repo, "kick")
+	if _, err := invoke(repo, "", "join", v.ID, "docs"); err != nil {
+		t.Fatal(err)
+	}
+	s, err := openStore(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := loaded(t, s)
+	m.Update(press('d'))
+	m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	if !strings.Contains(ansi.Strip(m.statusLine()), "[docs]") {
+		t.Fatalf("Tab did not pick docs: %q", ansi.Strip(m.statusLine()))
+	}
+	m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if !strings.Contains(ansi.Strip(m.statusLine()), "kick docs?") {
+		t.Fatalf("no confirmation: %q", ansi.Strip(m.statusLine()))
+	}
+	if _, cmd := m.Update(press('n')); cmd != nil || m.kicking != kickOff {
+		t.Fatal("another key did not cancel the kick")
+	}
+	m.Update(press('d'))
+	m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	_, kick := m.Update(press('y'))
+	m.Update(kick())
+	if !strings.Contains(m.statusLine(), "docs was kicked") {
+		t.Fatalf("status %q", ansi.Strip(m.statusLine()))
+	}
+	got, _ := s.refresh(v.ID)
+	if p := got.member("docs"); p == nil || !p.Kicked || p.KickedBy != human || got.member("reader").Kicked {
+		t.Fatalf("members after kick: %+v", got.Members)
+	}
+	m.Update(m.poll()())
+	m.startCompose()
+	if slices.Contains(m.targets(), "docs") {
+		t.Fatalf("the composer still addresses docs: %q", m.targets())
+	}
+}

@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -176,19 +177,20 @@ func latestCodexModel(suffix string) string {
 // startMember runs argv in dir with env added to its environment, in its
 // own process session, so it outlives the writer's command, and appends
 // its output and exit status to logPath. The status also goes to
-// exitPath, which load turns into the member leaving; it is replaced in
+// exitPath, which load turns into the member leaving. It returns the
+// wrapper's PID, which leads the member's process group; it is replaced in
 // tests.
-var startMember = func(argv []string, dir string, env []string, logPath, exitPath string) error {
+var startMember = func(argv []string, dir string, env []string, logPath, exitPath string) (int, error) {
 	if _, err := exec.LookPath(argv[0]); err != nil {
-		return err
+		return 0, err
 	}
 	self, err := os.Executable()
 	if err != nil {
-		return err
+		return 0, err
 	}
 	log, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer log.Close()
 	// The status is taken inside the group: after the pipe, $? is stamp's.
@@ -199,9 +201,69 @@ var startMember = func(argv []string, dir string, env []string, logPath, exitPat
 	cmd.Stdout, cmd.Stderr = log, log
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := cmd.Start(); err != nil {
-		return err
+		return 0, err
 	}
-	return cmd.Process.Release()
+	pid := cmd.Process.Pid
+	return pid, cmd.Process.Release()
+}
+
+// stopGrace is how long stopMember waits for a group to go after each
+// signal; it is replaced in tests.
+var stopGrace = 3 * time.Second
+
+// stopMember stops the process group that pid leads: the wrapper
+// startMember ran for the member whose status goes to exitPath. Once the
+// member exits, its number may go to another process, so it signals only a
+// group whose leader ps shows running that wrapper, and a group whose
+// leader is gone is reported, not signalled. Then it sends TERM, and KILL
+// if the group outlives stopGrace. TERM may end the leader but not an agent
+// that ignores it; KILL then relies on the group having existed since the
+// check, polled every 50ms, as a group's ID is not reused while the group
+// exists. If the leader is still there, it is checked again. The checks and
+// the signals are not atomic, so this is a safeguard, not a guarantee. It
+// is replaced in tests.
+var stopMember = func(pid int, exitPath string) error {
+	for _, sig := range []syscall.Signal{syscall.SIGTERM, syscall.SIGKILL} {
+		if gone(pid) {
+			return nil
+		}
+		if err := ownGroup(pid, exitPath, sig == syscall.SIGKILL); err != nil {
+			return err
+		}
+		if err := syscall.Kill(-pid, sig); err != nil && !gone(pid) {
+			return err
+		}
+		for deadline := time.Now().Add(stopGrace); time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
+			if gone(pid) {
+				return nil
+			}
+		}
+	}
+	return fmt.Errorf("process group %d outlived SIGKILL", pid)
+}
+
+// gone reports whether process group pid has no processes left.
+func gone(pid int) bool {
+	return errors.Is(syscall.Kill(-pid, 0), syscall.ESRCH)
+}
+
+// ownGroup checks with ps that pid leads a group running the wrapper that
+// writes exitPath, or, if leaderless, that the leader has exited.
+func ownGroup(pid int, exitPath string, leaderless bool) error {
+	out, err := exec.Command("ps", "-ww", "-o", "pgid=,command=", "-p", strconv.Itoa(pid)).Output()
+	fields := strings.Fields(string(out))
+	var exit *exec.ExitError
+	switch {
+	case len(fields) == 0 && err != nil && !errors.As(err, &exit):
+		return fmt.Errorf("ps: %w", err)
+	case len(fields) == 0 && leaderless:
+		return nil
+	case len(fields) == 0:
+		return fmt.Errorf("process %d has exited, but its group still runs, so peer did not signal it", pid)
+	case fields[0] != strconv.Itoa(pid) || !strings.Contains(string(out), exitPath):
+		return fmt.Errorf("process %d now runs something else, so peer did not signal it", pid)
+	}
+	return nil
 }
 
 // stamp copies in to out line by line, each prefixed with the time it
@@ -267,7 +329,7 @@ func (s *store) invite(id, as string, m member, brief string, isolated bool, out
 		}
 		// A role keeps its workspace, so a worker invited again finds
 		// the edits its predecessor left.
-		if old := cur.member(m.Role); old != nil && old.Exited {
+		if old := cur.member(m.Role); old != nil && old.Exited && !old.Kicked {
 			if (old.Worktree != "") != isolated {
 				return fmt.Errorf("%s worked in %s; invite it again with the same workspace, or use another role", m.Role, cmp.Or(old.Worktree, "the shared checkout"))
 			}
@@ -302,14 +364,15 @@ func (s *store) invite(id, as string, m member, brief string, isolated bool, out
 	if err == nil {
 		argv, err = memberArgs(s, m, dir, memberPrompt(v, m, brief))
 	}
+	pid := 0
 	if err == nil {
-		err = startMember(argv, dir, []string{"PEER_REPO=" + s.repo}, logPath, s.exitPath(v.ID, m.Role))
+		pid, err = startMember(argv, dir, []string{"PEER_REPO=" + s.repo}, logPath, s.exitPath(v.ID, m.Role))
 	}
 	if err != nil {
 		// Marking the member exited frees the role to be invited again.
 		_ = s.locked(func() error {
 			cur, err := s.load(v.ID)
-			if err != nil || cur.EndedAt != "" || cur.member(m.Role) == nil {
+			if err != nil || cur.EndedAt != "" || cur.member(m.Role) == nil || cur.member(m.Role).Kicked {
 				return err
 			}
 			cur.member(m.Role).Exited = true
@@ -321,9 +384,36 @@ func (s *store) invite(id, as string, m member, brief string, isolated bool, out
 		})
 		return fmt.Errorf("launching %s failed: %w", m.Agent, err)
 	}
+	if err := s.launched(v.ID, m.Role, pid); err != nil {
+		return err
+	}
 	fmt.Fprintf(os.Stderr, "peer: %s runs headless; watch it in peer, or read %s\n", m.Role, logPath)
 	if m.Worktree != "" {
 		fmt.Fprintf(os.Stderr, "peer: %s works in %s on branch %s; peer end keeps it\n", m.Role, m.Worktree, m.Branch)
 	}
 	return json.NewEncoder(out).Encode(v)
+}
+
+// launched records the PID of the member started in role, so kick can
+// stop it, or stops the member at once if it was kicked while starting.
+func (s *store) launched(id, role string, pid int) error {
+	kicked := false
+	err := s.locked(func() error {
+		v, err := s.load(id)
+		if err != nil {
+			return err
+		}
+		// A member kicked while starting keeps its PID too, so a later
+		// kick can retry stopping it.
+		m := v.member(role)
+		m.PID, kicked = pid, m.Kicked
+		return writeJSON(s.sessionPath(id), v)
+	})
+	if err != nil || !kicked {
+		return err
+	}
+	if err := stopMember(pid, s.exitPath(id, role)); err != nil {
+		return fmt.Errorf("%s was kicked while it started, and its process %d is not confirmed stopped: %w", role, pid, err)
+	}
+	return fmt.Errorf("%s was kicked while it started; its process is stopped", role)
 }
