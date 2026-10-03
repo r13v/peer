@@ -53,7 +53,7 @@ To add experts, name them in the task, for example `/peer add CSV export; also i
 
 To add any agent yourself, for example Copilot, paste the writer's join prompt into that agent's chat in the same checkout. Change the role in it and add your own instructions after it. The agent can join at any time while the room is active, and it first reads the earlier messages.
 
-To pick a member's model, name it in the task, for example `invite a reader on codex with gpt-5`. The writer passes it to the agent's CLI with `--model`.
+To pick a member's model, name it in the task, for example `invite a reader on codex with gpt-5`. The writer passes it to the agent's CLI with `--model`. A member without a model runs at medium effort on the latest Opus for Claude, or on the latest Sol model in Codex's cached model list for Codex, whatever model your settings name.
 
 To split the work, ask for workers. Name the agents and, if you want, their models. The writer leads, gives each worker its part and integrates the result:
 ```text
