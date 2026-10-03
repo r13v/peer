@@ -13,7 +13,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -41,14 +40,11 @@ func memberPrompt(v session, m member, brief string) string {
 var inviteAgents = []string{"claude", "codex", "pi"}
 
 // claudeTools are a Claude member's tools: everything but the edit tools.
-// Its subagents get no more.
-var claudeTools = []string{"Read", "Grep", "Glob", "Skill", "WebFetch", "WebSearch", "Task", "TaskCreate", "TaskGet", "TaskList", "TaskUpdate", "TaskStop", "LSP", "ToolSearch"}
+// Its subagents get no more. A worker gets all tools.
+var claudeTools = []string{"Bash", "Read", "Grep", "Glob", "Skill", "WebFetch", "WebSearch", "Task", "TaskCreate", "TaskGet", "TaskList", "TaskUpdate", "TaskStop", "LSP", "ToolSearch"}
 
-// claudeEditTools are the tools a Claude worker gets on top.
-var claudeEditTools = []string{"Edit", "Write", "NotebookEdit"}
-
-// piTools are a pi member's tools: its built-in tools but edit and write,
-// which a pi worker gets too.
+// piTools are a pi member's tools: its built-in tools but edit and write.
+// A worker gets pi's default tools and its extensions' tools.
 var piTools = "read,grep,find,ls,bash"
 
 // withDefaults gives a member invited without a model the latest model of
@@ -71,18 +67,26 @@ func withDefaults(m member) member {
 }
 
 // memberArgs runs m's CLI without a chat window in dir, the checkout or
-// m's worktree. Codex and Claude run any shell command, with the network,
-// in a sandbox that by default writes only dir, temp directories and the
-// peer store. Claude's sandbox covers only Bash, so it also gets no MCP
-// servers and skips the checkout's settings, which could widen the
-// sandbox, and only a worker gets the edit tools. Pi has no sandbox: it
-// skips the checkout's settings, but its shell keeps the user's
-// permissions, and only a worker gets edit and write.
+// m's worktree. A worker runs without limits: no sandbox, no approvals,
+// all tools and the checkout's settings. Codex and Claude run a member's
+// shell commands, with the network, in a sandbox that by default writes
+// only dir, temp directories and the peer store. Claude allows Bash
+// outright, because dontAsk denies the commands that its sandbox does not
+// auto-allow, such as heredocs; the sandbox still confines them. That
+// sandbox covers only Bash, so a Claude member also gets no MCP servers
+// and skips the checkout's settings, which could widen the sandbox. Pi has
+// no sandbox: a member skips the checkout's settings, but its shell keeps
+// the user's permissions.
 func memberArgs(s *store, m member, dir, prompt string) ([]string, error) {
 	var argv []string
 	switch m.Agent {
 	case "codex":
-		argv = []string{"codex", "exec", "--json", "-C", dir, "-s", "workspace-write", "-c", "sandbox_workspace_write.network_access=true", "--add-dir", s.dir, "-c", "approval_policy=never"}
+		argv = []string{"codex", "exec", "--json", "-C", dir}
+		if m.Worker {
+			argv = append(argv, "--dangerously-bypass-approvals-and-sandbox")
+		} else {
+			argv = append(argv, "-s", "workspace-write", "-c", "sandbox_workspace_write.network_access=true", "--add-dir", s.dir, "-c", "approval_policy=never")
+		}
 		if m.Model != "" {
 			argv = append(argv, "-m", m.Model)
 		}
@@ -91,37 +95,41 @@ func memberArgs(s *store, m member, dir, prompt string) ([]string, error) {
 		}
 		return append(argv, prompt), nil
 	case "claude":
-		sandbox := map[string]any{"sandbox": map[string]any{
-			"enabled":                  true,
-			"failIfUnavailable":        true,
-			"allowUnsandboxedCommands": false,
-			"autoAllowBashIfSandboxed": true,
-			"filesystem":               map[string]any{"allowWrite": []string{s.dir}},
-			"network":                  map[string]any{"allowedDomains": []string{"*"}, "allowLocalBinding": true},
-		}}
-		settings, _ := json.Marshal(sandbox)
-		tools := claudeTools
+		argv = []string{"claude", "-p", "--verbose", "--output-format", "stream-json", "--permission-prompts", "none"}
 		if m.Worker {
-			tools = append(slices.Clone(claudeTools), claudeEditTools...)
+			argv = append(argv, "--permission-mode", "bypassPermissions")
+		} else {
+			sandbox := map[string]any{"sandbox": map[string]any{
+				"enabled":                  true,
+				"failIfUnavailable":        true,
+				"allowUnsandboxedCommands": false,
+				"autoAllowBashIfSandboxed": true,
+				"filesystem":               map[string]any{"allowWrite": []string{s.dir}},
+				"network":                  map[string]any{"allowedDomains": []string{"*"}, "allowLocalBinding": true},
+			}}
+			settings, _ := json.Marshal(sandbox)
+			argv = append(argv, "--permission-mode", "dontAsk", "--strict-mcp-config", "--setting-sources", "user", "--settings", string(settings))
 		}
-		argv = []string{"claude", "-p", "--verbose", "--output-format", "stream-json", "--permission-mode", "dontAsk", "--permission-prompts", "none", "--strict-mcp-config", "--setting-sources", "user", "--settings", string(settings)}
 		if m.Model != "" {
 			argv = append(argv, "--model", m.Model)
 		}
 		if m.Effort != "" {
 			argv = append(argv, "--effort", m.Effort)
 		}
-		argv = append(argv, "--tools", "Bash")
-		argv = append(argv, tools...)
-		argv = append(argv, "--allowedTools")
-		argv = append(argv, tools...)
+		if !m.Worker {
+			argv = append(argv, "--tools")
+			argv = append(argv, claudeTools...)
+			argv = append(argv, "--allowedTools")
+			argv = append(argv, claudeTools...)
+		}
 		return append(argv, "--", prompt), nil
 	case "pi":
-		tools := piTools
+		argv = []string{"pi", "-p", "--mode", "json", "--no-session"}
 		if m.Worker {
-			tools += ",edit,write"
+			argv = append(argv, "--approve")
+		} else {
+			argv = append(argv, "--no-approve", "--tools", piTools)
 		}
-		argv = []string{"pi", "-p", "--mode", "json", "--no-session", "--no-approve", "--tools", tools}
 		if m.Model != "" {
 			argv = append(argv, "--model", m.Model)
 		}
