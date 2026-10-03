@@ -520,12 +520,19 @@ func TestInvite(t *testing.T) {
 		return nil
 	}
 	t.Cleanup(func() { startMember = func([]string, string, []string, string, string) error { return nil } })
+	codexHome := t.TempDir()
+	t.Setenv("CODEX_HOME", codexHome)
+	models := `{"models":[{"slug":"gpt-6-sol","visibility":"list","priority":3},{"slug":"gpt-7-sol","visibility":"hide","priority":0},{"slug":"gpt-6.1-sol","visibility":"list","priority":1},{"slug":"gpt-6-astra","visibility":"list","priority":0}]}`
+	if err := os.WriteFile(filepath.Join(codexHome, "models_cache.json"), []byte(models), 0600); err != nil {
+		t.Fatal(err)
+	}
 	for _, tc := range []struct {
 		agent, model, focus string
 		worker              bool
 	}{
 		{"codex", "", "Follow peer skills member.", false},
 		{"claude", "opus", "Follow peer skills member.", false},
+		{"claude", "", "Follow peer skills member.", false},
 		{"pi", "", "a worker in the shared checkout", true},
 		{"codex", "gpt-5", "a worker in the shared checkout", true},
 	} {
@@ -563,6 +570,12 @@ func TestInvite(t *testing.T) {
 		}
 		if tc.model != "" && !strings.Contains(joined, " "+tc.model+" ") {
 			t.Fatalf("model %s not passed: %q", tc.model, launched[0])
+		}
+		if tc.agent == "claude" && tc.model == "" && !strings.Contains(joined, " --model opus --effort medium ") {
+			t.Fatalf("claude does not default to opus at medium effort: %q", launched[0])
+		}
+		if tc.agent == "codex" && tc.model == "" && !strings.Contains(joined, " -m gpt-6.1-sol -c model_reasoning_effort=medium ") {
+			t.Fatalf("codex does not default to the latest sol at medium effort: %q", launched[0])
 		}
 	}
 	repo := testRepo(t)

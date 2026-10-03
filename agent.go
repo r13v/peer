@@ -66,6 +66,8 @@ func memberArgs(s *store, m member, dir, prompt string) ([]string, error) {
 		argv = []string{"codex", "exec", "--json", "-C", dir, "-s", "workspace-write", "-c", "sandbox_workspace_write.network_access=true", "--add-dir", s.dir, "-c", "approval_policy=never"}
 		if m.Model != "" {
 			argv = append(argv, "-m", m.Model)
+		} else if model := latestCodexModel("-sol"); model != "" {
+			argv = append(argv, "-m", model, "-c", "model_reasoning_effort=medium")
 		}
 		return append(argv, prompt), nil
 	case "claude":
@@ -83,8 +85,12 @@ func memberArgs(s *store, m member, dir, prompt string) ([]string, error) {
 			tools = append(slices.Clone(claudeTools), claudeEditTools...)
 		}
 		argv = []string{"claude", "-p", "--verbose", "--output-format", "stream-json", "--permission-mode", "dontAsk", "--permission-prompts", "none", "--strict-mcp-config", "--setting-sources", "user", "--settings", string(settings)}
+		// The user's settings may pin an older model, so a member without
+		// one gets the latest Opus, which the alias names.
 		if m.Model != "" {
 			argv = append(argv, "--model", m.Model)
+		} else {
+			argv = append(argv, "--model", "opus", "--effort", "medium")
 		}
 		argv = append(argv, "--tools", "Bash")
 		argv = append(argv, tools...)
@@ -103,6 +109,41 @@ func memberArgs(s *store, m member, dir, prompt string) ([]string, error) {
 		return append(argv, "--", prompt), nil
 	}
 	return nil, fmt.Errorf("peer cannot launch %s", m.Agent)
+}
+
+// latestCodexModel is the listed Codex model whose name ends in suffix and
+// that Codex ranks first, read from the model list Codex caches. It is ""
+// when Codex has no such list, and Codex then uses its own default.
+func latestCodexModel(suffix string) string {
+	home := os.Getenv("CODEX_HOME")
+	if home == "" {
+		user, err := os.UserHomeDir()
+		if err != nil {
+			return ""
+		}
+		home = filepath.Join(user, ".codex")
+	}
+	data, err := os.ReadFile(filepath.Join(home, "models_cache.json"))
+	if err != nil {
+		return ""
+	}
+	var cache struct {
+		Models []struct {
+			Slug       string `json:"slug"`
+			Visibility string `json:"visibility"`
+			Priority   int    `json:"priority"`
+		} `json:"models"`
+	}
+	if json.Unmarshal(data, &cache) != nil {
+		return ""
+	}
+	best, rank := "", 0
+	for _, m := range cache.Models {
+		if m.Visibility == "list" && strings.HasSuffix(m.Slug, suffix) && (best == "" || m.Priority < rank) {
+			best, rank = m.Slug, m.Priority
+		}
+	}
+	return best
 }
 
 // startMember runs argv in dir with env added to its environment, in its
