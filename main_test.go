@@ -1007,8 +1007,8 @@ func TestClaudeMemberIsSandboxedWithoutEditTools(t *testing.T) {
 			t.Errorf("argv grants %s", tool)
 		}
 	}
-	if slices.Contains(allowed, "Bash") {
-		t.Error("Bash is allowed outright, not only in the sandbox")
+	if !slices.Contains(allowed, "Bash") {
+		t.Error("Bash is not allowed, so dontAsk denies the commands the sandbox does not auto-allow")
 	}
 }
 
@@ -1041,15 +1041,27 @@ func TestUnknownAgentHasNoLaunch(t *testing.T) {
 	}
 }
 
-func TestWorkerGetsEditTools(t *testing.T) {
-	for agent, want := range map[string]string{"claude": "--allowedTools Read Grep Glob Skill WebFetch WebSearch Task TaskCreate TaskGet TaskList TaskUpdate TaskStop LSP ToolSearch Edit Write NotebookEdit --", "pi": "--tools read,grep,find,ls,bash,edit,write --"} {
+func TestWorkerHasNoLimits(t *testing.T) {
+	for agent, c := range map[string]struct{ want, banned []string }{
+		"claude": {[]string{"--permission-mode bypassPermissions"}, []string{"dontAsk", "--settings", "--tools", "--allowedTools", "--strict-mcp-config", "--setting-sources"}},
+		"codex":  {[]string{"--dangerously-bypass-approvals-and-sandbox"}, []string{"workspace-write", "--add-dir"}},
+		"pi":     {[]string{"--approve"}, []string{"--no-approve", "--tools"}},
+	} {
 		argv, err := memberArgs(&store{dir: "/store/room"}, member{Agent: agent, Worker: true}, "/repo", "p")
-		if err != nil || !strings.Contains(strings.Join(argv, " "), want) {
-			t.Errorf("%s worker argv = %q, %v", agent, argv, err)
+		if err != nil {
+			t.Fatal(err)
 		}
-	}
-	if !slices.Equal(claudeTools[len(claudeTools)-1:], []string{"ToolSearch"}) {
-		t.Error("a worker's tools leaked into claudeTools")
+		joined := strings.Join(argv, " ")
+		for _, want := range c.want {
+			if !strings.Contains(joined, want) {
+				t.Errorf("%s worker argv lacks %s: %s", agent, want, joined)
+			}
+		}
+		for _, banned := range c.banned {
+			if slices.Contains(argv, banned) {
+				t.Errorf("%s worker argv limits it with %s: %s", agent, banned, joined)
+			}
+		}
 	}
 }
 

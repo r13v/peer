@@ -100,7 +100,7 @@ A room does not end when a background member stops. The writer gets a notice fro
 
 ### Workers
 
-`peer invite ROOM ROLE --as writer --agent AGENT --worker` starts a worker. It has the edit tools and the `peer skills worker` instructions. The writer gives each worker a task and a zone, the files that it may change. Workers do not commit or touch the Git index; the writer commits when every worker has reported. A worker ends each part with a `done:` message that lists its files, what it did and the checks it ran.
+`peer invite ROOM ROLE --as writer --agent AGENT --worker` starts a worker. It runs without limits, as described in [Member permissions](#member-permissions), and gets the `peer skills worker` instructions. The writer gives each worker a task and a zone, the files that it may change. Workers do not commit or touch the Git index; the writer commits when every worker has reported. A worker ends each part with a `done:` message that lists its files, what it did and the checks it ran.
 
 By default a worker edits the shared checkout, next to the writer and other workers, so you see its changes at once. Its builds and tests also see their unfinished work. Add `--worktree` for isolation, when you ask for it or when the parts would touch the same files. The worker then gets a linked Git worktree in the `peer` store on the branch `peer/HASH/ROOM/ROLE`, started from the writer's current commit. Know these limits:
 
@@ -115,11 +115,13 @@ The `peer` commands of a launched member run with `PEER_REPO` set to the checkou
 
 ### Member permissions
 
-A background member gets an instruction not to edit files; a worker gets the edit tools instead. It can run any shell command, such as tests or scripts. Codex and Claude Code run commands in their sandbox. By default, the sandbox lets commands write only the checkout or the worker's worktree, temp directories and the checkout's `peer` store, which holds the worktrees. Commands can use the network, including `localhost`, so a member can send what it reads anywhere. The agent's user settings can widen these limits. Neither agent asks for approval.
+A worker runs without limits: no sandbox, no approvals, all tools, and the checkout's own settings, MCP servers and project files. Codex runs it with `--dangerously-bypass-approvals-and-sandbox`, Claude Code with `--permission-mode bypassPermissions`, and pi with `--approve` and its default and extension tools. Its commands keep the permissions of your account and can change any file that you can access.
+
+A background member gets an instruction not to edit files and the limits below. It can run any shell command, such as tests or scripts. Codex and Claude Code run its commands in their sandbox. By default, the sandbox lets commands write only the checkout, temp directories and the checkout's `peer` store. Commands can use the network, including `localhost`, so a member can send what it reads anywhere. The agent's user settings can widen these limits. Neither agent asks for approval.
 
 - **Codex** runs in its `workspace-write` sandbox.
-- **Claude Code** runs Bash in its sandbox and stops if the sandbox is not available. It gets all tools but Edit, Write and NotebookEdit, including WebFetch, WebSearch, subagents, tasks and LSP; a worker gets the edit tools too. It loads no MCP servers and ignores the checkout's `.claude` settings.
-- **Pi** runs without a sandbox, because pi has none. It gets the `read`, `grep`, `find`, `ls` and `bash` tools, and a worker also gets `edit` and `write`. It loads your global extensions and skills, uses your default model unless the writer passes `--model` and ignores the checkout's `.pi` settings. Its shell commands and extensions keep the permissions of your account and can change any file that you can access.
+- **Claude Code** runs Bash in its sandbox and stops if the sandbox is not available. Bash is allowed outright, so commands that the sandbox does not auto-allow, such as heredocs, still run in the sandbox instead of being denied; commands in your `sandbox.excludedCommands` run outside it without approval. It gets all tools but Edit, Write and NotebookEdit, including WebFetch, WebSearch, subagents, tasks and LSP. It loads no MCP servers and ignores the checkout's `.claude` settings.
+- **Pi** runs without a sandbox, because pi has none. It gets the `read`, `grep`, `find`, `ls` and `bash` tools. It loads your global extensions and skills, uses your default model unless the writer passes `--model` and ignores the checkout's `.pi` settings. Its shell commands and extensions keep the permissions of your account and can change any file that you can access.
 
 Shell commands can still change files in the checkout, so the "do not edit" rule is only an instruction. So are a worker's zone and the ban on commits: a worker in a worktree can still change the checkout or another worktree through its tools or the shared Git history. If you need a guarantee, use the agent's read-only or Plan mode.
 
