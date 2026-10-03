@@ -51,6 +51,25 @@ var claudeEditTools = []string{"Edit", "Write", "NotebookEdit"}
 // which a pi worker gets too.
 var piTools = "read,grep,find,ls,bash"
 
+// withDefaults gives a member invited without a model the latest model of
+// its CLI at medium effort, since the user's settings may pin an older one:
+// for Claude the latest Opus, which the alias names, and for Codex the
+// latest Sol model it lists. Pi keeps its own default.
+func withDefaults(m member) member {
+	if m.Model != "" {
+		return m
+	}
+	switch m.Agent {
+	case "claude":
+		m.Model, m.Effort = "opus", "medium"
+	case "codex":
+		if m.Model = latestCodexModel("-sol"); m.Model != "" {
+			m.Effort = "medium"
+		}
+	}
+	return m
+}
+
 // memberArgs runs m's CLI without a chat window in dir, the checkout or
 // m's worktree. Codex and Claude run any shell command, with the network,
 // in a sandbox that by default writes only dir, temp directories and the
@@ -66,8 +85,9 @@ func memberArgs(s *store, m member, dir, prompt string) ([]string, error) {
 		argv = []string{"codex", "exec", "--json", "-C", dir, "-s", "workspace-write", "-c", "sandbox_workspace_write.network_access=true", "--add-dir", s.dir, "-c", "approval_policy=never"}
 		if m.Model != "" {
 			argv = append(argv, "-m", m.Model)
-		} else if model := latestCodexModel("-sol"); model != "" {
-			argv = append(argv, "-m", model, "-c", "model_reasoning_effort=medium")
+		}
+		if m.Effort != "" {
+			argv = append(argv, "-c", "model_reasoning_effort="+m.Effort)
 		}
 		return append(argv, prompt), nil
 	case "claude":
@@ -85,12 +105,11 @@ func memberArgs(s *store, m member, dir, prompt string) ([]string, error) {
 			tools = append(slices.Clone(claudeTools), claudeEditTools...)
 		}
 		argv = []string{"claude", "-p", "--verbose", "--output-format", "stream-json", "--permission-mode", "dontAsk", "--permission-prompts", "none", "--strict-mcp-config", "--setting-sources", "user", "--settings", string(settings)}
-		// The user's settings may pin an older model, so a member without
-		// one gets the latest Opus, which the alias names.
 		if m.Model != "" {
 			argv = append(argv, "--model", m.Model)
-		} else {
-			argv = append(argv, "--model", "opus", "--effort", "medium")
+		}
+		if m.Effort != "" {
+			argv = append(argv, "--effort", m.Effort)
 		}
 		argv = append(argv, "--tools", "Bash")
 		argv = append(argv, tools...)
@@ -231,6 +250,7 @@ func (s *store) invite(id, as string, m member, brief string, isolated bool, out
 	if as != writer {
 		return errors.New("only the writer can invite; run peer invite ID ROLE --as writer")
 	}
+	m = withDefaults(m)
 	var v session
 	err := s.locked(func() error {
 		cur, err := s.load(id)
