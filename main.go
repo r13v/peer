@@ -335,7 +335,7 @@ func (p *printer) author(v session, name string, withAgent bool) string {
 	}
 	out := p.paint(code, name)
 	if m := v.member(name); withAgent && m != nil && m.Agent != "" {
-		out += " " + p.paint(ansiDim, m.Agent)
+		out += " " + p.paint(ansiDim, "("+m.app()+")")
 	}
 	return out
 }

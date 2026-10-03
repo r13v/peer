@@ -828,7 +828,7 @@ func (m *model) author(v session, name string, withAgent bool) string {
 	}
 	out := roleStyle(name).Render(name)
 	if mem := v.member(name); withAgent && mem != nil && mem.Agent != "" {
-		out += " " + dim.Render(mem.Agent)
+		out += " " + dim.Render("("+mem.app()+")")
 	}
 	return out
 }

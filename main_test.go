@@ -285,7 +285,7 @@ func TestBodyMarkdown(t *testing.T) {
 func TestAuthorDimsAgent(t *testing.T) {
 	p := &printer{repo: t.TempDir(), color: true}
 	v := session{Members: []member{{Role: writer, Agent: "claude"}, {Role: "reader"}}}
-	if got, want := p.author(v, writer, true), "\x1b[1;36mwriter\x1b[0m \x1b[2mclaude\x1b[0m"; got != want {
+	if got, want := p.author(v, writer, true), "\x1b[1;36mwriter\x1b[0m \x1b[2m(claude)\x1b[0m"; got != want {
 		t.Fatalf("sender:\n got %q\nwant %q", got, want)
 	}
 	if got, want := p.author(v, writer, false), "\x1b[1;36mwriter\x1b[0m"; got != want {
@@ -354,7 +354,7 @@ func TestPairSession(t *testing.T) {
 		t.Fatal("log without an ID accepted")
 	}
 	log, err := invoke(repo, "", "log", id)
-	if err != nil || !strings.Contains(log, "proposal") || !strings.Contains(log, "check line 12") || !strings.Contains(log, "writer claude → all") || !strings.Contains(log, "peer → writer\n") {
+	if err != nil || !strings.Contains(log, "proposal") || !strings.Contains(log, "check line 12") || !strings.Contains(log, "writer (claude) → all") || !strings.Contains(log, "peer → writer\n") {
 		t.Fatalf("transcript incomplete: %s, %v", log, err)
 	}
 	if _, err := invoke(repo, "", "end", id, "--as", "reader"); err == nil {
@@ -406,7 +406,7 @@ func TestMembersJoinAndAddress(t *testing.T) {
 	if err != nil || !strings.Contains(joined, `"role":"test-expert","agent":"copilot"`) {
 		t.Fatalf("join: %s, %v", joined, err)
 	}
-	if got, _ := invoke(repo, "", "wait", v.ID, "--as", "writer"); !strings.Contains(got, `"text":"test-expert · copilot joined"`) {
+	if got, _ := invoke(repo, "", "wait", v.ID, "--as", "writer"); !strings.Contains(got, `"text":"test-expert · copilot, readonly joined"`) {
 		t.Fatalf("writer missed the join notice: %s", got)
 	}
 	// A late member replays what was sent to everyone before it joined.
@@ -1050,5 +1050,20 @@ func TestWorkerGetsEditTools(t *testing.T) {
 	}
 	if !slices.Equal(claudeTools[len(claudeTools)-1:], []string{"ToolSearch"}) {
 		t.Error("a worker's tools leaked into claudeTools")
+	}
+}
+
+func TestAppNamesModelEffortAndMode(t *testing.T) {
+	for _, tc := range []struct {
+		m    member
+		want string
+	}{
+		{member{Role: writer, Agent: "claude"}, "claude"},
+		{member{Role: "driver", Agent: "codex", Model: "gpt-6.1-sol", Effort: "medium"}, "codex/gpt-6.1-sol/medium, readonly"},
+		{member{Role: "api", Agent: "claude", Model: "haiku", Worker: true}, "claude/haiku, worker"},
+	} {
+		if got := tc.m.app(); got != tc.want {
+			t.Errorf("%+v: got %q, want %q", tc.m, got, tc.want)
+		}
 	}
 }

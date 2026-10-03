@@ -46,6 +46,8 @@ type member struct {
 	Worker bool `json:"worker,omitempty"`
 	// Model is the model a launched member's CLI was asked to use.
 	Model string `json:"model,omitempty"`
+	// Effort is the reasoning effort it was asked to use.
+	Effort string `json:"effort,omitempty"`
 	// Worktree, Branch and Base are set for a worker in its own linked
 	// worktree: its path, its branch and the commit it started from.
 	Worktree string `json:"worktree,omitempty"`
@@ -141,12 +143,34 @@ func (s *session) member(role string) *member {
 	return nil
 }
 
-// label names a participant for people, e.g. "reader · codex".
+// label names a participant for people, e.g. "reader · codex/gpt-5/high,
+// readonly".
 func (s session) label(role string) string {
 	if m := s.member(role); m != nil && m.Agent != "" {
-		return role + " · " + m.Agent
+		return role + " · " + m.app()
 	}
 	return role
+}
+
+// app names m's agent, with the model and effort it was launched with when
+// peer knows them, and, for a member other than the writer, whether it
+// edits files, e.g. "codex/gpt-5/high, worker".
+func (m member) app() string {
+	parts := []string{m.Agent}
+	for _, p := range []string{m.Model, m.Effort} {
+		if p != "" {
+			parts = append(parts, p)
+		}
+	}
+	out := strings.Join(parts, "/")
+	switch {
+	case m.Role == writer:
+	case m.Worker:
+		out += ", worker"
+	default:
+		out += ", readonly"
+	}
+	return out
 }
 
 func (s session) check(role string) error {

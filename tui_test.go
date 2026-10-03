@@ -62,7 +62,7 @@ func TestTUIShowsTranscriptAndReaderLog(t *testing.T) {
 	if m.showLog || strings.Contains(m.render(), "reader log") {
 		t.Fatal("l did not hide the reader log")
 	}
-	if chat := ansi.Strip(strings.Join(m.chat.lines, "\n")); !strings.Contains(chat, "writer claude → all") || !strings.Contains(chat, "peer → writer\n") {
+	if chat := ansi.Strip(strings.Join(m.chat.lines, "\n")); !strings.Contains(chat, "writer (claude) → all") || !strings.Contains(chat, "peer → writer\n") {
 		t.Fatalf("headers do not name the sender's agent only:\n%s", chat)
 	}
 	if m.chat.query != "proposal" || len(m.chat.matches) != 1 || m.chat.cur != 0 {
@@ -959,7 +959,7 @@ func TestLogGrowsAsIfRenderedWhole(t *testing.T) {
 	// The role invited again as claude names claude in every heading.
 	m.room.e.v.member("reader").Agent = "claude"
 	m.renderLog()
-	if out := ansi.Strip(strings.Join(m.log.lines, "\n")); !strings.Contains(out, "reader claude") {
+	if out := ansi.Strip(strings.Join(m.log.lines, "\n")); !strings.Contains(out, "reader (claude, readonly)") {
 		t.Fatalf("the log kept the old agent: %s", out)
 	}
 }
