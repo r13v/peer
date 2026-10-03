@@ -14,7 +14,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -53,6 +52,13 @@ type member struct {
 	Worktree string `json:"worktree,omitempty"`
 	Branch   string `json:"branch,omitempty"`
 	Base     string `json:"base,omitempty"`
+	// Kicked is set once the writer or the user has kicked the member,
+	// by KickedBy. Its role stays taken for the rest of the room, so a
+	// late exit status or the old member cannot act as a newcomer.
+	Kicked   bool   `json:"kicked,omitempty"`
+	KickedBy string `json:"kicked_by,omitempty"`
+	// PID leads the process group of a launched member's wrapper.
+	PID int `json:"pid,omitempty"`
 }
 
 type message struct {
@@ -174,8 +180,12 @@ func (m member) app() string {
 }
 
 func (s session) check(role string) error {
-	if s.member(role) == nil {
+	m := s.member(role)
+	if m == nil {
 		return fmt.Errorf("%q is not a participant in session %s", role, s.ID)
+	}
+	if m.Kicked {
+		return fmt.Errorf("%s was kicked from session %s", role, s.ID)
 	}
 	return nil
 }
@@ -332,7 +342,7 @@ func (s *store) load(id string) (session, error) {
 	}
 	for i := range v.Members {
 		m := &v.Members[i]
-		if m.Role == writer || m.Exited {
+		if m.Role == writer || m.Exited || m.Kicked {
 			continue
 		}
 		b, err := os.ReadFile(s.exitPath(id, m.Role))
@@ -436,6 +446,9 @@ func (s *store) add(id string, m member) (session, error) {
 		return v, endedError(v)
 	}
 	if old := v.member(m.Role); old != nil {
+		if old.Kicked {
+			return v, fmt.Errorf("%s was kicked from room %s, and its role is not reused; use another role, such as %s-2", m.Role, id, m.Role)
+		}
 		if !old.Exited {
 			return v, fmt.Errorf("role %s is already in room %s; if that is you, continue as %s, otherwise use another role, such as %s-2", m.Role, id, m.Role, m.Role)
 		}
@@ -523,8 +536,10 @@ func (s *store) post(sid, to, text string) error {
 		if v.EndedAt != "" {
 			return endedError(v)
 		}
-		if to != everyone && !slices.Contains(v.members(), to) {
-			return fmt.Errorf("%q is not a participant in session %s", to, v.ID)
+		if to != everyone {
+			if err := v.check(to); err != nil {
+				return err
+			}
 		}
 		_, err = s.appendMessage(v, human, to, text)
 		return err
@@ -678,6 +693,57 @@ func (s *store) end(sid, as string, out io.Writer) error {
 		}
 		return json.NewEncoder(out).Encode(v)
 	})
+}
+
+// kick removes role from active room id for by, the writer or the user,
+// and stops the member's process if peer launched it. Kicking a kicked
+// member again only retries stopping it. It returns a note on the process.
+func (s *store) kick(id, role, by string) (string, error) {
+	var m member
+	err := s.locked(func() error {
+		v, err := s.load(id)
+		if err != nil {
+			return err
+		}
+		if v.EndedAt != "" {
+			return endedError(v)
+		}
+		cur := v.member(role)
+		switch {
+		case role == writer:
+			return errors.New("the writer cannot be kicked; end the room instead")
+		case cur == nil:
+			return fmt.Errorf("%q is not a participant in session %s", role, v.ID)
+		case cur.Exited && !cur.Kicked:
+			return fmt.Errorf("%s has already exited", role)
+		}
+		if !cur.Kicked {
+			cur.Kicked, cur.KickedBy = true, by
+			if err := writeJSON(s.sessionPath(id), v); err != nil {
+				return err
+			}
+			if _, err := s.appendMessage(v, system, everyone, role+" was kicked by "+by); err != nil {
+				return err
+			}
+		}
+		m = *cur
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	note := role + " was kicked"
+	if m.Worktree != "" {
+		note += "; its worktree stays in " + m.Worktree + " on branch " + m.Branch
+	}
+	if m.PID == 0 {
+		// A member launched right now is stopped by its invite.
+		return note + "; peer did not launch it, so its process is left alone", nil
+	}
+	if err := stopMember(m.PID, s.exitPath(id, role)); err != nil {
+		return "", fmt.Errorf("%s, but its process %d is not confirmed stopped: %w; run peer kick again to retry", note, m.PID, err)
+	}
+	return note + " and its process stopped", nil
 }
 
 // close ends room id without a participant, as x in the picker does.

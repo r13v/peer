@@ -11,12 +11,16 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
 
 // realStartMember is the hook TestMain replaces.
-var realStartMember func([]string, string, []string, string, string) error
+var realStartMember func([]string, string, []string, string, string) (int, error)
+
+// realStopMember is the hook tests that stub stopMember restore.
+var realStopMember func(int, string) error
 
 func TestMain(m *testing.M) {
 	if len(os.Args) > 1 && os.Args[1] == "stamp" { // startMember runs the test binary as peer
@@ -28,8 +32,8 @@ func TestMain(m *testing.M) {
 	// A member that runs these tests inherits PEER_REPO, which would send
 	// every fixture checkout to the member's room store.
 	os.Unsetenv("PEER_REPO")
-	realStartMember = startMember
-	startMember = func([]string, string, []string, string, string) error { return nil }
+	realStartMember, realStopMember = startMember, stopMember
+	startMember = func([]string, string, []string, string, string) (int, error) { return 0, nil }
 	waitTimeout = time.Nanosecond
 	os.Exit(m.Run())
 }
@@ -205,7 +209,7 @@ func TestMemberLogLine(t *testing.T) {
 func TestStartMemberStampsOutputAndKeepsStatus(t *testing.T) {
 	dir := t.TempDir()
 	logPath, exitPath := filepath.Join(dir, "member.log"), filepath.Join(dir, "member.exit")
-	if err := realStartMember([]string{"sh", "-c", "echo out; echo err >&2; printf tail; exit 3"}, dir, nil, logPath, exitPath); err != nil {
+	if _, err := realStartMember([]string{"sh", "-c", "echo out; echo err >&2; printf tail; exit 3"}, dir, nil, logPath, exitPath); err != nil {
 		t.Fatal(err)
 	}
 	var data []byte
@@ -458,7 +462,7 @@ func TestMemberExit(t *testing.T) {
 	}
 	exit := func(role string, status int) {
 		t.Helper()
-		if err := realStartMember([]string{"sh", "-c", fmt.Sprintf("exit %d", status)}, repo, nil, s.logPath(v.ID, role), s.exitPath(v.ID, role)); err != nil {
+		if _, err := realStartMember([]string{"sh", "-c", fmt.Sprintf("exit %d", status)}, repo, nil, s.logPath(v.ID, role), s.exitPath(v.ID, role)); err != nil {
 			t.Fatal(err)
 		}
 		want := fmt.Sprintf("%d\n", status)
@@ -512,14 +516,14 @@ func TestInvite(t *testing.T) {
 	var dirs, logs []string
 	var envs [][]string
 	fail := false
-	startMember = func(argv []string, dir string, env []string, logPath, _ string) error {
+	startMember = func(argv []string, dir string, env []string, logPath, _ string) (int, error) {
 		if fail {
-			return errors.New("not installed")
+			return 0, errors.New("not installed")
 		}
 		launched, dirs, envs, logs = append(launched, argv), append(dirs, dir), append(envs, env), append(logs, logPath)
-		return nil
+		return 0, nil
 	}
-	t.Cleanup(func() { startMember = func([]string, string, []string, string, string) error { return nil } })
+	t.Cleanup(func() { startMember = func([]string, string, []string, string, string) (int, error) { return 0, nil } })
 	codexHome := t.TempDir()
 	t.Setenv("CODEX_HOME", codexHome)
 	models := `{"models":[{"slug":"gpt-6-sol","visibility":"list","priority":3},{"slug":"gpt-7-sol","visibility":"hide","priority":0},{"slug":"gpt-6.1-sol","visibility":"list","priority":1},{"slug":"gpt-6-astra","visibility":"list","priority":0}]}`
@@ -612,8 +616,8 @@ func TestInvite(t *testing.T) {
 func TestWorktreeWorker(t *testing.T) {
 	var dir string
 	var env []string
-	startMember = func(_ []string, d string, e []string, _, _ string) error { dir, env = d, e; return nil }
-	t.Cleanup(func() { startMember = func([]string, string, []string, string, string) error { return nil } })
+	startMember = func(_ []string, d string, e []string, _, _ string) (int, error) { dir, env = d, e; return 0, nil }
+	t.Cleanup(func() { startMember = func([]string, string, []string, string, string) (int, error) { return 0, nil } })
 	repo := testRepo(t)
 	if out, err := exec.Command("git", "-C", repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "base").CombinedOutput(); err != nil {
 		t.Fatalf("git commit: %v: %s", err, out)
@@ -1077,5 +1081,191 @@ func TestAppNamesModelEffortAndMode(t *testing.T) {
 		if got := tc.m.app(); got != tc.want {
 			t.Errorf("%+v: got %q, want %q", tc.m, got, tc.want)
 		}
+	}
+}
+
+// TestKick removes a member that joined itself: it can no longer act or be
+// addressed, and its role is not reused.
+func TestKick(t *testing.T) {
+	repo := testRepo(t)
+	v := startRoom(t, repo, "kick")
+	for _, args := range [][]string{
+		{"kick", v.ID, "reader", "--as", "reader"},
+		{"kick", v.ID, "writer", "--as", "writer"},
+		{"kick", v.ID, "ghost", "--as", "writer"},
+	} {
+		if _, err := invoke(repo, "", args...); err == nil {
+			t.Fatalf("%q accepted", args)
+		}
+	}
+	for range 2 { // a second kick only retries the stop
+		if got, err := invoke(repo, "", "kick", v.ID, "reader", "--as", "writer"); err != nil || !strings.Contains(got, `"role":"reader","kicked":true,"kicked_by":"writer"`) {
+			t.Fatalf("kick: %s, %v", got, err)
+		}
+	}
+	if got, err := invoke(repo, "", "wait", v.ID, "--as", "writer"); err != nil || !strings.Contains(got, `"text":"reader was kicked by writer"`) {
+		t.Fatalf("writer missed the kick: %s, %v", got, err)
+	}
+	if got, _ := invoke(repo, "", "wait", v.ID, "--as", "writer"); !strings.Contains(got, "timeout") {
+		t.Fatalf("second kick notified again: %s", got)
+	}
+	s, err := openStore(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, err := range map[string]error{
+		"reader wait":    errOf(invoke(repo, "", "wait", v.ID, "--as", "reader")),
+		"reader send":    errOf(invoke(repo, "hi", "send", v.ID, "--as", "reader")),
+		"send to reader": errOf(invoke(repo, "hi", "send", v.ID, "--as", "writer", "--to", "reader")),
+		"post to reader": s.post(v.ID, "reader", "hi"),
+		"join reader":    errOf(invoke(repo, "", "join", v.ID, "reader")),
+		"invite reader":  errOf(invoke(repo, "", "invite", v.ID, "reader", "--as", "writer", "--agent", "codex")),
+	} {
+		if err == nil || !strings.Contains(err.Error(), "kicked") {
+			t.Fatalf("%s: %v, want a kicked error", name, err)
+		}
+	}
+	if _, err := invoke(repo, "", "join", v.ID, "reader-2"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func errOf(_ string, err error) error { return err }
+
+// groupGone reports whether the process group that pid led has ended.
+func groupGone(pid int) bool {
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+		if errors.Is(syscall.Kill(-pid, 0), syscall.ESRCH) {
+			return true
+		}
+	}
+	return false
+}
+
+// launchIgnoringTerm starts a member wrapper whose agent ignores TERM, so
+// only KILL stops it, and reaps the wrapper, which the test process owns.
+func launchIgnoringTerm(t *testing.T, s *store, id, role string) int {
+	t.Helper()
+	pid, err := realStartMember([]string{"sh", "-c", `trap "" TERM; sleep 60 & wait`}, s.repo, nil, s.logPath(id, role), s.exitPath(id, role))
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _, _ = syscall.Wait4(pid, nil, 0, nil) }()
+	t.Cleanup(func() { _ = syscall.Kill(-pid, syscall.SIGKILL) })
+	return pid
+}
+
+func TestKickStopsLaunchedMember(t *testing.T) {
+	stopGrace = 300 * time.Millisecond
+	t.Cleanup(func() { stopGrace = 3 * time.Second })
+	repo := testRepo(t)
+	v := startRoom(t, repo, "stop")
+	s, err := openStore(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid := launchIgnoringTerm(t, s, v.ID, "reader")
+	if err := s.launched(v.ID, "reader", pid); err != nil {
+		t.Fatal(err)
+	}
+	note, err := s.kick(v.ID, "reader", human)
+	if err != nil || !strings.Contains(note, "process stopped") {
+		t.Fatalf("kick: %q, %v", note, err)
+	}
+	if !groupGone(pid) {
+		t.Fatal("the member's process group outlived the kick")
+	}
+	if got, _ := invoke(repo, "", "wait", v.ID, "--as", "writer"); !strings.Contains(got, "reader was kicked by user") {
+		t.Fatalf("writer missed the kick: %s", got)
+	}
+	if got, _ := invoke(repo, "", "wait", v.ID, "--as", "writer"); !strings.Contains(got, "timeout") {
+		t.Fatalf("a kicked member was reported again: %s", got)
+	}
+}
+
+// TestKickWhileStarting kicks a member between its invite and its launch;
+// the invite then stops the process it started.
+func TestKickWhileStarting(t *testing.T) {
+	stopGrace = 300 * time.Millisecond
+	repo := testRepo(t)
+	v := startRoom(t, repo, "race")
+	s, err := openStore(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid := 0
+	startMember = func([]string, string, []string, string, string) (int, error) {
+		pid = launchIgnoringTerm(t, s, v.ID, "docs")
+		if _, err := s.kick(v.ID, "docs", writer); err != nil {
+			t.Fatal(err)
+		}
+		return pid, nil
+	}
+	t.Cleanup(func() {
+		startMember = func([]string, string, []string, string, string) (int, error) { return 0, nil }
+		stopGrace = 3 * time.Second
+	})
+	if _, err := invoke(repo, "", "invite", v.ID, "docs", "--as", "writer", "--agent", "codex"); err == nil || !strings.Contains(err.Error(), "kicked while it started") {
+		t.Fatalf("invite: %v", err)
+	}
+	if !groupGone(pid) {
+		t.Fatal("a member kicked while starting kept running")
+	}
+	// A later kick retries the stop on the same process.
+	if got, _ := s.refresh(v.ID); got.member("docs").PID != pid {
+		t.Fatalf("the kicked member lost its PID: %+v", got.member("docs"))
+	}
+}
+
+// TestStopMemberSparesOtherProcesses never signals a group whose leader
+// does not run the member's wrapper, as when its PID was reused.
+func TestStopMemberSparesOtherProcesses(t *testing.T) {
+	other := exec.Command("sleep", "30")
+	other.SysProcAttr = &syscall.SysProcAttr{Setpgid: true} // leads a group, like a member
+	if err := other.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = other.Process.Kill(); _ = other.Wait() })
+	if err := stopMember(other.Process.Pid, "/no/such/member.exit"); err == nil {
+		t.Fatal("stopMember accepted a process it did not start")
+	}
+	if err := other.Process.Signal(syscall.Signal(0)); err != nil {
+		t.Fatalf("stopMember signalled another process: %v", err)
+	}
+	t.Setenv("PATH", "") // without ps the group cannot be confirmed
+	if err := stopMember(other.Process.Pid, "/no/such/member.exit"); err == nil || !strings.Contains(err.Error(), "ps") {
+		t.Fatalf("stopMember without ps: %v", err)
+	}
+}
+
+// TestKickRetriesFailedStop keeps the member kicked when its process does
+// not stop, and a second kick retries on the same process.
+func TestKickRetriesFailedStop(t *testing.T) {
+	repo := testRepo(t)
+	v := startRoom(t, repo, "retry")
+	s, err := openStore(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.launched(v.ID, "reader", 4242); err != nil {
+		t.Fatal(err)
+	}
+	var stopped []int
+	stopMember = func(pid int, _ string) error {
+		stopped = append(stopped, pid)
+		if len(stopped) == 1 {
+			return errors.New("not permitted")
+		}
+		return nil
+	}
+	t.Cleanup(func() { stopMember = realStopMember })
+	if _, err := s.kick(v.ID, "reader", writer); err == nil || !strings.Contains(err.Error(), "not confirmed stopped") {
+		t.Fatalf("failed stop reported %v", err)
+	}
+	if got, _ := s.refresh(v.ID); !got.member("reader").Kicked {
+		t.Fatal("a failed stop undid the kick")
+	}
+	if note, err := s.kick(v.ID, "reader", writer); err != nil || !strings.Contains(note, "process stopped") || !slices.Equal(stopped, []int{4242, 4242}) {
+		t.Fatalf("retry: %q, %v, stops %v", note, err, stopped)
 	}
 }

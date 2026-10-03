@@ -33,7 +33,7 @@ var writerInstructions []byte
 //go:embed instructions/worker.md
 var workerInstructions []byte
 
-const usage = "usage: peer, peer --version, peer update, peer skills flow|writer|member|worker, peer start NAME, peer join|invite ID ROLE, peer send|wait|end ID --as ROLE, peer wait ID --as ROLE --timeout DURATION, peer status [ID], peer history, or peer log ID"
+const usage = "usage: peer, peer --version, peer update, peer skills flow|writer|member|worker, peer start NAME, peer join|invite|kick ID ROLE, peer send|wait|end ID --as ROLE, peer wait ID --as ROLE --timeout DURATION, peer status [ID], peer history, or peer log ID"
 
 // version is set at release build time.
 var version = "dev"
@@ -102,7 +102,7 @@ func run(args []string, in io.Reader, out io.Writer, cwd string) error {
 	if len(rest) > 0 && !strings.HasPrefix(rest[0], "-") {
 		id, rest = rest[0], rest[1:]
 	}
-	if (args[0] == "join" || args[0] == "invite") && len(rest) > 0 && !strings.HasPrefix(rest[0], "-") {
+	if (args[0] == "join" || args[0] == "invite" || args[0] == "kick") && len(rest) > 0 && !strings.HasPrefix(rest[0], "-") {
 		role, rest = rest[0], rest[1:]
 	}
 	if err := fs.Parse(rest); err != nil {
@@ -157,6 +157,19 @@ func run(args []string, in io.Reader, out io.Writer, cwd string) error {
 			return errors.New("--worktree is for a worker; add --worker")
 		}
 		return s.invite(id, *actor, member{Role: role, Agent: *agent, Worker: *worker, Model: *model}, *brief, *worktree, out)
+	case "kick":
+		if err := needRole("kick ID ROLE --as writer"); err != nil {
+			return err
+		}
+		if *actor != writer {
+			return errors.New("only the writer can kick; run peer kick ID ROLE --as writer")
+		}
+		note, err := s.kick(id, role, writer)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintln(os.Stderr, "peer:", note)
+		return s.status(id, out)
 	case "status":
 		return s.status(id, out)
 	case "send":

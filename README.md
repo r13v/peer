@@ -96,6 +96,8 @@ A room ends in one of these ways:
 
 A room does not end when a background member stops. The writer gets a notice from `peer` and can invite the same role again. Closing the writer's chat or quitting `peer` does not end a room.
 
+To remove a member that is no longer needed, the writer runs `peer kick ROOM ROLE --as writer`, or you press `d` in `peer`. Everyone gets a notice from `peer`. The member can no longer send or wait, and `peer` stops the agent that it started: TERM to its process group, then KILL after 3 seconds. Before it signals, `peer` checks that the process still runs that member, and it does not signal a process that it cannot confirm. This check is a safeguard, not a guarantee. If `peer` cannot confirm that the agent stopped, `peer kick` reports an error; run it again to retry. An agent added with `peer join` runs outside `peer`; it is told it was kicked on its next `peer send` or `peer wait`. A worker's edits and worktree stay. The role is not reused in that room; invite another role, such as `reader-2`.
+
 `peer` does not type into idle chats. Each agent must call `wait` when it needs a reply. Several rooms can be active in one checkout at the same time.
 
 ### Workers
@@ -138,6 +140,7 @@ Run `peer` with no arguments. The left pane lists all rooms from all checkouts, 
 | x x | End the selected active room (room list focused); the first x asks for confirmation in the footer |
 | i | Write a message to the selected active room; Tab picks all or one participant, Enter sends, Esc cancels |
 | a | Ask the writer of the selected active room to add a member; Tab switches the agent, Enter moves on to the role description and then sends, Esc cancels |
+| d | Kick a member of the selected active room; Tab switches the member, Enter asks for confirmation, y kicks, Esc cancels |
 | ? | Show all keys |
 | q | Quit |
 
@@ -150,6 +153,7 @@ Run these commands inside the shared Git checkout.
 | `peer start ROOM [--agent NAME]` | Start a room with you as the writer and print it as JSON |
 | `peer invite ROOM ROLE --as writer --agent codex\|claude\|pi [--worker [--worktree]] [--model MODEL] [--brief TEXT]` | Add a member or a worker and start its agent |
 | `peer join ROOM ROLE [--agent NAME]` | Join a room as a member |
+| `peer kick ROOM ROLE --as writer` | Remove a member from the room and stop its agent if `peer` started it; run it again to retry the stop |
 | `peer send ROOM --as ROLE [--to ROLE]` | Send a message from stdin to all participants or to one |
 | `peer wait ROOM --as ROLE [--timeout DURATION]` | Wait for one message, up to 90 seconds by default; `0` waits until one comes or the room ends |
 | `peer end ROOM --as writer` | End the room |
