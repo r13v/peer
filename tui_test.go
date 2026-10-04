@@ -36,10 +36,10 @@ func loaded(t *testing.T, local *store) *model {
 func TestTUIShowsTranscriptAndReaderLog(t *testing.T) {
 	repo := testRepo(t)
 	v := startRoom(t, repo, "view")
-	if _, err := invoke(repo, "proposal with `peer log`", "send", v.ID, "--as", "writer"); err != nil {
+	if _, err := invoke(repo, "proposal with `peer log`", "send", v.ID, "--as", "main"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := invoke(repo, "", "end", v.ID, "--as", "writer"); err != nil {
+	if _, err := invoke(repo, "", "end", v.ID, "--as", "main"); err != nil {
 		t.Fatal(err)
 	}
 	s, err := openStore(repo)
@@ -53,7 +53,7 @@ func TestTUIShowsTranscriptAndReaderLog(t *testing.T) {
 	t.Cleanup(tui.zones.Close)
 	tm := teatest.NewTestModel(t, tui, teatest.WithInitialTermSize(120, 40))
 	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
-		return bytes.Contains(b, []byte("proposal")) && bytes.Contains(b, []byte("codex thinking")) && bytes.Contains(b, []byte("2 messages (writer 1, reader 0, peer 1)"))
+		return bytes.Contains(b, []byte("proposal")) && bytes.Contains(b, []byte("codex thinking")) && bytes.Contains(b, []byte("2 messages (main 1, reader 0, peer 1)"))
 	}, teatest.WithDuration(5*time.Second))
 	tm.Type("l/proposal")
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
@@ -62,7 +62,7 @@ func TestTUIShowsTranscriptAndReaderLog(t *testing.T) {
 	if m.showLog || strings.Contains(m.render(), "reader log") {
 		t.Fatal("l did not hide the reader log")
 	}
-	if chat := ansi.Strip(strings.Join(m.chat.lines, "\n")); !strings.Contains(chat, "writer (claude) → all") || !strings.Contains(chat, "peer → writer\n") {
+	if chat := ansi.Strip(strings.Join(m.chat.lines, "\n")); !strings.Contains(chat, "main (claude) → all") || !strings.Contains(chat, "peer → main\n") {
 		t.Fatalf("headers do not name the sender's agent only:\n%s", chat)
 	}
 	if m.chat.query != "proposal" || len(m.chat.matches) != 1 || m.chat.cur != 0 {
@@ -74,7 +74,7 @@ func TestPollDropsReadsOfAnotherRoom(t *testing.T) {
 	repo := testRepo(t)
 	a := startRoom(t, repo, "a")
 	startRoom(t, repo, "b")
-	if _, err := invoke(repo, "only in a", "send", a.ID, "--as", "writer"); err != nil {
+	if _, err := invoke(repo, "only in a", "send", a.ID, "--as", "main"); err != nil {
 		t.Fatal(err)
 	}
 	s, err := openStore(repo)
@@ -242,7 +242,7 @@ func TestRoomListKeepsSelectionVisible(t *testing.T) {
 	repo := testRepo(t)
 	for range 8 {
 		v := startRoom(t, repo, "r")
-		if _, err := invoke(repo, "", "end", v.ID, "--as", "writer"); err != nil {
+		if _, err := invoke(repo, "", "end", v.ID, "--as", "main"); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -292,7 +292,7 @@ func TestNotifyWhenWatchedRoomEnds(t *testing.T) {
 	notify = func(_, text string) { got = append(got, text) }
 	t.Cleanup(func() { notify = old })
 	m := loaded(t, s)
-	if _, err := invoke(repo, "", "end", v.ID, "--as", "writer"); err != nil {
+	if _, err := invoke(repo, "", "end", v.ID, "--as", "main"); err != nil {
 		t.Fatal(err)
 	}
 	_, cmd := m.Update(m.poll()())
@@ -331,10 +331,10 @@ func TestEndedRoomStaysSelected(t *testing.T) {
 	if m.room.e.v.ID != "watched" {
 		t.Fatalf("newest room not selected: %s", m.room.e.v.ID)
 	}
-	if _, err := invoke(repo, "last words", "send", v.ID, "--as", "writer"); err != nil {
+	if _, err := invoke(repo, "last words", "send", v.ID, "--as", "main"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := invoke(repo, "", "end", v.ID, "--as", "writer"); err != nil {
+	if _, err := invoke(repo, "", "end", v.ID, "--as", "main"); err != nil {
 		t.Fatal(err)
 	}
 	m.lastRooms = time.Time{}
@@ -345,7 +345,7 @@ func TestEndedRoomStaysSelected(t *testing.T) {
 		t.Fatalf("the ended room did not move below the active one, selected: %+v sel %d", m.room, m.sel)
 	}
 	list := ansi.Strip(m.roomList())
-	if !strings.Contains(list, "Active ─") || strings.Contains(list, "writer") || strings.Contains(list, "reader") || !strings.Contains(list, "Today") || !strings.Contains(list, "2 msgs") {
+	if !strings.Contains(list, "Active ─") || strings.Contains(list, "main") || strings.Contains(list, "reader") || !strings.Contains(list, "Today") || !strings.Contains(list, "2 msgs") {
 		t.Fatalf("list lacks its sections or count:\n%s", list)
 	}
 }
@@ -355,8 +355,8 @@ func TestNarrowRoomListKeepsCountAndDuration(t *testing.T) {
 	t.Cleanup(m.zones.Close)
 	m.Update(tea.WindowSizeMsg{Width: 80, Height: 24}) // the narrowest list
 	now := time.Now()
-	old := session{ID: "long-running", Repo: "/src/peer-chat", Members: []member{{Role: writer, Agent: "claude"}, {Role: "reader", Agent: "codex"}}, StartedAt: now.Add(-(24*time.Hour + 3*time.Minute)).UTC().Format(time.RFC3339Nano)}
-	done := session{ID: "done", Repo: "/src/peer-chat", Members: []member{{Role: writer, Agent: "claude"}, {Role: "reader", Agent: "codex"}}, StartedAt: now.Add(-time.Minute).UTC().Format(time.RFC3339Nano), EndedAt: now.UTC().Format(time.RFC3339Nano)}
+	old := session{ID: "long-running", Repo: "/src/peer-chat", Members: []member{{Role: mainRole, Agent: "claude"}, {Role: "reader", Agent: "codex"}}, StartedAt: now.Add(-(24*time.Hour + 3*time.Minute)).UTC().Format(time.RFC3339Nano)}
+	done := session{ID: "done", Repo: "/src/peer-chat", Members: []member{{Role: mainRole, Agent: "claude"}, {Role: "reader", Agent: "codex"}}, StartedAt: now.Add(-time.Minute).UTC().Format(time.RFC3339Nano), EndedAt: now.UTC().Format(time.RFC3339Nano)}
 	m.rooms = []entry{{s: &store{}, v: old, count: 123}, {s: &store{}, v: done, count: 8}}
 	m.sel = -1
 	list := ansi.Strip(m.roomList())
@@ -399,7 +399,7 @@ func TestFileReferencesBecomeLinks(t *testing.T) {
 		t.Fatal(err)
 	}
 	v := startRoom(t, repo, "links")
-	if _, err := invoke(repo, "see main.go:1", "send", v.ID, "--as", "writer"); err != nil {
+	if _, err := invoke(repo, "see main.go:1", "send", v.ID, "--as", "main"); err != nil {
 		t.Fatal(err)
 	}
 	s, err := openStore(repo)
@@ -435,14 +435,14 @@ func TestComposeSendsToChosenMember(t *testing.T) {
 		t.Fatalf("composer shows %q", ansi.Strip(m.statusLine()))
 	}
 	m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
-	if !strings.Contains(ansi.Strip(m.statusLine()), "to writer ›") {
+	if !strings.Contains(ansi.Strip(m.statusLine()), "to main ›") {
 		t.Fatalf("Tab did not pick the first member: %q", ansi.Strip(m.statusLine()))
 	}
 	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	m.Update(cmd())
-	msg, err := s.nextMessage(v.ID, writer)
-	if err != nil || msg == nil || msg.Text != "q jx hi" || msg.From != human || msg.To != writer {
-		t.Fatalf("writer got %+v, %v", msg, err)
+	msg, err := s.nextMessage(v.ID, mainRole)
+	if err != nil || msg == nil || msg.Text != "q jx hi" || msg.From != human || msg.To != mainRole {
+		t.Fatalf("main got %+v, %v", msg, err)
 	}
 	if msg, _ := s.nextMessage(v.ID, "reader"); msg != nil {
 		t.Fatalf("reader got %+v", msg)
@@ -462,7 +462,7 @@ func TestComposeKeepsDraftWhenSendFails(t *testing.T) {
 	m := loaded(t, s)
 	m.Update(press('i'))
 	m.Update(tea.PasteMsg{Content: "draft"})
-	if err := s.end(v.ID, writer, io.Discard); err != nil {
+	if err := s.end(v.ID, mainRole, io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
@@ -495,7 +495,7 @@ func TestComposeWaitsForSendAndKeepsItsRoom(t *testing.T) {
 		t.Fatalf("draft %q, sending %v after the send", m.compose.Value(), m.sending)
 	}
 	for _, id := range []string{"first", "second"} {
-		msg, err := s.nextMessage(id, writer)
+		msg, err := s.nextMessage(id, mainRole)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -510,7 +510,7 @@ func TestRoomStatusShowsExitedMember(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "cursor-reader"), []byte("0\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	v := session{StartedAt: time.Now().UTC().Format(time.RFC3339Nano), Members: []member{{Role: writer}, {Role: "reader", Exited: true}}}
+	v := session{StartedAt: time.Now().UTC().Format(time.RFC3339Nano), Members: []member{{Role: mainRole}, {Role: "reader", Exited: true}}}
 	if got := roomStatus(v, dir); !strings.HasSuffix(got, " · reader exited") {
 		t.Fatalf("status %q hides the exited member", got)
 	}
@@ -575,7 +575,7 @@ func TestLogSwitchesMembersAndShowsBlocks(t *testing.T) {
 	}
 }
 
-func TestAddAsksWriterToInvite(t *testing.T) {
+func TestAddAsksMainToInvite(t *testing.T) {
 	repo := testRepo(t)
 	startRoom(t, repo, "first")
 	startRoom(t, repo, "second")
@@ -609,19 +609,19 @@ func TestAddAsksWriterToInvite(t *testing.T) {
 	m.Update(m.poll()())
 	_, send := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	m.Update(send())
-	if m.addInput.Value() != "" || m.compose.Value() != "message draft" || !strings.Contains(m.statusLine(), "asked the writer to add codex") {
+	if m.addInput.Value() != "" || m.compose.Value() != "message draft" || !strings.Contains(m.statusLine(), "asked main to add codex") {
 		t.Fatalf("description %q, message draft %q, status %q", m.addInput.Value(), m.compose.Value(), ansi.Strip(m.statusLine()))
 	}
-	msg, err := s.nextMessage(target, writer)
-	if err != nil || msg == nil || msg.From != human || msg.To != writer ||
-		!strings.Contains(msg.Text, "\n\nq a security reviewer\n\n") || !strings.Contains(msg.Text, "peer invite "+target+" ROLE --as writer --agent codex") {
-		t.Fatalf("writer got %+v, %v", msg, err)
+	msg, err := s.nextMessage(target, mainRole)
+	if err != nil || msg == nil || msg.From != human || msg.To != mainRole ||
+		!strings.Contains(msg.Text, "\n\nq a security reviewer\n\n") || !strings.Contains(msg.Text, "peer invite "+target+" ROLE --as main --agent codex") {
+		t.Fatalf("main got %+v, %v", msg, err)
 	}
 	other := "first"
 	if target == other {
 		other = "second"
 	}
-	if msg, _ := s.nextMessage(other, writer); msg != nil {
+	if msg, _ := s.nextMessage(other, mainRole); msg != nil {
 		t.Fatalf("the other room got %+v", msg)
 	}
 }
@@ -645,7 +645,7 @@ func TestAddKeepsDescriptionWhenRoomEnds(t *testing.T) {
 	if m.addInput.Value() != "tech writer" || m.addInput.Position() != len("tech wr") {
 		t.Fatalf("arrows did not move the cursor: %q at %d", m.addInput.Value(), m.addInput.Position())
 	}
-	if err := s.end(v.ID, writer, io.Discard); err != nil {
+	if err := s.end(v.ID, mainRole, io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	_, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})

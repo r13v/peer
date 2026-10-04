@@ -27,13 +27,13 @@ var flowInstructions []byte
 //go:embed instructions/member.md
 var memberInstructions []byte
 
-//go:embed instructions/writer.md
-var writerInstructions []byte
+//go:embed instructions/main.md
+var mainInstructions []byte
 
 //go:embed instructions/worker.md
 var workerInstructions []byte
 
-const usage = "usage: peer, peer --version, peer update, peer skills flow|writer|member|worker, peer start NAME, peer join|invite|kick ID ROLE, peer send|wait|end ID --as ROLE, peer wait ID --as ROLE --timeout DURATION, peer status [ID], peer history, or peer log ID"
+const usage = "usage: peer, peer --version, peer update, peer skills flow|main|member|worker, peer start NAME, peer join|invite|kick ID ROLE, peer send|wait|end ID --as ROLE, peer wait ID --as ROLE --timeout DURATION, peer status [ID], peer history, or peer log ID"
 
 // version is set at release build time.
 var version = "dev"
@@ -74,9 +74,9 @@ func run(args []string, in io.Reader, out io.Writer, cwd string) error {
 		return stamp(in, out)
 	}
 	if args[0] == "skills" {
-		docs := map[string][]byte{"flow": flowInstructions, "writer": writerInstructions, "member": memberInstructions, "worker": workerInstructions}
+		docs := map[string][]byte{"flow": flowInstructions, "main": mainInstructions, "member": memberInstructions, "worker": workerInstructions}
 		if len(args) != 2 || docs[args[1]] == nil {
-			return errors.New("usage: peer skills flow|writer|member|worker")
+			return errors.New("usage: peer skills flow|main|member|worker")
 		}
 		_, err := out.Write(docs[args[1]])
 		return err
@@ -147,7 +147,7 @@ func run(args []string, in io.Reader, out io.Writer, cwd string) error {
 		}
 		return s.join(id, member{Role: role, Agent: *agent}, out)
 	case "invite":
-		if err := needRole("invite ID ROLE --as writer --agent codex|claude|pi [--worker [--worktree]] [--model MODEL] [--brief TEXT]"); err != nil {
+		if err := needRole("invite ID ROLE --as main --agent codex|claude|pi [--worker [--worktree]] [--model MODEL] [--brief TEXT]"); err != nil {
 			return err
 		}
 		if !slices.Contains(inviteAgents, *agent) {
@@ -158,13 +158,13 @@ func run(args []string, in io.Reader, out io.Writer, cwd string) error {
 		}
 		return s.invite(id, *actor, member{Role: role, Agent: *agent, Worker: *worker, Model: *model}, *brief, *worktree, out)
 	case "kick":
-		if err := needRole("kick ID ROLE --as writer"); err != nil {
+		if err := needRole("kick ID ROLE --as main"); err != nil {
 			return err
 		}
-		if *actor != writer {
-			return errors.New("only the writer can kick; run peer kick ID ROLE --as writer")
+		if *actor != mainRole {
+			return errors.New("only main can kick; run peer kick ID ROLE --as main")
 		}
-		note, err := s.kick(id, role, writer)
+		note, err := s.kick(id, role, mainRole)
 		if err != nil {
 			return err
 		}
@@ -267,7 +267,7 @@ func installDir(executable string) (string, error) {
 const (
 	ansiReset   = "\x1b[0m"
 	ansiDim     = "\x1b[2m"
-	ansiWriter  = "\x1b[1;36m"
+	ansiMain    = "\x1b[1;36m"
 	ansiReader  = "\x1b[1;35m"
 	ansiHuman   = "\x1b[1;33m"
 	ansiLinkEnd = "\x1b]8;;\x1b\\"
@@ -343,8 +343,8 @@ func (p *printer) author(v session, name string, withAgent bool) string {
 		return p.paint(ansiHuman, name)
 	case system:
 		return p.paint(ansiDim, name)
-	case writer:
-		code = ansiWriter
+	case mainRole:
+		code = ansiMain
 	}
 	out := p.paint(code, name)
 	if m := v.member(name); withAgent && m != nil && m.Agent != "" {
