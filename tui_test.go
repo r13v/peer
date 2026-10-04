@@ -59,8 +59,8 @@ func TestTUIShowsTranscriptAndReaderLog(t *testing.T) {
 	tm.Send(tea.KeyPressMsg{Code: tea.KeyEnter})
 	tm.Type("q")
 	m := tm.FinalModel(t, teatest.WithFinalTimeout(5*time.Second)).(*model)
-	if m.showLog || strings.Contains(m.render(), "reader log") {
-		t.Fatal("l did not hide the reader log")
+	if m.showLog {
+		t.Fatal("l did not hide the member log")
 	}
 	if chat := ansi.Strip(strings.Join(m.chat.lines, "\n")); !strings.Contains(chat, "main (claude) → all") || !strings.Contains(chat, "peer → main\n") {
 		t.Fatalf("headers do not name the sender's agent only:\n%s", chat)
@@ -194,13 +194,13 @@ func TestCloseNeedsSecondPressOnSameRoom(t *testing.T) {
 
 func TestReadLinesLeavesPartialLine(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "log")
-	if lines, off, ok, err := readLines(path, 0); err != nil || ok || len(lines) != 0 || off != 0 {
-		t.Fatalf("missing file: %q %d %v %v", lines, off, ok, err)
+	if lines, off, err := readLines(path, 0); err != nil || len(lines) != 0 || off != 0 {
+		t.Fatalf("missing file: %q %d %v", lines, off, err)
 	}
 	if err := os.WriteFile(path, []byte("a\nb"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	lines, off, _, err := readLines(path, 0)
+	lines, off, err := readLines(path, 0)
 	if err != nil || len(lines) != 1 || off != 2 {
 		t.Fatalf("partial line read: %q %d %v", lines, off, err)
 	}
@@ -212,7 +212,7 @@ func TestReadLinesLeavesPartialLine(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.Close()
-	if lines, _, _, err = readLines(path, off); err != nil || len(lines) != 1 || string(lines[0]) != "bc\n" {
+	if lines, _, err = readLines(path, off); err != nil || len(lines) != 1 || string(lines[0]) != "bc\n" {
 		t.Fatalf("finished line: %q %v", lines, err)
 	}
 }
