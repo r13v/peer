@@ -33,14 +33,14 @@ var mainInstructions []byte
 //go:embed instructions/worker.md
 var workerInstructions []byte
 
-const usage = "usage: peer, peer --version, peer update, peer skills flow|main|member|worker, peer start NAME, peer join|invite|kick ID ROLE, peer send|wait|end ID --as ROLE, peer wait ID --as ROLE --timeout DURATION, peer status [ID], peer history, or peer log ID"
+const usage = "usage: peer, peer --version, peer update, peer skills flow|main|member|worker, peer start NAME, peer join|invite|kick ID ROLE, peer send|wait|end ID --as ROLE, peer send ID --as ROLE --text TEXT, peer wait ID --as ROLE --timeout DURATION, peer status [ID], peer history, or peer log ID"
 
 // version is set at release build time.
 var version = "dev"
 
-// waitTimeout is wait's default bound, below Claude Code's two-minute Bash
-// limit; it is replaced in tests.
-var waitTimeout = 90 * time.Second
+// waitTimeout is wait's timeout without --timeout; tests replace it so
+// that wait does not block.
+var waitTimeout = forever
 
 func main() {
 	cwd, err := os.Getwd()
@@ -94,7 +94,20 @@ func run(args []string, in io.Reader, out io.Writer, cwd string) error {
 	worker := fs.Bool("worker", false, "let the invited member edit files")
 	worktree := fs.Bool("worktree", false, "give the invited worker its own worktree")
 	model := fs.String("model", "", "model for the invited member's CLI")
-	timeout := fs.Duration("timeout", waitTimeout, "how long wait waits; 0 waits for a message")
+	var text *string // send reads stdin unless --text is given
+	fs.Func("text", "message text for send instead of stdin", func(v string) error {
+		text = &v
+		return nil
+	})
+	timeout := waitTimeout
+	fs.Func("timeout", "how long wait waits; 0 does not wait", func(v string) error {
+		d, err := time.ParseDuration(v)
+		if err != nil || d < 0 {
+			return errors.New("give a duration with a unit, such as 30s, 5m or 100ms; 0 does not wait, and without --timeout wait waits until a message comes")
+		}
+		timeout = d
+		return nil
+	})
 	// The room name or ID and, for join and invite, the role come first,
 	// as in peer join ID ROLE; Go's flag parsing would stop at them, so
 	// they are taken off before the flags.
@@ -184,15 +197,19 @@ func run(args []string, in io.Reader, out io.Writer, cwd string) error {
 				return err
 			}
 		}
-		body, err := io.ReadAll(io.LimitReader(in, 64*1024+1))
+		if text == nil {
+			b, err := io.ReadAll(io.LimitReader(in, 64*1024+1))
+			if err != nil {
+				return err
+			}
+			body := string(b)
+			text = &body
+		}
+		msg, err := messageText(*text)
 		if err != nil {
 			return err
 		}
-		text, err := messageText(string(body))
-		if err != nil {
-			return err
-		}
-		return s.send(id, *actor, *to, text, out)
+		return s.send(id, *actor, *to, msg, out)
 	case "wait":
 		if err := needID("wait"); err != nil {
 			return err
@@ -200,10 +217,7 @@ func run(args []string, in io.Reader, out io.Writer, cwd string) error {
 		if err := checkName(*actor); err != nil {
 			return err
 		}
-		if *timeout < 0 {
-			return errors.New("usage: peer wait ID --as ROLE [--timeout DURATION]; the timeout cannot be negative")
-		}
-		return s.wait(id, *actor, *timeout, out)
+		return s.wait(id, *actor, timeout, out)
 	case "end":
 		if err := needID("end"); err != nil {
 			return err

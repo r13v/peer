@@ -59,6 +59,9 @@ type member struct {
 	KickedBy string `json:"kicked_by,omitempty"`
 	// PID leads the process group of a launched member's wrapper.
 	PID int `json:"pid,omitempty"`
+	// Unread counts the messages that wait for the member; status sets
+	// it, and the session file never holds it.
+	Unread int `json:"unread,omitempty"`
 }
 
 type message struct {
@@ -125,7 +128,7 @@ func messageText(body string) (string, error) {
 	}
 	text := strings.TrimSpace(body)
 	if text == "" {
-		return "", errors.New("message is empty; pipe its text to stdin")
+		return "", errors.New("message is empty; pipe its text to stdin or pass --text")
 	}
 	return text, nil
 }
@@ -477,6 +480,9 @@ func (s *store) status(id string, out io.Writer) error {
 		if err != nil {
 			return err
 		}
+		if err := s.countUnread(&v); err != nil {
+			return err
+		}
 		return json.NewEncoder(out).Encode(v)
 	}
 	sessions, err := s.sessions()
@@ -485,10 +491,31 @@ func (s *store) status(id string, out io.Writer) error {
 	}
 	for _, v := range sessions {
 		if v.EndedAt == "" {
+			if err := s.countUnread(&v); err != nil {
+				return err
+			}
 			if err := json.NewEncoder(out).Encode(v); err != nil {
 				return err
 			}
 		}
+	}
+	return nil
+}
+
+// countUnread sets Unread for v's members that can still read, including
+// one that exited, whose role can be invited again; it reads without the
+// store lock, so a count can be a moment old.
+func (s *store) countUnread(v *session) error {
+	for i := range v.Members {
+		m := &v.Members[i]
+		if m.Kicked {
+			continue
+		}
+		n, err := s.unread(v.ID, m.Role)
+		if err != nil {
+			return err
+		}
+		m.Unread = n
 	}
 	return nil
 }
@@ -517,7 +544,17 @@ func (s *store) send(sid, from, to, text string, out io.Writer) error {
 		if err != nil {
 			return err
 		}
-		return json.NewEncoder(out).Encode(m)
+		// The sender has its text, so send prints only how to find the
+		// message and how many messages wait for the sender.
+		unread, err := s.unread(v.ID, from)
+		if err != nil {
+			return err
+		}
+		return json.NewEncoder(out).Encode(struct {
+			ID     string `json:"id"`
+			At     string `json:"at"`
+			Unread int    `json:"unread"`
+		}{m.ID, m.At, unread})
 	})
 }
 
@@ -572,108 +609,207 @@ func (s *store) appendMessage(v session, from, to, text string) (message, error)
 	return m, closeErr
 }
 
-func (s *store) nextMessage(sid, as string) (*message, error) {
-	var found *message
-	err := s.deliverNext(sid, as, func(m message) error {
-		found = &m
-		return nil
-	})
-	return found, err
+// A batch holds at most batchCount messages and, unless its one message is
+// larger, about batchBytes of their JSON; the rest waits for the next wait.
+const (
+	batchCount = 16
+	batchBytes = 32 * 1024
+)
+
+// forever is the wait timeout that waits until a message comes, the room
+// ends or the participant is kicked.
+const forever time.Duration = -1
+
+// batch is what wait prints. Statuses are messages, timeout, ended and
+// kicked; ended comes only with the last messages of the room.
+type batch struct {
+	Status   string    `json:"status"`
+	Messages []message `json:"messages"`
+	// HasMore says that more messages wait for the next wait.
+	HasMore bool `json:"has_more,omitempty"`
+	// Oversized marks a batch of one message larger than batchBytes.
+	Oversized bool `json:"oversized,omitempty"`
+	// Reason says why an ended room ended other than by its main's end.
+	Reason string `json:"reason,omitempty"`
 }
 
-// deliverNext passes as's next message to deliver and only then moves
-// as's cursor past it, so a wait killed while printing leaves the message
-// for the next wait; a repeat is better than a loss. deliver runs under the
-// checkout's lock, so a stalled stdout holds up every room here; give each
-// role its own delivery lock if that ever matters.
-func (s *store) deliverNext(sid, as string, deliver func(message) error) error {
-	return s.locked(func() error {
-		var found *message
+func (b batch) MarshalJSON() ([]byte, error) {
+	if b.Status == "kicked" {
+		return []byte(`{"status":"kicked"}`), nil
+	}
+	type plain batch
+	if b.Messages == nil {
+		b.Messages = []message{}
+	}
+	return json.Marshal(plain(b))
+}
+
+// isFor reports whether m goes to role.
+func (m message) isFor(role string) bool {
+	return m.From != role && (m.To == role || m.To == everyone)
+}
+
+func (s *store) cursorPath(id, role string) string {
+	return filepath.Join(s.dir, "sessions", id, "cursor-"+role)
+}
+
+// cursor is the transcript offset up to which role has read room id.
+func (s *store) cursor(id, role string) (int64, error) {
+	b, err := os.ReadFile(s.cursorPath(id, role))
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	return strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64)
+}
+
+// scan calls fn with each transcript message of room id after offset and
+// the offset just past it, until fn returns false.
+func (s *store) scan(id string, offset int64, fn func(m message, next int64) bool) error {
+	f, err := os.Open(filepath.Join(s.dir, "sessions", id, "messages.jsonl"))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if _, err := f.Seek(offset, io.SeekStart); err != nil {
+		return err
+	}
+	r := bufio.NewReader(f)
+	for {
+		line, err := r.ReadBytes('\n')
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		offset += int64(len(line))
+		var m message
+		if err := json.Unmarshal(line, &m); err != nil {
+			return err
+		}
+		if !fn(m, offset) {
+			return nil
+		}
+	}
+}
+
+// unread counts the messages for role in room id that it has not read.
+func (s *store) unread(id, role string) (int, error) {
+	offset, err := s.cursor(id, role)
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	err = s.scan(id, offset, func(m message, _ int64) bool {
+		if m.isFor(role) {
+			n++
+		}
+		return true
+	})
+	return n, err
+}
+
+// deliverBatch passes as's next batch to write and only then moves as's
+// cursor past it, so a wait killed while printing leaves the batch for the
+// next wait; a repeat is better than a loss. It reports false, and writes
+// nothing, while the room is active and nothing is unread. write runs
+// under the checkout's lock, so a stalled stdout holds up every room here;
+// give each role its own delivery lock if that ever matters.
+func (s *store) deliverBatch(sid, as string, write func(batch) error) (bool, error) {
+	delivered := false
+	err := s.locked(func() error {
 		v, err := s.load(sid)
 		if err != nil {
 			return err
 		}
+		// A kicked member gets no backlog, not even the room's end.
+		if m := v.member(as); m != nil && m.Kicked {
+			delivered = true
+			return write(batch{Status: "kicked"})
+		}
 		if err := v.check(as); err != nil {
 			return err
 		}
-		dir := filepath.Join(s.dir, "sessions", v.ID)
-		cursorPath := filepath.Join(dir, "cursor-"+as)
-		var offset int64
-		if b, err := os.ReadFile(cursorPath); err == nil {
-			offset, err = strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64)
-			if err != nil {
-				return err
-			}
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
-		f, err := os.Open(filepath.Join(dir, "messages.jsonl"))
-		if errors.Is(err, os.ErrNotExist) {
-			if v.EndedAt != "" {
-				return endedError(v)
-			}
-			// Record the poll so log can show this participant as waiting.
-			return writeAtomic(cursorPath, []byte("0\n"))
-		}
+		offset, err := s.cursor(v.ID, as)
 		if err != nil {
 			return err
 		}
-		defer f.Close()
-		if _, err := f.Seek(offset, io.SeekStart); err != nil {
+		var b batch
+		size, full := 0, false
+		err = s.scan(v.ID, offset, func(m message, next int64) bool {
+			if !m.isFor(as) {
+				offset = next
+				return true
+			}
+			j, _ := json.Marshal(m)
+			if full || len(b.Messages) > 0 && size+len(j) > batchBytes {
+				b.HasMore = true
+				return false
+			}
+			b.Messages, size, offset = append(b.Messages, m), size+len(j), next
+			b.Oversized = len(j) > batchBytes
+			full = b.Oversized || len(b.Messages) == batchCount
+			return true
+		})
+		if err != nil {
 			return err
 		}
-		r := bufio.NewReader(f)
-		for {
-			line, err := r.ReadBytes('\n')
-			if err == io.EOF {
-				break
-			}
-			if err != nil {
+		switch {
+		case !b.HasMore && v.EndedAt != "":
+			b.Status, b.Reason = "ended", v.EndedReason
+		case len(b.Messages) > 0:
+			b.Status = "messages"
+		}
+		if b.Status != "" {
+			if err := write(b); err != nil {
 				return err
 			}
-			offset += int64(len(line))
-			var m message
-			if err := json.Unmarshal(line, &m); err != nil {
-				return err
-			}
-			if m.From != as && (m.To == as || m.To == everyone) {
-				found = &m
-				break
-			}
+			delivered = true
 		}
-		if found == nil && v.EndedAt != "" {
-			return endedError(v)
-		}
-		if found != nil {
-			if err := deliver(*found); err != nil {
-				return err
-			}
-		}
-		return writeAtomic(cursorPath, []byte(strconv.FormatInt(offset, 10)+"\n"))
+		// An empty poll still writes the cursor, so log can show this
+		// participant as waiting.
+		return writeAtomic(s.cursorPath(v.ID, as), []byte(strconv.FormatInt(offset, 10)+"\n"))
 	})
+	return delivered, err
 }
 
-// wait prints as's next message, or a timeout once timeout passes; a
-// zero timeout waits until a message comes or the session ends.
+// wait prints as's unread messages as one batch once there are any, or a
+// timeout once timeout passes: a zero timeout checks once, and forever
+// waits until a message comes, the room ends or as is kicked.
 func (s *store) wait(sid, as string, timeout time.Duration, out io.Writer) error {
+	print := func(b batch) error {
+		data, err := json.Marshal(b)
+		if err != nil {
+			return err
+		}
+		return writeFull(out, append(data, '\n'))
+	}
 	deadline := time.Now().Add(timeout)
 	for {
-		delivered := false
-		err := s.deliverNext(sid, as, func(m message) error {
-			delivered = true
-			return json.NewEncoder(out).Encode(struct {
-				Status  string  `json:"status"`
-				Message message `json:"message"`
-			}{"message", m})
-		})
+		delivered, err := s.deliverBatch(sid, as, print)
 		if err != nil || delivered {
 			return err
 		}
-		if timeout > 0 && !time.Now().Before(deadline) {
-			return json.NewEncoder(out).Encode(map[string]string{"status": "timeout"})
+		if timeout != forever && !time.Now().Before(deadline) {
+			return print(batch{Status: "timeout"})
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
+}
+
+// writeFull writes data in one Write and fails unless all of it went out.
+func writeFull(w io.Writer, data []byte) error {
+	n, err := w.Write(data)
+	if err == nil && n < len(data) {
+		err = io.ErrShortWrite
+	}
+	return err
 }
 
 func (s *store) end(sid, as string, out io.Writer) error {

@@ -147,7 +147,7 @@ type entry struct {
 func (e entry) key() string { return e.s.dir + "\x00" + e.v.ID }
 
 // picker lists every room, active ones first, beside the selected
-// room's transcript, with the headless reader's log below.
+// room's transcript, with a launched member's log below.
 func picker(in io.Reader, out io.Writer, cwd string) error {
 	fin, ok := in.(*os.File)
 	fout, ok2 := out.(*os.File)
@@ -551,7 +551,7 @@ func readRoom(r room) (*room, error) {
 	dir := filepath.Join(r.e.s.dir, "sessions", v.ID)
 	// Read the session before the transcript: send refuses after end,
 	// so an ended session has no messages beyond what is read next.
-	lines, off, _, err := readLines(filepath.Join(dir, "messages.jsonl"), r.msgOff)
+	lines, off, err := readLines(filepath.Join(dir, "messages.jsonl"), r.msgOff)
 	if err != nil {
 		return nil, err
 	}
@@ -581,7 +581,7 @@ func readRoom(r room) (*room, error) {
 		r.logs, r.logOff, r.logRole = nil, 0, logRole
 	}
 	if logRole != "" {
-		lines, off, _, err := readLines(r.e.s.logPath(v.ID, logRole), r.logOff)
+		lines, off, err := readLines(r.e.s.logPath(v.ID, logRole), r.logOff)
 		if err != nil {
 			return nil, err
 		}
@@ -606,26 +606,26 @@ func readRoom(r room) (*room, error) {
 // readLines returns path's complete lines from offset on and the offset
 // after them. A partly written last line is left for the next call, and
 // a missing file reads as empty, since both files appear later.
-func readLines(path string, offset int64) (lines [][]byte, next int64, exists bool, err error) {
+func readLines(path string, offset int64) (lines [][]byte, next int64, err error) {
 	f, err := os.Open(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return nil, offset, false, nil
+		return nil, offset, nil
 	}
 	if err != nil {
-		return nil, offset, false, err
+		return nil, offset, err
 	}
 	defer f.Close()
 	if _, err := f.Seek(offset, io.SeekStart); err != nil {
-		return nil, offset, true, err
+		return nil, offset, err
 	}
 	r := bufio.NewReader(f)
 	for {
 		line, err := r.ReadBytes('\n')
 		if err == io.EOF {
-			return lines, offset, true, nil
+			return lines, offset, nil
 		}
 		if err != nil {
-			return lines, offset, true, err
+			return lines, offset, err
 		}
 		offset += int64(len(line))
 		lines = append(lines, line)

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -34,7 +35,7 @@ func TestMain(m *testing.M) {
 	os.Unsetenv("PEER_REPO")
 	realStartMember, realStopMember = startMember, stopMember
 	startMember = func([]string, string, []string, string, string) (int, error) { return 0, nil }
-	waitTimeout = time.Nanosecond
+	waitTimeout = 0
 	os.Exit(m.Run())
 }
 
@@ -478,8 +479,9 @@ func TestMemberExit(t *testing.T) {
 		}
 	}
 	exit("tests", 1)
+	got, err := invoke(repo, "", "wait", v.ID, "--as", "main")
 	for _, want := range []string{`"text":"tests joined"`, `"text":"tests exited with status 1"`} {
-		if got, err := invoke(repo, "", "wait", v.ID, "--as", "main"); err != nil || !strings.Contains(got, want) {
+		if err != nil || !strings.Contains(got, want) {
 			t.Fatalf("main got %s, %v; want %s", got, err, want)
 		}
 	}
@@ -752,8 +754,8 @@ func TestCloseRoom(t *testing.T) {
 	if err := s.close(v.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := invoke(repo, "", "wait", v.ID, "--as", "reader"); err == nil || !strings.Contains(err.Error(), "closed in peer") {
-		t.Fatalf("reader kept waiting in a closed room: %v", err)
+	if got, err := invoke(repo, "", "wait", v.ID, "--as", "reader"); err != nil || got != `{"status":"ended","messages":[],"reason":"closed in peer"}`+"\n" {
+		t.Fatalf("reader kept waiting in a closed room: %q, %v", got, err)
 	}
 	if got, _ := invoke(repo, "", "status", v.ID); !strings.Contains(got, `"ended_reason":"closed in peer"`) {
 		t.Fatalf("status hides the reason: %q", got)
@@ -763,33 +765,41 @@ func TestCloseRoom(t *testing.T) {
 func TestWaitWithoutTimeoutWaitsForMessageOrEnd(t *testing.T) {
 	repo := testRepo(t)
 	v := startRoom(t, repo, "patient")
-	if _, err := invoke(repo, "", "wait", v.ID, "--as", "reader", "--timeout", "-1s"); err == nil {
-		t.Fatal("wait accepted a negative timeout")
+	waitTimeout = forever
+	t.Cleanup(func() { waitTimeout = 0 })
+	for _, bad := range []string{"-1s", "5"} {
+		if _, err := invoke(repo, "", "wait", v.ID, "--as", "reader", "--timeout", bad); err == nil || !strings.Contains(err.Error(), "0 does not wait") {
+			t.Fatalf("wait accepted --timeout %s: %v", bad, err)
+		}
+	}
+	if got, err := invoke(repo, "", "wait", v.ID, "--as", "reader", "--timeout", "0"); err != nil || got != `{"status":"timeout","messages":[]}`+"\n" {
+		t.Fatalf("wait --timeout 0 = %q, %v; want an empty timeout at once", got, err)
 	}
 	done := make(chan error, 1)
 	var text string
 	go func() {
 		var err error
-		text, err = invoke(repo, "", "wait", v.ID, "--as", "reader", "--timeout", "0")
+		text, err = invoke(repo, "", "wait", v.ID, "--as", "reader")
 		done <- err
 	}()
 	time.Sleep(300 * time.Millisecond)
 	if _, err := invoke(repo, "ready", "send", v.ID, "--as", "main"); err != nil {
 		t.Fatal(err)
 	}
-	if err := <-done; err != nil || !strings.Contains(text, `"text":"ready"`) {
-		t.Fatalf("wait --timeout 0 = %q, %v; want the message", text, err)
+	if err := <-done; err != nil || !strings.Contains(text, `"status":"messages"`) || !strings.Contains(text, `"text":"ready"`) {
+		t.Fatalf("wait = %q, %v; want the message", text, err)
 	}
 	go func() {
-		_, err := invoke(repo, "", "wait", v.ID, "--as", "reader", "--timeout", "0")
+		var err error
+		text, err = invoke(repo, "", "wait", v.ID, "--as", "reader")
 		done <- err
 	}()
 	time.Sleep(300 * time.Millisecond)
 	if _, err := invoke(repo, "", "end", v.ID, "--as", "main"); err != nil {
 		t.Fatal(err)
 	}
-	if err := <-done; err == nil || !strings.Contains(err.Error(), "ended") {
-		t.Fatalf("wait --timeout 0 in an ended room: %v", err)
+	if err := <-done; err != nil || text != `{"status":"ended","messages":[]}`+"\n" {
+		t.Fatalf("wait in an ended room = %q, %v", text, err)
 	}
 }
 
@@ -800,15 +810,19 @@ func TestFailedDeliveryKeepsMessage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.post(v.ID, "reader", "once"); err != nil {
-		t.Fatal(err)
+	for _, text := range []string{"first", "second"} {
+		if err := s.post(v.ID, "reader", text); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if err := s.wait(v.ID, "reader", time.Nanosecond, failingWriter{}); err == nil {
-		t.Fatal("wait hid the write error")
+	for _, w := range []io.Writer{failingWriter{}, shortWriter{}} {
+		if err := s.wait(v.ID, "reader", 0, w); err == nil {
+			t.Fatalf("wait hid the failed write to %T", w)
+		}
 	}
 	var out bytes.Buffer
-	if err := s.wait(v.ID, "reader", time.Nanosecond, &out); err != nil || !strings.Contains(out.String(), `"text":"once"`) {
-		t.Fatalf("wait after a failed write = %q, %v", out.String(), err)
+	if err := s.wait(v.ID, "reader", 0, &out); err != nil || !strings.Contains(out.String(), `"text":"first"`) || !strings.Contains(out.String(), `"text":"second"`) {
+		t.Fatalf("wait after failed writes = %q, %v; want the whole batch again", out.String(), err)
 	}
 	if m, err := s.nextMessage(v.ID, "reader"); err != nil || m != nil {
 		t.Fatalf("delivered message came again: %+v, %v", m, err)
@@ -820,11 +834,17 @@ type failingWriter struct{}
 
 func (failingWriter) Write([]byte) (int, error) { return 0, errors.New("stdout closed") }
 
+// shortWriter takes half of each write and reports no error, as a pipe
+// cut short can.
+type shortWriter struct{}
+
+func (shortWriter) Write(p []byte) (int, error) { return len(p) / 2, nil }
+
 func TestWaitReceivesLaterMessage(t *testing.T) {
 	repo := testRepo(t)
 	v := startRoom(t, repo, "later")
 	waitTimeout = 2 * time.Second
-	t.Cleanup(func() { waitTimeout = time.Nanosecond })
+	t.Cleanup(func() { waitTimeout = 0 })
 	done := make(chan struct {
 		text string
 		err  error
@@ -941,14 +961,11 @@ func TestPostFromUser(t *testing.T) {
 	}
 	for as, want := range map[string][]string{mainRole: {"to all"}, "reader": {"to all", "to reader"}} {
 		var got []string
-		for {
-			m, err := s.nextMessage(v.ID, as)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if m == nil {
-				break
-			}
+		msgs, err := s.unreadMessages(v.ID, as)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, m := range msgs {
 			if m.From != human {
 				t.Fatalf("%s got a message from %q", as, m.From)
 			}
@@ -1114,7 +1131,6 @@ func TestKick(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, err := range map[string]error{
-		"reader wait":    errOf(invoke(repo, "", "wait", v.ID, "--as", "reader")),
 		"reader send":    errOf(invoke(repo, "hi", "send", v.ID, "--as", "reader")),
 		"send to reader": errOf(invoke(repo, "hi", "send", v.ID, "--as", "main", "--to", "reader")),
 		"post to reader": s.post(v.ID, "reader", "hi"),
@@ -1127,6 +1143,13 @@ func TestKick(t *testing.T) {
 	}
 	if _, err := invoke(repo, "", "join", v.ID, "reader-2"); err != nil {
 		t.Fatal(err)
+	}
+	// Kicked outranks the reader's unread kick notice and the room's end.
+	if _, err := invoke(repo, "", "end", v.ID, "--as", "main"); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := invoke(repo, "", "wait", v.ID, "--as", "reader"); err != nil || got != `{"status":"kicked"}`+"\n" {
+		t.Fatalf("kicked reader wait = %q, %v", got, err)
 	}
 }
 
@@ -1267,5 +1290,147 @@ func TestKickRetriesFailedStop(t *testing.T) {
 	}
 	if note, err := s.kick(v.ID, "reader", mainRole); err != nil || !strings.Contains(note, "process stopped") || !slices.Equal(stopped, []int{4242, 4242}) {
 		t.Fatalf("retry: %q, %v, stops %v", note, err, stopped)
+	}
+}
+
+// unreadMessages takes as's next batch, as wait does.
+func (s *store) unreadMessages(sid, as string) ([]message, error) {
+	var got []message
+	_, err := s.deliverBatch(sid, as, func(b batch) error {
+		got = b.Messages
+		return nil
+	})
+	return got, err
+}
+
+// nextMessage takes as's one unread message, or nil when there is none.
+func (s *store) nextMessage(sid, as string) (*message, error) {
+	got, err := s.unreadMessages(sid, as)
+	if err != nil || len(got) == 0 {
+		return nil, err
+	}
+	if len(got) > 1 {
+		return nil, fmt.Errorf("%d messages, want one", len(got))
+	}
+	return &got[0], nil
+}
+
+func TestWaitBatches(t *testing.T) {
+	repo := testRepo(t)
+	v := startRoom(t, repo, "batches")
+	wait := func(as string) batch {
+		t.Helper()
+		got, err := invoke(repo, "", "wait", v.ID, "--as", as, "--timeout", "0")
+		var b batch
+		if err != nil || json.Unmarshal([]byte(got), &b) != nil {
+			t.Fatalf("wait as %s: %q, %v", as, got, err)
+		}
+		if b.Status != "kicked" && !strings.Contains(got, `"messages":[`) {
+			t.Fatalf("wait as %s left out messages: %q", as, got)
+		}
+		if !b.HasMore && strings.Contains(got, "has_more") || !b.Oversized && strings.Contains(got, "oversized") {
+			t.Fatalf("wait printed a false flag: %q", got)
+		}
+		return b
+	}
+	send := func(text string, args ...string) {
+		t.Helper()
+		if _, err := invoke(repo, text, append([]string{"send", v.ID}, args...)...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A full batch followed only by a message for another role has no more.
+	if _, err := invoke(repo, "", "join", v.ID, "docs"); err != nil {
+		t.Fatal(err)
+	}
+	for i := range batchCount {
+		send(fmt.Sprint("m", i), "--as", "main")
+	}
+	send("for docs", "--as", "main", "--to", "docs")
+	if b := wait("reader"); b.Status != "messages" || len(b.Messages) != batchCount || b.HasMore || b.Messages[0].Text != "m0" {
+		t.Fatalf("full batch: %+v", b)
+	}
+	if b := wait("reader"); b.Status != "timeout" || len(b.Messages) != 0 {
+		t.Fatalf("empty wait: %+v", b)
+	}
+
+	// The limit counts JSON, where each quote doubles: these two messages
+	// fit it as text, but not as JSON.
+	half := strings.Repeat(`"`, batchBytes/4+1)
+	send(half, "--as", "main")
+	send(half, "--as", "main")
+	if b := wait("reader"); len(b.Messages) != 1 || !b.HasMore || b.Oversized {
+		t.Fatalf("byte-limited batch: %d messages, has_more %v, oversized %v", len(b.Messages), b.HasMore, b.Oversized)
+	}
+	if b := wait("reader"); len(b.Messages) != 1 || b.HasMore {
+		t.Fatalf("rest of the byte-limited batch: %d messages, has_more %v", len(b.Messages), b.HasMore)
+	}
+
+	// A message over batchBytes comes whole and alone.
+	big := strings.Repeat("x", batchBytes+1)
+	send("small", "--as", "main")
+	send(big, "--as", "main")
+	send("after", "--as", "main")
+	if b := wait("reader"); len(b.Messages) != 1 || b.Messages[0].Text != "small" || !b.HasMore || b.Oversized {
+		t.Fatalf("batch before the big message: %+v", b)
+	}
+	if b := wait("reader"); len(b.Messages) != 1 || b.Messages[0].Text != big || !b.Oversized || !b.HasMore {
+		t.Fatalf("big message batch: status %s, %d messages, oversized %v, has_more %v", b.Status, len(b.Messages), b.Oversized, b.HasMore)
+	}
+
+	// The room ends with messages unread: they come first, ended last.
+	for i := range batchCount {
+		send(fmt.Sprint("tail", i), "--as", "main")
+	}
+	if _, err := invoke(repo, "", "end", v.ID, "--as", "main"); err != nil {
+		t.Fatal(err)
+	}
+	if b := wait("reader"); b.Status != "messages" || len(b.Messages) != batchCount || !b.HasMore || b.Messages[0].Text != "after" {
+		t.Fatalf("tail batch: %+v", b)
+	}
+	if b := wait("reader"); b.Status != "ended" || len(b.Messages) != 1 || b.Messages[0].Text != fmt.Sprint("tail", batchCount-1) {
+		t.Fatalf("last batch: %+v", b)
+	}
+	if b := wait("reader"); b.Status != "ended" || len(b.Messages) != 0 {
+		t.Fatalf("wait after the end: %+v", b)
+	}
+}
+
+func TestSendTextAndUnread(t *testing.T) {
+	repo := testRepo(t)
+	v := startRoom(t, repo, "unread")
+	for _, text := range []string{"one", "two"} {
+		if _, err := invoke(repo, "", "send", v.ID, "--as", "reader", "--text", text); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := invoke(repo, "ignored stdin", "send", v.ID, "--as", "main", "--text", "reply")
+	var sent struct {
+		ID     string
+		Unread int
+		Text   string
+	}
+	if err != nil || json.Unmarshal([]byte(got), &sent) != nil || sent.ID == "" || sent.Unread != 2 || sent.Text != "" {
+		t.Fatalf("send = %q, %v; want its id and 2 unread, without the text", got, err)
+	}
+	if got, _ := invoke(repo, "", "status", v.ID); !strings.Contains(got, `"role":"main","agent":"claude","unread":2`) || !strings.Contains(got, `"role":"reader","unread":1`) {
+		t.Fatalf("status without unread counts: %s", got)
+	}
+	// An exited member's role can be invited again, so its queue still counts.
+	s, err := openStore(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(s.exitPath(v.ID, "reader"), []byte("0\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := invoke(repo, "", "status", v.ID); !strings.Contains(got, `"exited":true,"unread":1`) {
+		t.Fatalf("status hides an exited member's queue: %s", got)
+	}
+	if b, err := invoke(repo, "", "wait", v.ID, "--as", "main"); err != nil || !strings.Contains(b, `"text":"one"`) || !strings.Contains(b, `"text":"two"`) {
+		t.Fatalf("main batch: %s, %v", b, err)
+	}
+	if _, err := invoke(repo, "stdin is not read", "send", v.ID, "--as", "main", "--text", ""); err == nil || !strings.Contains(err.Error(), "--text") {
+		t.Fatalf("empty send error does not mention --text: %v", err)
 	}
 }

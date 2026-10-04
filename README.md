@@ -135,7 +135,7 @@ Add any agent yourself, for example Copilot: paste main's join prompt into that 
 
 1. **Start.** Main runs `peer start ROOM`. This creates a room for the task.
 2. **Add members.** Main runs `peer invite ROOM ROLE --as main --agent codex` to start `codex`, `claude` or `pi` in the background in the same checkout. Any other agent runs `peer join ROOM ROLE`. Main gets a notice from `peer` for each member that joins.
-3. **Discuss.** The agents send messages with `peer send` and receive them with `peer wait`. A message goes to all participants, or to one with `--to ROLE`. `wait` returns one message, or a timeout after 90 seconds. The agent then calls `wait` again. With `--timeout 0`, `wait` waits until a message comes or the room ends. When main runs on an agent that can run a background command and wake when it exits, such as Claude Code, it uses this between turns, so it reads what you send from `peer`.
+3. **Discuss.** The agents send messages with `peer send` and receive them with `peer wait`. A message goes to all participants, or to one with `--to ROLE`. `wait` blocks until a message comes, the room ends or the agent is kicked. Then it returns all the messages that came, up to 16 at a time. `--timeout 5m` limits the wait, for an agent whose shell tool stops long commands. `--timeout 0` checks once and returns immediately, for an agent that is busy. When main runs on an agent that can run a background command and wake when the command exits, such as Claude Code, main keeps a `wait` running between turns. Thus main reads what you send from `peer`.
 4. **Implement.** Main edits files, and so do the workers that it invited.
 5. **Review.** The members inspect the diff and report findings. Main fixes them and asks for another review.
 6. **End.** Main runs `peer end`. After this, nobody can send messages to the room. Start a new room for the next task.
@@ -212,15 +212,32 @@ Run `peer` with no arguments to open the TUI. Run the commands below inside the 
 | `peer invite ROOM ROLE --as main --agent codex\|claude\|pi [--worker [--worktree]] [--model MODEL] [--brief TEXT]` | Add a member or a worker and start its agent |
 | `peer join ROOM ROLE [--agent NAME]` | Join a room as a member |
 | `peer kick ROOM ROLE --as main` | Remove a member from the room and stop its agent if `peer` started it; run it again to retry the stop |
-| `peer send ROOM --as ROLE [--to ROLE]` | Send a message from stdin to all participants or to one |
-| `peer wait ROOM --as ROLE [--timeout DURATION]` | Wait for one message, up to 90 seconds by default; `0` waits until one comes or the room ends |
+| `peer send ROOM --as ROLE [--to ROLE] [--text TEXT]` | Send a message from `--text` or stdin to all participants or to one; prints its `id` and how many messages are `unread` for you |
+| `peer wait ROOM --as ROLE [--timeout DURATION]` | Wait until messages come, the room ends or you are kicked, and print them as one batch; `--timeout` bounds the wait, and `0` returns at once |
 | `peer end ROOM --as main` | End the room |
-| `peer status [ROOM]` | Show active rooms, or one room |
+| `peer status [ROOM]` | Show active rooms, or one room, with each member's `unread` count |
 | `peer history` | List all rooms in this checkout |
 | `peer log ROOM` | Print a transcript |
 | `peer skills flow\|main\|member\|worker` | Print the agent instructions |
 | `peer update` | Update an installer copy of the CLI |
 | `peer --version` | Print the version |
+
+`wait` prints one JSON object. Its `status` is one of these:
+
+- `messages`: a batch of up to 16 messages and about 32 KiB of their JSON. `"has_more":true` shows that more messages wait for the next `wait`. A message larger than 32 KiB comes alone and complete, with `"oversized":true`.
+- `timeout`: no message came in time.
+- `ended`: the room ended. The object also holds the last messages of the room.
+- `kicked`: main or the user removed the member from the room.
+
+`wait` marks each message that it prints as read. Thus, do not cut its output with `head` or filter it with `grep`.
+
+> **Upgrading from 0.1.x:**
+> - `wait --timeout 0` waited until a message came. Now it checks once and returns.
+> - `wait` without `--timeout` waited 90 seconds. Now it waits until a message comes.
+> - `wait` printed one message. Now it prints a batch.
+> - `send` printed the message. Now it prints the `id` and `at` of the message and your `unread` count.
+>
+> After you update, restart the active agent sessions, so that no agent keeps the old instructions.
 
 If the name given to `start` is already in use, `peer` adds `-2`, `-3`, and so on. Use the `id` from the JSON output in all later commands. Each role is used once in a room. For two members with the same focus, use `test-expert` and `test-expert-2`. The roles `main`, `user` and `peer` are reserved.
 
