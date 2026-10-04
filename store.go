@@ -783,7 +783,7 @@ func (s *store) deliverBatch(sid, as string, write func(batch) error) (bool, err
 // timeout once timeout passes: a zero timeout checks once, and forever
 // waits until a message comes, the room ends or as is kicked.
 func (s *store) wait(sid, as string, timeout time.Duration, out io.Writer) error {
-	print := func(b batch) error {
+	emit := func(b batch) error {
 		data, err := json.Marshal(b)
 		if err != nil {
 			return err
@@ -792,12 +792,12 @@ func (s *store) wait(sid, as string, timeout time.Duration, out io.Writer) error
 	}
 	deadline := time.Now().Add(timeout)
 	for {
-		delivered, err := s.deliverBatch(sid, as, print)
+		delivered, err := s.deliverBatch(sid, as, emit)
 		if err != nil || delivered {
 			return err
 		}
 		if timeout != forever && !time.Now().Before(deadline) {
-			return print(batch{Status: "timeout"})
+			return emit(batch{Status: "timeout"})
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
