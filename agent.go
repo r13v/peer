@@ -34,7 +34,7 @@ func memberPrompt(v session, m member, brief string) string {
 	if brief != "" {
 		prompt += " Your focus: " + brief
 	}
-	return prompt + " Nobody reads this chat: do not ask the user anything, run peer and git directly rather than through wrapper commands, and keep calling peer wait until the writer ends the session. Once peer reports that the session has ended, stop."
+	return prompt + " Nobody reads this chat: do not ask the user anything, run peer and git directly rather than through wrapper commands, and keep calling peer wait until main ends the session. Once peer reports that the session has ended, stop."
 }
 
 // inviteAgents are the agents peer invite launches.
@@ -175,7 +175,7 @@ func latestCodexModel(suffix string) string {
 }
 
 // startMember runs argv in dir with env added to its environment, in its
-// own process session, so it outlives the writer's command, and appends
+// own process session, so it outlives main's command, and appends
 // its output and exit status to logPath. The status also goes to
 // exitPath, which load turns into the member leaving. It returns the
 // wrapper's PID, which leads the member's process group; it is replaced in
@@ -314,11 +314,11 @@ func (s *store) worktree(m member) error {
 	return nil
 }
 
-// invite adds m to room id for its writer and launches m's agent
+// invite adds m to room id for its main and launches m's agent
 // headless, in its own worktree when isolated.
 func (s *store) invite(id, as string, m member, brief string, isolated bool, out io.Writer) error {
-	if as != writer {
-		return errors.New("only the writer can invite; run peer invite ID ROLE --as writer")
+	if as != mainRole {
+		return errors.New("only main can invite; run peer invite ID ROLE --as main")
 	}
 	m = withDefaults(m)
 	var v session
@@ -379,7 +379,7 @@ func (s *store) invite(id, as string, m member, brief string, isolated bool, out
 			if err := writeJSON(s.sessionPath(v.ID), cur); err != nil {
 				return err
 			}
-			_, err = s.appendMessage(cur, system, writer, m.Role+" failed to start")
+			_, err = s.appendMessage(cur, system, mainRole, m.Role+" failed to start")
 			return err
 		})
 		return fmt.Errorf("launching %s failed: %w", m.Agent, err)

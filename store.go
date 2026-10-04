@@ -26,11 +26,11 @@ type session struct {
 	ID   string `json:"id"`
 	Repo string `json:"repo"`
 	// Members lists the room's participants in joining order; the first
-	// is the writer.
+	// is main.
 	Members   []member `json:"members"`
 	StartedAt string   `json:"started_at"`
 	EndedAt   string   `json:"ended_at,omitempty"`
-	// EndedReason says why a session ended other than by its writer's end.
+	// EndedReason says why a session ended other than by its main's end.
 	EndedReason string `json:"ended_reason,omitempty"`
 }
 
@@ -52,7 +52,7 @@ type member struct {
 	Worktree string `json:"worktree,omitempty"`
 	Branch   string `json:"branch,omitempty"`
 	Base     string `json:"base,omitempty"`
-	// Kicked is set once the writer or the user has kicked the member,
+	// Kicked is set once main or the user has kicked the member,
 	// by KickedBy. Its role stays taken for the rest of the room, so a
 	// late exit status or the old member cannot act as a newcomer.
 	Kicked   bool   `json:"kicked,omitempty"`
@@ -75,8 +75,8 @@ type store struct {
 }
 
 const (
-	// writer is the role of the one participant that edits files.
-	writer = "writer"
+	// mainRole is the role of the one participant that edits files.
+	mainRole = "main"
 	// human is the author of messages sent from the peer TUI; rooms
 	// refuse it as a role.
 	human = "user"
@@ -91,7 +91,7 @@ func checkRole(role string) error {
 	if err := checkName(role); err != nil {
 		return err
 	}
-	if role == writer || role == human || role == system {
+	if role == mainRole || role == human || role == system {
 		return fmt.Errorf("role %q is reserved", role)
 	}
 	return nil
@@ -159,7 +159,7 @@ func (s session) label(role string) string {
 }
 
 // app names m's agent, with the model and effort it was launched with when
-// peer knows them, and, for a member other than the writer, whether it
+// peer knows them, and, for a member other than main, whether it
 // edits files, e.g. "codex/gpt-5/high, worker".
 func (m member) app() string {
 	parts := []string{m.Agent}
@@ -170,7 +170,7 @@ func (m member) app() string {
 	}
 	out := strings.Join(parts, "/")
 	switch {
-	case m.Role == writer:
+	case m.Role == mainRole:
 	case m.Worker:
 		out += ", worker"
 	default:
@@ -304,7 +304,7 @@ func writeJSON(path string, v any) error {
 }
 
 var (
-	// roomName is the name the writer gives a room at start.
+	// roomName is the name main gives a room at start.
 	roomName = regexp.MustCompile(`^[a-z][a-z0-9-]{0,39}$`)
 	// sessionID is a room name, with -2, -3… if the name was taken.
 	sessionID = regexp.MustCompile(`^[a-z][a-z0-9-]{0,39}(-\d+)?$`)
@@ -326,14 +326,14 @@ func (s *store) session(id string) (session, error) {
 	if err := json.Unmarshal(b, &v); err != nil {
 		return v, err
 	}
-	if len(v.Members) == 0 || v.Members[0].Role != writer {
+	if len(v.Members) == 0 || v.Members[0].Role != mainRole {
 		return v, fmt.Errorf("session %s was made by an older peer", id)
 	}
 	return v, nil
 }
 
 // load reads session id under the store lock and marks members whose
-// launched process has exited. The writer hears of each, so it does not
+// launched process has exited. Main hears of each, so it does not
 // wait on a member that is gone and can invite the role again.
 func (s *store) load(id string) (session, error) {
 	v, err := s.session(id)
@@ -342,7 +342,7 @@ func (s *store) load(id string) (session, error) {
 	}
 	for i := range v.Members {
 		m := &v.Members[i]
-		if m.Role == writer || m.Exited || m.Kicked {
+		if m.Role == mainRole || m.Exited || m.Kicked {
 			continue
 		}
 		b, err := os.ReadFile(s.exitPath(id, m.Role))
@@ -360,7 +360,7 @@ func (s *store) load(id string) (session, error) {
 		if err := writeJSON(s.sessionPath(id), v); err != nil {
 			return v, err
 		}
-		if _, err := s.appendMessage(v, system, writer, fmt.Sprintf("%s exited with status %d", m.Role, status)); err != nil {
+		if _, err := s.appendMessage(v, system, mainRole, fmt.Sprintf("%s exited with status %d", m.Role, status)); err != nil {
 			return v, err
 		}
 	}
@@ -415,7 +415,7 @@ func (s *store) start(name, agent string, out io.Writer) (session, error) {
 			}
 			id = fmt.Sprintf("%s-%d", name, n)
 		}
-		v = session{ID: id, Repo: s.repo, Members: []member{{Role: writer, Agent: agent}}, StartedAt: time.Now().UTC().Format(time.RFC3339Nano)}
+		v = session{ID: id, Repo: s.repo, Members: []member{{Role: mainRole, Agent: agent}}, StartedAt: time.Now().UTC().Format(time.RFC3339Nano)}
 		if err := writeJSON(filepath.Join(dir, "session.json"), v); err != nil {
 			return err
 		}
@@ -424,7 +424,7 @@ func (s *store) start(name, agent string, out io.Writer) (session, error) {
 	return v, err
 }
 
-// join adds m to active room id and tells the writer. A role that is
+// join adds m to active room id and tells main. A role that is
 // taken stays taken, except that a member who has exited can be replaced.
 func (s *store) join(id string, m member, out io.Writer) error {
 	return s.locked(func() error {
@@ -466,7 +466,7 @@ func (s *store) add(id string, m member) (session, error) {
 	if err := writeJSON(s.sessionPath(id), v); err != nil {
 		return v, err
 	}
-	_, err = s.appendMessage(v, system, writer, v.label(m.Role)+" joined")
+	_, err = s.appendMessage(v, system, mainRole, v.label(m.Role)+" joined")
 	return v, err
 }
 
@@ -682,8 +682,8 @@ func (s *store) end(sid, as string, out io.Writer) error {
 		if err != nil {
 			return err
 		}
-		if as != writer {
-			return errors.New("only the writer can end this session")
+		if as != mainRole {
+			return errors.New("only main can end this session")
 		}
 		if v.EndedAt != "" {
 			return errors.New("session has already ended")
@@ -695,7 +695,7 @@ func (s *store) end(sid, as string, out io.Writer) error {
 	})
 }
 
-// kick removes role from active room id for by, the writer or the user,
+// kick removes role from active room id for by, main or the user,
 // and stops the member's process if peer launched it. Kicking a kicked
 // member again only retries stopping it. It returns a note on the process.
 func (s *store) kick(id, role, by string) (string, error) {
@@ -710,8 +710,8 @@ func (s *store) kick(id, role, by string) (string, error) {
 		}
 		cur := v.member(role)
 		switch {
-		case role == writer:
-			return errors.New("the writer cannot be kicked; end the room instead")
+		case role == mainRole:
+			return errors.New("main cannot be kicked; end the room instead")
 		case cur == nil:
 			return fmt.Errorf("%q is not a participant in session %s", role, v.ID)
 		case cur.Exited && !cur.Kicked:
@@ -833,7 +833,7 @@ func (s *store) count(id string) int {
 }
 
 // summary describes a session in one line, e.g.
-// "Tue 29 Sep 19:59  writer, reader  12 msgs  8m".
+// "Tue 29 Sep 19:59  main, reader  12 msgs  8m".
 func (s *store) summary(v session) string {
 	start, _ := time.Parse(time.RFC3339Nano, v.StartedAt)
 	end := time.Now()

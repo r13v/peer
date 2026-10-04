@@ -57,7 +57,7 @@ func invoke(repo, input string, args ...string) (string, error) {
 
 func TestRoleInstructions(t *testing.T) {
 	cwd := t.TempDir() // Skill docs must work before a checkout or session exists.
-	for role, want := range map[string]string{"flow": "peer skills worker", "member": "peer wait ID --as ROLE", "writer": "peer wait ID --as writer", "worker": "done:"} {
+	for role, want := range map[string]string{"flow": "peer skills worker", "member": "peer wait ID --as ROLE", "main": "peer wait ID --as main", "worker": "done:"} {
 		got, err := invoke(cwd, "", "skills", role)
 		if err != nil || !strings.HasPrefix(got, "# ") || !strings.Contains(got, want) {
 			t.Fatalf("%s instructions unavailable: %s, %v", role, got, err)
@@ -288,11 +288,11 @@ func TestBodyMarkdown(t *testing.T) {
 
 func TestAuthorDimsAgent(t *testing.T) {
 	p := &printer{repo: t.TempDir(), color: true}
-	v := session{Members: []member{{Role: writer, Agent: "claude"}, {Role: "reader"}}}
-	if got, want := p.author(v, writer, true), "\x1b[1;36mwriter\x1b[0m \x1b[2m(claude)\x1b[0m"; got != want {
+	v := session{Members: []member{{Role: mainRole, Agent: "claude"}, {Role: "reader"}}}
+	if got, want := p.author(v, mainRole, true), "\x1b[1;36mmain\x1b[0m \x1b[2m(claude)\x1b[0m"; got != want {
 		t.Fatalf("sender:\n got %q\nwant %q", got, want)
 	}
-	if got, want := p.author(v, writer, false), "\x1b[1;36mwriter\x1b[0m"; got != want {
+	if got, want := p.author(v, mainRole, false), "\x1b[1;36mmain\x1b[0m"; got != want {
 		t.Fatalf("recipient:\n got %q\nwant %q", got, want)
 	}
 	if got, want := p.author(v, "reader", true), "\x1b[1;35mreader\x1b[0m"; got != want {
@@ -300,8 +300,8 @@ func TestAuthorDimsAgent(t *testing.T) {
 	}
 }
 
-// startRoom starts a room as the writer, joins a reader to it, and takes
-// the join notice off the writer's queue.
+// startRoom starts a room as main, joins a reader to it, and takes
+// the join notice off main's queue.
 func startRoom(t *testing.T, repo, name string) session {
 	t.Helper()
 	started, err := invoke(repo, "", "start", name, "--agent", "claude")
@@ -313,8 +313,8 @@ func startRoom(t *testing.T, repo, name string) session {
 	if err != nil || json.Unmarshal([]byte(joined), &v) != nil {
 		t.Fatalf("join reader: %q, %v", joined, err)
 	}
-	if got, err := invoke(repo, "", "wait", v.ID, "--as", "writer"); err != nil || !strings.Contains(got, `"from":"peer"`) {
-		t.Fatalf("writer missed the join notice: %s, %v", got, err)
+	if got, err := invoke(repo, "", "wait", v.ID, "--as", "main"); err != nil || !strings.Contains(got, `"from":"peer"`) {
+		t.Fatalf("main missed the join notice: %s, %v", got, err)
 	}
 	return v
 }
@@ -322,14 +322,14 @@ func startRoom(t *testing.T, repo, name string) session {
 func TestPairSession(t *testing.T) {
 	repo := testRepo(t)
 	first := startRoom(t, repo, "csv-export")
-	if first.ID != "csv-export" || strings.Join(first.members(), ",") != "writer,reader" || first.Members[0].Agent != "claude" {
+	if first.ID != "csv-export" || strings.Join(first.members(), ",") != "main,reader" || first.Members[0].Agent != "claude" {
 		t.Fatalf("wrong room: %+v", first)
 	}
 	id := first.ID
-	if _, err := invoke(repo, "proposal", "send", id, "--as", "writer"); err != nil {
+	if _, err := invoke(repo, "proposal", "send", id, "--as", "main"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := invoke(repo, "proposal", "send", "--as", "writer"); err == nil {
+	if _, err := invoke(repo, "proposal", "send", "--as", "main"); err == nil {
 		t.Fatal("send without a room ID accepted")
 	}
 	if _, err := invoke(repo, "intrusion", "send", id, "--as", "codex"); err == nil {
@@ -338,8 +338,8 @@ func TestPairSession(t *testing.T) {
 	if _, err := invoke(repo, "", "wait", id, "--as", "codex"); err == nil {
 		t.Fatal("nonparticipant read a message")
 	}
-	if got, err := invoke(repo, "", "wait", id, "--as", "writer"); err != nil || !strings.Contains(got, `"status":"timeout"`) {
-		t.Fatalf("writer consumed its own message: %s, %v", got, err)
+	if got, err := invoke(repo, "", "wait", id, "--as", "main"); err != nil || !strings.Contains(got, `"status":"timeout"`) {
+		t.Fatalf("main consumed its own message: %s, %v", got, err)
 	}
 	got, err := invoke(repo, "", "wait", id, "--as", "reader")
 	if err != nil || !strings.Contains(got, `"text":"proposal"`) {
@@ -351,23 +351,23 @@ func TestPairSession(t *testing.T) {
 	if _, err := invoke(repo, "check line 12", "send", id, "--as", "reader"); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := invoke(repo, "", "wait", id, "--as", "writer"); err != nil || !strings.Contains(got, `"text":"check line 12"`) {
-		t.Fatalf("writer missed review: %s, %v", got, err)
+	if got, err := invoke(repo, "", "wait", id, "--as", "main"); err != nil || !strings.Contains(got, `"text":"check line 12"`) {
+		t.Fatalf("main missed review: %s, %v", got, err)
 	}
 	if _, err := invoke(repo, "", "log"); err == nil {
 		t.Fatal("log without an ID accepted")
 	}
 	log, err := invoke(repo, "", "log", id)
-	if err != nil || !strings.Contains(log, "proposal") || !strings.Contains(log, "check line 12") || !strings.Contains(log, "writer (claude) → all") || !strings.Contains(log, "peer → writer\n") {
+	if err != nil || !strings.Contains(log, "proposal") || !strings.Contains(log, "check line 12") || !strings.Contains(log, "main (claude) → all") || !strings.Contains(log, "peer → main\n") {
 		t.Fatalf("transcript incomplete: %s, %v", log, err)
 	}
 	if _, err := invoke(repo, "", "end", id, "--as", "reader"); err == nil {
-		t.Fatal("reviewer ended writer's session")
+		t.Fatal("reviewer ended main's session")
 	}
-	if _, err := invoke(repo, "review complete", "send", id, "--as", "writer"); err != nil {
+	if _, err := invoke(repo, "review complete", "send", id, "--as", "main"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := invoke(repo, "", "end", id, "--as", "writer"); err != nil {
+	if _, err := invoke(repo, "", "end", id, "--as", "main"); err != nil {
 		t.Fatal(err)
 	}
 	if got, err := invoke(repo, "", "wait", id, "--as", "reader"); err != nil || !strings.Contains(got, `"text":"review complete"`) {
@@ -387,7 +387,7 @@ func TestPairSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	rows := strings.Split(strings.TrimSpace(history), "\n")
-	if len(rows) != 2 || !strings.HasPrefix(rows[0], "csv-export-2 ") || !strings.HasSuffix(rows[0], "active") || !strings.HasPrefix(rows[1], id+" ") || !strings.Contains(rows[1], "writer, reader    4 msgs") || !strings.HasSuffix(rows[1], "ended") {
+	if len(rows) != 2 || !strings.HasPrefix(rows[0], "csv-export-2 ") || !strings.HasSuffix(rows[0], "active") || !strings.HasPrefix(rows[1], id+" ") || !strings.Contains(rows[1], "main, reader    4 msgs") || !strings.HasSuffix(rows[1], "ended") {
 		t.Fatalf("unexpected history:\n%s", history)
 	}
 }
@@ -395,13 +395,13 @@ func TestPairSession(t *testing.T) {
 func TestMembersJoinAndAddress(t *testing.T) {
 	repo := testRepo(t)
 	v := startRoom(t, repo, "team")
-	if _, err := invoke(repo, "task", "send", v.ID, "--as", "writer"); err != nil {
+	if _, err := invoke(repo, "task", "send", v.ID, "--as", "main"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := invoke(repo, "", "join", v.ID, "reader"); err == nil || !strings.Contains(err.Error(), "reader-2") {
 		t.Fatalf("taken role joined again: %v", err)
 	}
-	for _, role := range []string{writer, human, system, "Bad", "../x"} {
+	for _, role := range []string{mainRole, human, system, "Bad", "../x"} {
 		if _, err := invoke(repo, "", "join", v.ID, role); err == nil {
 			t.Fatalf("role %q joined", role)
 		}
@@ -410,17 +410,17 @@ func TestMembersJoinAndAddress(t *testing.T) {
 	if err != nil || !strings.Contains(joined, `"role":"test-expert","agent":"copilot"`) {
 		t.Fatalf("join: %s, %v", joined, err)
 	}
-	if got, _ := invoke(repo, "", "wait", v.ID, "--as", "writer"); !strings.Contains(got, `"text":"test-expert · copilot, readonly joined"`) {
-		t.Fatalf("writer missed the join notice: %s", got)
+	if got, _ := invoke(repo, "", "wait", v.ID, "--as", "main"); !strings.Contains(got, `"text":"test-expert · copilot, readonly joined"`) {
+		t.Fatalf("main missed the join notice: %s", got)
 	}
 	// A late member replays what was sent to everyone before it joined.
 	if got, _ := invoke(repo, "", "wait", v.ID, "--as", "test-expert"); !strings.Contains(got, `"text":"task"`) {
 		t.Fatalf("late member missed the history: %s", got)
 	}
-	if _, err := invoke(repo, "tests only", "send", v.ID, "--as", "writer", "--to", "test-expert"); err != nil {
+	if _, err := invoke(repo, "tests only", "send", v.ID, "--as", "main", "--to", "test-expert"); err != nil {
 		t.Fatal(err)
 	}
-	for _, bad := range [][]string{{"--as", "writer", "--to", "writer"}, {"--as", "writer", "--to", "nobody"}} {
+	for _, bad := range [][]string{{"--as", "main", "--to", "main"}, {"--as", "main", "--to", "nobody"}} {
 		if _, err := invoke(repo, "x", append([]string{"send", v.ID}, bad...)...); err == nil {
 			t.Fatalf("send %q accepted", bad)
 		}
@@ -437,7 +437,7 @@ func TestMembersJoinAndAddress(t *testing.T) {
 	if _, err := invoke(repo, "all hear", "send", v.ID, "--as", "test-expert"); err != nil {
 		t.Fatal(err)
 	}
-	for _, role := range []string{writer, "reader"} {
+	for _, role := range []string{mainRole, "reader"} {
 		if got, _ := invoke(repo, "", "wait", v.ID, "--as", role); !strings.Contains(got, `"text":"all hear"`) {
 			t.Fatalf("%s missed a member's broadcast: %s", role, got)
 		}
@@ -453,7 +453,7 @@ func TestMemberExit(t *testing.T) {
 	if _, err := invoke(repo, "", "join", v.ID, "tests"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := invoke(repo, "task", "send", v.ID, "--as", "writer"); err != nil {
+	if _, err := invoke(repo, "task", "send", v.ID, "--as", "main"); err != nil {
 		t.Fatal(err)
 	}
 	s, err := openStore(repo)
@@ -479,8 +479,8 @@ func TestMemberExit(t *testing.T) {
 	}
 	exit("tests", 1)
 	for _, want := range []string{`"text":"tests joined"`, `"text":"tests exited with status 1"`} {
-		if got, err := invoke(repo, "", "wait", v.ID, "--as", "writer"); err != nil || !strings.Contains(got, want) {
-			t.Fatalf("writer got %s, %v; want %s", got, err, want)
+		if got, err := invoke(repo, "", "wait", v.ID, "--as", "main"); err != nil || !strings.Contains(got, want) {
+			t.Fatalf("main got %s, %v; want %s", got, err, want)
 		}
 	}
 	if _, err := invoke(repo, "", "join", v.ID, "tests"); err != nil {
@@ -489,13 +489,13 @@ func TestMemberExit(t *testing.T) {
 	if _, err := os.Stat(s.exitPath(v.ID, "tests")); !os.IsNotExist(err) {
 		t.Fatalf("stale exit file kept: %v", err)
 	}
-	if _, err := invoke(repo, "", "wait", v.ID, "--as", "writer"); err != nil {
+	if _, err := invoke(repo, "", "wait", v.ID, "--as", "main"); err != nil {
 		t.Fatal(err)
 	}
-	// Rooms stay open when every member has exited; the writer ends them.
+	// Rooms stay open when every member has exited; main ends them.
 	exit("reader", 2)
-	if got, err := invoke(repo, "", "wait", v.ID, "--as", "writer"); err != nil || !strings.Contains(got, "reader exited with status 2") {
-		t.Fatalf("writer missed the reader exit: %s, %v", got, err)
+	if got, err := invoke(repo, "", "wait", v.ID, "--as", "main"); err != nil || !strings.Contains(got, "reader exited with status 2") {
+		t.Fatalf("main missed the reader exit: %s, %v", got, err)
 	}
 	if _, err := invoke(repo, "", "wait", v.ID, "--as", "reader"); err != nil {
 		t.Fatal(err)
@@ -506,7 +506,7 @@ func TestMemberExit(t *testing.T) {
 	if got, _ := invoke(repo, "", "wait", v.ID, "--as", "reader"); !strings.Contains(got, `"text":"task"`) {
 		t.Fatalf("replacement did not replay the room: %s", got)
 	}
-	if _, err := invoke(repo, "", "end", v.ID, "--as", "writer"); err != nil {
+	if _, err := invoke(repo, "", "end", v.ID, "--as", "main"); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -550,7 +550,7 @@ func TestInvite(t *testing.T) {
 		if started, err := invoke(repo, "", "start", "review"); err != nil || json.Unmarshal([]byte(started), &v) != nil {
 			t.Fatalf("start output is not one session: %q, %v", started, err)
 		}
-		args := []string{"invite", v.ID, "test-expert", "--as", "writer", "--agent", tc.agent, "--brief", "edge cases"}
+		args := []string{"invite", v.ID, "test-expert", "--as", "main", "--agent", tc.agent, "--brief", "edge cases"}
 		if tc.worker {
 			args = append(args, "--worker")
 		}
@@ -586,32 +586,32 @@ func TestInvite(t *testing.T) {
 	v := startRoom(t, repo, "rules")
 	for _, args := range [][]string{
 		{"invite", v.ID, "docs", "--as", "reader", "--agent", "codex"},
-		{"invite", v.ID, "docs", "--as", "writer", "--agent", "copilot"},
-		{"invite", v.ID, "reader", "--as", "writer", "--agent", "codex"},
-		{"invite", v.ID, "--as", "writer", "--agent", "codex"},
-		{"invite", v.ID, "docs", "--as", "writer", "--agent", "codex", "--headed"},
-		{"invite", v.ID, "docs", "--as", "writer", "--agent", "codex", "--worktree"},
-		{"invite", v.ID, "docs", "--as", "writer", "--agent", "codex", "--worker", "--worktree"}, // no commit yet
+		{"invite", v.ID, "docs", "--as", "main", "--agent", "copilot"},
+		{"invite", v.ID, "reader", "--as", "main", "--agent", "codex"},
+		{"invite", v.ID, "--as", "main", "--agent", "codex"},
+		{"invite", v.ID, "docs", "--as", "main", "--agent", "codex", "--headed"},
+		{"invite", v.ID, "docs", "--as", "main", "--agent", "codex", "--worktree"},
+		{"invite", v.ID, "docs", "--as", "main", "--agent", "codex", "--worker", "--worktree"}, // no commit yet
 	} {
 		if _, err := invoke(repo, "", args...); err == nil {
 			t.Fatalf("%q accepted", args)
 		}
 	}
 	fail = true
-	if _, err := invoke(repo, "", "invite", v.ID, "docs", "--as", "writer", "--agent", "codex"); err == nil || !strings.Contains(err.Error(), "not installed") {
+	if _, err := invoke(repo, "", "invite", v.ID, "docs", "--as", "main", "--agent", "codex"); err == nil || !strings.Contains(err.Error(), "not installed") {
 		t.Fatalf("failed launch reported %v", err)
 	}
 	if got, _ := invoke(repo, "", "status", v.ID); !strings.Contains(got, `"role":"docs","agent":"codex","exited":true`) {
 		t.Fatalf("failed launch left docs active: %s", got)
 	}
 	fail = false
-	if _, err := invoke(repo, "", "invite", v.ID, "docs", "--as", "writer", "--agent", "codex"); err != nil {
+	if _, err := invoke(repo, "", "invite", v.ID, "docs", "--as", "main", "--agent", "codex"); err != nil {
 		t.Fatalf("role not free after a failed launch: %v", err)
 	}
 }
 
 // TestWorktreeWorker runs a worker in its own worktree: it reaches the
-// writer's room through PEER_REPO, and a worker invited again in its role
+// main's room through PEER_REPO, and a worker invited again in its role
 // finds the edits left behind.
 func TestWorktreeWorker(t *testing.T) {
 	var dir string
@@ -623,7 +623,7 @@ func TestWorktreeWorker(t *testing.T) {
 		t.Fatalf("git commit: %v: %s", err, out)
 	}
 	v := startRoom(t, repo, "split")
-	if _, err := invoke(repo, "", "invite", v.ID, "api", "--as", "writer", "--agent", "claude", "--worker", "--worktree"); err != nil {
+	if _, err := invoke(repo, "", "invite", v.ID, "api", "--as", "main", "--agent", "claude", "--worker", "--worktree"); err != nil {
 		t.Fatal(err)
 	}
 	s, _ := openStore(repo)
@@ -646,7 +646,7 @@ func TestWorktreeWorker(t *testing.T) {
 	}
 	t.Setenv("PEER_REPO", "")
 	if got, _ := invoke(repo, "", "log", v.ID); !strings.Contains(got, "hello") {
-		t.Fatalf("writer's room lacks the worker's message: %s", got)
+		t.Fatalf("main's room lacks the worker's message: %s", got)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "api.go"), []byte("package api\n"), 0600); err != nil {
 		t.Fatal(err)
@@ -654,10 +654,10 @@ func TestWorktreeWorker(t *testing.T) {
 	if err := os.WriteFile(s.exitPath(v.ID, "api"), []byte("1\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := invoke(repo, "", "invite", v.ID, "api", "--as", "writer", "--agent", "codex", "--worker"); err == nil {
+	if _, err := invoke(repo, "", "invite", v.ID, "api", "--as", "main", "--agent", "codex", "--worker"); err == nil {
 		t.Fatal("worktree role invited again into the shared checkout")
 	}
-	if _, err := invoke(repo, "", "invite", v.ID, "api", "--as", "writer", "--agent", "codex", "--worker", "--worktree"); err != nil {
+	if _, err := invoke(repo, "", "invite", v.ID, "api", "--as", "main", "--agent", "codex", "--worker", "--worktree"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "api.go")); err != nil || dir != m.Worktree {
@@ -671,13 +671,13 @@ func TestWorktreeWorker(t *testing.T) {
 		t.Fatal(err)
 	}
 	dir = ""
-	if _, err := invoke(repo, "", "invite", v.ID, "api", "--as", "writer", "--agent", "codex", "--worker", "--worktree"); err == nil || dir != "" {
+	if _, err := invoke(repo, "", "invite", v.ID, "api", "--as", "main", "--agent", "codex", "--worker", "--worktree"); err == nil || dir != "" {
 		t.Fatalf("reused a worktree on another branch: %v, launched in %q", err, dir)
 	}
 	if _, err := os.Stat(filepath.Join(m.Worktree, "api.go")); err != nil {
 		t.Fatalf("refused reuse lost the edits: %v", err)
 	}
-	if _, err := invoke(repo, "", "end", v.ID, "--as", "writer"); err != nil {
+	if _, err := invoke(repo, "", "end", v.ID, "--as", "main"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(m.Worktree); err != nil {
@@ -703,7 +703,7 @@ func TestRoomsAreIsolated(t *testing.T) {
 	if a.ID != "task" || b.ID != "task-2" {
 		t.Fatalf("same name gave rooms %q and %q", a.ID, b.ID)
 	}
-	if _, err := invoke(repo, "for a", "send", a.ID, "--as", "writer"); err != nil {
+	if _, err := invoke(repo, "for a", "send", a.ID, "--as", "main"); err != nil {
 		t.Fatal(err)
 	}
 	if got, err := invoke(repo, "", "wait", b.ID, "--as", "reader"); err != nil || !strings.Contains(got, `"status":"timeout"`) {
@@ -712,10 +712,10 @@ func TestRoomsAreIsolated(t *testing.T) {
 	if got, err := invoke(repo, "", "wait", a.ID, "--as", "reader"); err != nil || !strings.Contains(got, `"text":"for a"`) {
 		t.Fatalf("room a lost its message: %s, %v", got, err)
 	}
-	if _, err := invoke(repo, "", "end", a.ID, "--as", "writer"); err != nil {
+	if _, err := invoke(repo, "", "end", a.ID, "--as", "main"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := invoke(repo, "still here", "send", b.ID, "--as", "writer"); err != nil {
+	if _, err := invoke(repo, "still here", "send", b.ID, "--as", "main"); err != nil {
 		t.Fatalf("ending room a closed room b: %v", err)
 	}
 	status, err := invoke(repo, "", "status")
@@ -726,7 +726,7 @@ func TestRoomsAreIsolated(t *testing.T) {
 	startRoom(t, repo, long)
 	if v := startRoom(t, repo, long); v.ID != long+"-2" {
 		t.Fatalf("long name collision: %q", v.ID)
-	} else if _, err := invoke(repo, "hi", "send", v.ID, "--as", "writer"); err != nil {
+	} else if _, err := invoke(repo, "hi", "send", v.ID, "--as", "main"); err != nil {
 		t.Fatalf("suffixed long room unusable: %v", err)
 	}
 	for _, name := range []string{"", "../x", "Task", "1task", long + "a", "a/b"} {
@@ -774,7 +774,7 @@ func TestWaitWithoutTimeoutWaitsForMessageOrEnd(t *testing.T) {
 		done <- err
 	}()
 	time.Sleep(300 * time.Millisecond)
-	if _, err := invoke(repo, "ready", "send", v.ID, "--as", "writer"); err != nil {
+	if _, err := invoke(repo, "ready", "send", v.ID, "--as", "main"); err != nil {
 		t.Fatal(err)
 	}
 	if err := <-done; err != nil || !strings.Contains(text, `"text":"ready"`) {
@@ -785,7 +785,7 @@ func TestWaitWithoutTimeoutWaitsForMessageOrEnd(t *testing.T) {
 		done <- err
 	}()
 	time.Sleep(300 * time.Millisecond)
-	if _, err := invoke(repo, "", "end", v.ID, "--as", "writer"); err != nil {
+	if _, err := invoke(repo, "", "end", v.ID, "--as", "main"); err != nil {
 		t.Fatal(err)
 	}
 	if err := <-done; err == nil || !strings.Contains(err.Error(), "ended") {
@@ -837,7 +837,7 @@ func TestWaitReceivesLaterMessage(t *testing.T) {
 		}{text, err}
 	}()
 	time.Sleep(50 * time.Millisecond)
-	if _, err := invoke(repo, "ready for review", "send", v.ID, "--as", "writer"); err != nil {
+	if _, err := invoke(repo, "ready for review", "send", v.ID, "--as", "main"); err != nil {
 		t.Fatal(err)
 	}
 	result := <-done
@@ -868,12 +868,12 @@ func TestPickerLists(t *testing.T) {
 		t.Fatalf("git init: %v: %s", err, out)
 	}
 	v := startRoom(t, repo, "done")
-	if _, err := invoke(repo, "", "end", v.ID, "--as", "writer"); err != nil {
+	if _, err := invoke(repo, "", "end", v.ID, "--as", "main"); err != nil {
 		t.Fatal(err)
 	}
 	for range 11 {
 		v := startRoom(t, other, "old")
-		if _, err := invoke(other, "", "end", v.ID, "--as", "writer"); err != nil {
+		if _, err := invoke(other, "", "end", v.ID, "--as", "main"); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -900,10 +900,10 @@ func TestPickerCachesEndedCounts(t *testing.T) {
 	if _, err := listEntries(counts); err != nil || len(counts) != 0 {
 		t.Fatalf("active counts were cached: %v, %v", counts, err)
 	}
-	if _, err := invoke(repo, "last words", "send", v.ID, "--as", "writer"); err != nil {
+	if _, err := invoke(repo, "last words", "send", v.ID, "--as", "main"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := invoke(repo, "", "end", v.ID, "--as", "writer"); err != nil {
+	if _, err := invoke(repo, "", "end", v.ID, "--as", "main"); err != nil {
 		t.Fatal(err)
 	}
 	entries, err := listEntries(counts)
@@ -939,7 +939,7 @@ func TestPostFromUser(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	for as, want := range map[string][]string{writer: {"to all"}, "reader": {"to all", "to reader"}} {
+	for as, want := range map[string][]string{mainRole: {"to all"}, "reader": {"to all", "to reader"}} {
 		var got []string
 		for {
 			m, err := s.nextMessage(v.ID, as)
@@ -963,7 +963,7 @@ func TestPostFromUser(t *testing.T) {
 			t.Fatalf("post to %q with %d bytes succeeded", p.to, len(p.text))
 		}
 	}
-	if err := s.end(v.ID, writer, new(bytes.Buffer)); err != nil {
+	if err := s.end(v.ID, mainRole, new(bytes.Buffer)); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.post(v.ID, everyone, "late"); err == nil {
@@ -1074,7 +1074,7 @@ func TestAppNamesModelEffortAndMode(t *testing.T) {
 		m    member
 		want string
 	}{
-		{member{Role: writer, Agent: "claude"}, "claude"},
+		{member{Role: mainRole, Agent: "claude"}, "claude"},
 		{member{Role: "driver", Agent: "codex", Model: "gpt-6.1-sol", Effort: "medium"}, "codex/gpt-6.1-sol/medium, readonly"},
 		{member{Role: "api", Agent: "claude", Model: "haiku", Worker: true}, "claude/haiku, worker"},
 	} {
@@ -1091,22 +1091,22 @@ func TestKick(t *testing.T) {
 	v := startRoom(t, repo, "kick")
 	for _, args := range [][]string{
 		{"kick", v.ID, "reader", "--as", "reader"},
-		{"kick", v.ID, "writer", "--as", "writer"},
-		{"kick", v.ID, "ghost", "--as", "writer"},
+		{"kick", v.ID, "main", "--as", "main"},
+		{"kick", v.ID, "ghost", "--as", "main"},
 	} {
 		if _, err := invoke(repo, "", args...); err == nil {
 			t.Fatalf("%q accepted", args)
 		}
 	}
 	for range 2 { // a second kick only retries the stop
-		if got, err := invoke(repo, "", "kick", v.ID, "reader", "--as", "writer"); err != nil || !strings.Contains(got, `"role":"reader","kicked":true,"kicked_by":"writer"`) {
+		if got, err := invoke(repo, "", "kick", v.ID, "reader", "--as", "main"); err != nil || !strings.Contains(got, `"role":"reader","kicked":true,"kicked_by":"main"`) {
 			t.Fatalf("kick: %s, %v", got, err)
 		}
 	}
-	if got, err := invoke(repo, "", "wait", v.ID, "--as", "writer"); err != nil || !strings.Contains(got, `"text":"reader was kicked by writer"`) {
-		t.Fatalf("writer missed the kick: %s, %v", got, err)
+	if got, err := invoke(repo, "", "wait", v.ID, "--as", "main"); err != nil || !strings.Contains(got, `"text":"reader was kicked by main"`) {
+		t.Fatalf("main missed the kick: %s, %v", got, err)
 	}
-	if got, _ := invoke(repo, "", "wait", v.ID, "--as", "writer"); !strings.Contains(got, "timeout") {
+	if got, _ := invoke(repo, "", "wait", v.ID, "--as", "main"); !strings.Contains(got, "timeout") {
 		t.Fatalf("second kick notified again: %s", got)
 	}
 	s, err := openStore(repo)
@@ -1116,10 +1116,10 @@ func TestKick(t *testing.T) {
 	for name, err := range map[string]error{
 		"reader wait":    errOf(invoke(repo, "", "wait", v.ID, "--as", "reader")),
 		"reader send":    errOf(invoke(repo, "hi", "send", v.ID, "--as", "reader")),
-		"send to reader": errOf(invoke(repo, "hi", "send", v.ID, "--as", "writer", "--to", "reader")),
+		"send to reader": errOf(invoke(repo, "hi", "send", v.ID, "--as", "main", "--to", "reader")),
 		"post to reader": s.post(v.ID, "reader", "hi"),
 		"join reader":    errOf(invoke(repo, "", "join", v.ID, "reader")),
-		"invite reader":  errOf(invoke(repo, "", "invite", v.ID, "reader", "--as", "writer", "--agent", "codex")),
+		"invite reader":  errOf(invoke(repo, "", "invite", v.ID, "reader", "--as", "main", "--agent", "codex")),
 	} {
 		if err == nil || !strings.Contains(err.Error(), "kicked") {
 			t.Fatalf("%s: %v, want a kicked error", name, err)
@@ -1175,10 +1175,10 @@ func TestKickStopsLaunchedMember(t *testing.T) {
 	if !groupGone(pid) {
 		t.Fatal("the member's process group outlived the kick")
 	}
-	if got, _ := invoke(repo, "", "wait", v.ID, "--as", "writer"); !strings.Contains(got, "reader was kicked by user") {
-		t.Fatalf("writer missed the kick: %s", got)
+	if got, _ := invoke(repo, "", "wait", v.ID, "--as", "main"); !strings.Contains(got, "reader was kicked by user") {
+		t.Fatalf("main missed the kick: %s", got)
 	}
-	if got, _ := invoke(repo, "", "wait", v.ID, "--as", "writer"); !strings.Contains(got, "timeout") {
+	if got, _ := invoke(repo, "", "wait", v.ID, "--as", "main"); !strings.Contains(got, "timeout") {
 		t.Fatalf("a kicked member was reported again: %s", got)
 	}
 }
@@ -1196,7 +1196,7 @@ func TestKickWhileStarting(t *testing.T) {
 	pid := 0
 	startMember = func([]string, string, []string, string, string) (int, error) {
 		pid = launchIgnoringTerm(t, s, v.ID, "docs")
-		if _, err := s.kick(v.ID, "docs", writer); err != nil {
+		if _, err := s.kick(v.ID, "docs", mainRole); err != nil {
 			t.Fatal(err)
 		}
 		return pid, nil
@@ -1205,7 +1205,7 @@ func TestKickWhileStarting(t *testing.T) {
 		startMember = func([]string, string, []string, string, string) (int, error) { return 0, nil }
 		stopGrace = 3 * time.Second
 	})
-	if _, err := invoke(repo, "", "invite", v.ID, "docs", "--as", "writer", "--agent", "codex"); err == nil || !strings.Contains(err.Error(), "kicked while it started") {
+	if _, err := invoke(repo, "", "invite", v.ID, "docs", "--as", "main", "--agent", "codex"); err == nil || !strings.Contains(err.Error(), "kicked while it started") {
 		t.Fatalf("invite: %v", err)
 	}
 	if !groupGone(pid) {
@@ -1259,13 +1259,13 @@ func TestKickRetriesFailedStop(t *testing.T) {
 		return nil
 	}
 	t.Cleanup(func() { stopMember = realStopMember })
-	if _, err := s.kick(v.ID, "reader", writer); err == nil || !strings.Contains(err.Error(), "not confirmed stopped") {
+	if _, err := s.kick(v.ID, "reader", mainRole); err == nil || !strings.Contains(err.Error(), "not confirmed stopped") {
 		t.Fatalf("failed stop reported %v", err)
 	}
 	if got, _ := s.refresh(v.ID); !got.member("reader").Kicked {
 		t.Fatal("a failed stop undid the kick")
 	}
-	if note, err := s.kick(v.ID, "reader", writer); err != nil || !strings.Contains(note, "process stopped") || !slices.Equal(stopped, []int{4242, 4242}) {
+	if note, err := s.kick(v.ID, "reader", mainRole); err != nil || !strings.Contains(note, "process stopped") || !slices.Equal(stopped, []int{4242, 4242}) {
 		t.Fatalf("retry: %q, %v, stops %v", note, err, stopped)
 	}
 }
