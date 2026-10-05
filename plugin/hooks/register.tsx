@@ -736,9 +736,11 @@ export const register: Register = on => {
 
   // The rows this plugin puts into the chat, a delivery or an end
   // note, are hidden there: the toast, the pane and the footer's count show
-  // them. ctrl+o shows each as the model reads it.
+  // them. ctrl+o shows each as the model reads it. A surface without ctrl+o,
+  // such as the desktop, marks every row expanded, so it always hides them.
   on('ui.render', { component: 'UserMessage' }, ($, e, next) => {
-    if (e.props.isExpanded || !isPeerRow(e.props.text)) return next(e)
+    const hasCtrlO = e.surface === 'terminal' || e.surface === 'vscode'
+    if ((hasCtrlO && e.props.isExpanded) || !isPeerRow(e.props.text)) return next(e)
     const { Box } = $.ui.resolve(e)
     return <Box />
   })

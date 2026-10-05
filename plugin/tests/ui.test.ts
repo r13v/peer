@@ -179,7 +179,7 @@ test('an ended room shows every member stopped', async ($, on) => {
   expect(drawn).not.toContain('● reader')
 })
 
-test("the plugin's own rows are hidden; others and ctrl+o draw as the engine does", async ($, on) => {
+test("the plugin's own rows are hidden; others and the terminal's ctrl+o draw as the engine does", async ($, on) => {
   // Beneath the plugin, the engine's own drawing of a row.
   on('ui.render', { component: 'UserMessage' }, () => ({ type: 'Text', props: {}, children: ['engine'] }) as never)
   await start($, on)
@@ -197,6 +197,14 @@ test("the plugin's own rows are hidden; others and ctrl+o draw as the engine doe
   ] as const) {
     expect(JSON.stringify(await (await row(text, origin)).drawn())).not.toContain('engine')
   }
-  expect(JSON.stringify(await (await row(delivery, plugin, true)).drawn())).toContain('engine')
+  // The desktop has no ctrl+o and marks every row expanded: it still hides.
+  expect(JSON.stringify(await (await row(delivery, plugin, true)).drawn())).not.toContain('engine')
+  const terminal = await $.ui.mount({
+    plugin: 'peer',
+    surface: 'terminal',
+    component: 'UserMessage',
+    props: { text: delivery, origin: plugin, isExpanded: true } as never,
+  })
+  expect(JSON.stringify(await terminal.drawn())).toContain('engine')
   expect(JSON.stringify(await (await row('peer room is a nice idea', { kind: 'composer' })).drawn())).toContain('engine')
 })
