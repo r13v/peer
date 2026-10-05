@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	_ "embed"
 	"errors"
 	"flag"
@@ -11,11 +12,13 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"runtime"
 	"slices"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/charmbracelet/x/term"
@@ -33,7 +36,7 @@ var mainInstructions []byte
 //go:embed instructions/worker.md
 var workerInstructions []byte
 
-const usage = "usage: peer, peer --version, peer update, peer skills flow|main|member|worker, peer start NAME, peer join|invite|kick ID ROLE, peer send|wait|end ID --as ROLE, peer send ID --as ROLE --text TEXT, peer wait ID --as ROLE --timeout DURATION, peer status [ID], peer history, or peer log ID"
+const usage = "usage: peer, peer --version, peer update, peer skills flow|main|member|worker, peer start NAME, peer join|invite|kick ID ROLE, peer send|wait|end ID --as ROLE, peer send ID --as ROLE --text TEXT, peer wait ID --as ROLE --timeout DURATION, peer status [ID], peer history, peer watch [ID], peer log ID [--json], or peer memberlog ID ROLE [--follow]"
 
 // version is set at release build time.
 var version = "dev"
@@ -87,6 +90,8 @@ func run(args []string, in io.Reader, out io.Writer, cwd string) error {
 	}
 	fs := flag.NewFlagSet(args[0], flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
+	jsonLog := fs.Bool("json", false, "print the transcript as NDJSON")
+	follow := fs.Bool("follow", false, "follow the member log while the room is active")
 	actor := fs.String("as", "", "sender's role")
 	to := fs.String("to", everyone, "recipient role for send")
 	agent := fs.String("agent", "", "app behind the participant")
@@ -115,7 +120,7 @@ func run(args []string, in io.Reader, out io.Writer, cwd string) error {
 	if len(rest) > 0 && !strings.HasPrefix(rest[0], "-") {
 		id, rest = rest[0], rest[1:]
 	}
-	if (args[0] == "join" || args[0] == "invite" || args[0] == "kick") && len(rest) > 0 && !strings.HasPrefix(rest[0], "-") {
+	if (args[0] == "join" || args[0] == "invite" || args[0] == "kick" || args[0] == "memberlog") && len(rest) > 0 && !strings.HasPrefix(rest[0], "-") {
 		role, rest = rest[0], rest[1:]
 	}
 	if err := fs.Parse(rest); err != nil {
@@ -141,7 +146,23 @@ func run(args []string, in io.Reader, out io.Writer, cwd string) error {
 		if err := needID("log"); err != nil {
 			return err
 		}
+		if *jsonLog {
+			return s.logJSON(id, out)
+		}
 		return s.log(id, newPrinter(out, s.repo))
+	case "watch", "memberlog":
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGPIPE)
+		defer stop()
+		if args[0] == "watch" {
+			return streamError(s.watch(ctx, id, out))
+		}
+		if id == "" || role == "" {
+			return errors.New("usage: peer memberlog ID ROLE [--follow]")
+		}
+		if err := checkName(role); err != nil {
+			return err
+		}
+		return streamError(s.memberlog(ctx, id, role, *follow, out))
 	case "start":
 		if !roomName.MatchString(id) {
 			return errors.New("usage: peer start NAME [--agent NAME]; the room NAME is 1-40 characters: a-z, 0-9 or -, starting with a letter")
@@ -171,13 +192,13 @@ func run(args []string, in io.Reader, out io.Writer, cwd string) error {
 		}
 		return s.invite(id, *actor, member{Role: role, Agent: *agent, Worker: *worker, Model: *model}, *brief, *worktree, out)
 	case "kick":
-		if err := needRole("kick ID ROLE --as main"); err != nil {
+		if err := needRole("kick ID ROLE --as main|user"); err != nil {
 			return err
 		}
-		if *actor != mainRole {
-			return errors.New("only main can kick; run peer kick ID ROLE --as main")
+		if *actor != mainRole && *actor != human {
+			return errors.New("only main or user can kick; run peer kick ID ROLE --as main|user")
 		}
-		note, err := s.kick(id, role, mainRole)
+		note, err := s.kick(id, role, *actor)
 		if err != nil {
 			return err
 		}

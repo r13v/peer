@@ -1,0 +1,14 @@
+{
+  "name": "r13v",
+  "description": "Plugins for peer, local chat rooms for coding agents",
+  "owner": {
+    "name": "r13v"
+  },
+  "plugins": [
+    {
+      "name": "peer",
+      "source": "./plugin",
+      "description": "Watch and drive peer rooms from Claude Code, and deliver room messages to main as they come"
+    }
+  ]
+}
