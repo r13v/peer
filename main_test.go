@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -1432,5 +1433,208 @@ func TestSendTextAndUnread(t *testing.T) {
 	}
 	if _, err := invoke(repo, "stdin is not read", "send", v.ID, "--as", "main", "--text", ""); err == nil || !strings.Contains(err.Error(), "--text") {
 		t.Fatalf("empty send error does not mention --text: %v", err)
+	}
+}
+
+// Observing a room must not steal an agent's queue, and polling must not
+// replay its transcript. Cursor changes still need a room update for the UI.
+func TestWatchSnapshot(t *testing.T) {
+	repo := testRepo(t)
+	v := startRoom(t, repo, "watched")
+	old := startRoom(t, repo, "old")
+	if _, err := invoke(repo, "", "end", old.ID, "--as", "main"); err != nil {
+		t.Fatal(err)
+	}
+	s, err := openStore(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := s.cursor(v.ID, "reader")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rooms := make(map[string]watchRoom)
+	var out bytes.Buffer
+	if err := s.watchSnapshot("", rooms, &out); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out.String(), `"id":"`+old.ID+`"`) || !strings.Contains(out.String(), `"event":"room"`) || !strings.Contains(out.String(), `"event":"message"`) {
+		t.Fatalf("bad initial snapshot: %s", &out)
+	}
+	out.Reset()
+	if err := s.watchSnapshot("", rooms, &out); err != nil || out.Len() != 0 {
+		t.Fatalf("unchanged snapshot repeated: %s, %v", &out, err)
+	}
+	if _, err := invoke(repo, "new message", "send", v.ID, "--as", "main"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.watchSnapshot("", rooms, &out); err != nil || strings.Count(out.String(), `"event":"message"`) != 1 || !strings.Contains(out.String(), `"text":"new message"`) {
+		t.Fatalf("new message: %s, %v", &out, err)
+	}
+	after, err := s.cursor(v.ID, "reader")
+	if err != nil || before != after {
+		t.Fatalf("watch consumed reader's queue: %d -> %d, %v", before, after, err)
+	}
+	out.Reset()
+	if _, err := invoke(repo, "", "wait", v.ID, "--as", "reader"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.watchSnapshot("", rooms, &out); err != nil || !strings.Contains(out.String(), `"event":"room"`) || strings.Contains(out.String(), `"event":"message"`) {
+		t.Fatalf("unread change: %s, %v", &out, err)
+	}
+	out.Reset()
+	added := startRoom(t, repo, "added")
+	if err := s.watchSnapshot("", rooms, &out); err != nil || !strings.Contains(out.String(), added.ID) {
+		t.Fatalf("new room: %s, %v", &out, err)
+	}
+	out.Reset()
+	if _, err := invoke(repo, "final message", "send", v.ID, "--as", "main"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := invoke(repo, "", "end", v.ID, "--as", "main"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.watchSnapshot("", rooms, &out); err != nil || !strings.Contains(out.String(), `"ended_at"`) {
+		t.Fatalf("room end: %s, %v", &out, err)
+	}
+	last := strings.Index(out.String(), `"text":"final message"`)
+	ended := strings.Index(out.String(), `"event":"room"`)
+	if last < 0 || ended < last {
+		t.Fatalf("room ended before its final message: %s", &out)
+	}
+	out.Reset()
+	if err := s.watchSnapshot(added.ID, make(map[string]watchRoom), &out); err != nil || strings.Contains(out.String(), v.ID) || !strings.Contains(out.String(), added.ID) {
+		t.Fatalf("room filter: %s, %v", &out, err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	out.Reset()
+	if err := s.watch(ctx, added.ID, &out); err != nil || !strings.HasSuffix(out.String(), "{\"event\":\"ready\"}\n") {
+		t.Fatalf("ready/cancel: %s, %v", &out, err)
+	}
+	if err := s.watch(ctx, added.ID, shortWriter{}); !errors.Is(err, io.ErrShortWrite) {
+		t.Fatalf("short write accepted: %v", err)
+	}
+}
+
+func TestJSONLogs(t *testing.T) {
+	repo := testRepo(t)
+	v := startRoom(t, repo, "logs")
+	if _, err := invoke(repo, "hello\nworld", "send", v.ID, "--as", "main"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := invoke(repo, "", "log", v.ID, "--json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(got), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("log records: %q", got)
+	}
+	var msg message
+	if err := json.Unmarshal([]byte(lines[1]), &msg); err != nil || msg.Text != "hello\nworld" || msg.From != mainRole {
+		t.Fatalf("message shape: %+v, %v", msg, err)
+	}
+	s, err := openStore(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := "2026-10-05T20:00:00Z\t{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"hello\"}}\n" +
+		"2026-10-05T20:00:01Z\tstderr\npartial"
+	if err := os.WriteFile(s.logPath(v.ID, "reader"), []byte(log), 0600); err != nil {
+		t.Fatal(err)
+	}
+	got, err = invoke(repo, "", "memberlog", v.ID, "reader")
+	want := "{\"at\":\"2026-10-05T20:00:00Z\",\"kind\":\"text\",\"text\":\"hello\"}\n{\"at\":\"2026-10-05T20:00:01Z\",\"kind\":\"raw\",\"text\":\"stderr\"}\n"
+	if err != nil || got != want {
+		t.Fatalf("member log: %q, %v", got, err)
+	}
+	if _, err := invoke(repo, "", "memberlog", v.ID, "ghost"); err == nil {
+		t.Fatal("unknown member accepted")
+	}
+}
+
+// A UI action has the same authority as the human action in the TUI.
+func TestHumanKickEnd(t *testing.T) {
+	repo := testRepo(t)
+	v := startRoom(t, repo, "human")
+	got, err := invoke(repo, "", "kick", v.ID, "reader", "--as", "user")
+	if err != nil || !strings.Contains(got, `"kicked_by":"user"`) {
+		t.Fatalf("human kick: %s, %v", got, err)
+	}
+	if _, err := invoke(repo, "", "end", v.ID, "--as", "reader"); err == nil {
+		t.Fatal("reader ended room")
+	}
+	got, err = invoke(repo, "", "end", v.ID, "--as", "user")
+	if err != nil || !strings.Contains(got, `"ended_at"`) {
+		t.Fatalf("human end: %s, %v", got, err)
+	}
+}
+
+// Follow must retain an incomplete line until its remainder arrives, then
+// drain complete output once the room ends rather than waiting forever.
+func TestMemberlogFollow(t *testing.T) {
+	repo := testRepo(t)
+	v := startRoom(t, repo, "follow")
+	s, err := openStore(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := s.logPath(v.ID, "reader")
+	if err := os.WriteFile(path, []byte("first\npar"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	r, w := io.Pipe()
+	defer r.Close()
+	defer w.Close()
+	done := make(chan error, 1)
+	go func() {
+		err := s.memberlog(ctx, v.ID, "reader", true, w)
+		_ = w.CloseWithError(err)
+		done <- err
+	}()
+	dec := json.NewDecoder(r)
+	var record struct {
+		Kind string `json:"kind"`
+		Text string `json:"text"`
+	}
+	if err := dec.Decode(&record); err != nil || record.Text != "first" || record.Kind != "raw" {
+		t.Fatalf("initial log: %+v, %v", record, err)
+	}
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = f.WriteString("tial\n")
+	_ = f.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := invoke(repo, "", "end", v.ID, "--as", "main"); err != nil {
+		t.Fatal(err)
+	}
+	if err := dec.Decode(&record); err != nil || record.Text != "partial" {
+		t.Fatalf("appended log: %+v, %v", record, err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-ctx.Done():
+		t.Fatal("follow did not stop when the room ended")
+	}
+}
+
+func TestStreamClosedOutput(t *testing.T) {
+	repo := testRepo(t)
+	v := startRoom(t, repo, "closed-output")
+	r, w := io.Pipe()
+	_ = r.Close()
+	defer w.Close()
+	if err := run([]string{"watch", v.ID}, strings.NewReader(""), w, repo); err != nil {
+		t.Fatalf("closed watch output: %v", err)
 	}
 }

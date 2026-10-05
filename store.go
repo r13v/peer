@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -818,8 +819,8 @@ func (s *store) end(sid, as string, out io.Writer) error {
 		if err != nil {
 			return err
 		}
-		if as != mainRole {
-			return errors.New("only main can end this session")
+		if as != mainRole && as != human {
+			return errors.New("only main or user can end this session")
 		}
 		if v.EndedAt != "" {
 			return errors.New("session has already ended")
@@ -996,4 +997,166 @@ func (s *store) history(out io.Writer) error {
 		}
 	}
 	return nil
+}
+
+// emitJSON writes one complete NDJSON record.
+func emitJSON(out io.Writer, v any) error {
+	data, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	return writeFull(out, append(data, '\n'))
+}
+
+func streamError(err error) error {
+	if errors.Is(err, syscall.EPIPE) || errors.Is(err, os.ErrClosed) || errors.Is(err, io.ErrClosedPipe) {
+		return nil
+	}
+	return err
+}
+
+func (s *store) logJSON(id string, out io.Writer) error {
+	if _, err := s.refresh(id); err != nil {
+		return err
+	}
+	var writeErr error
+	err := s.scan(id, 0, func(m message, _ int64) bool {
+		writeErr = emitJSON(out, m)
+		return writeErr == nil
+	})
+	if err != nil {
+		return err
+	}
+	return writeErr
+}
+
+type watchRoom struct {
+	state  string
+	offset int64
+}
+
+// watchSnapshot never delivers messages through wait, so UI observation
+// cannot consume messages intended for an agent.
+func (s *store) watchSnapshot(id string, rooms map[string]watchRoom, out io.Writer) error {
+	var all []session
+	if id == "" {
+		var err error
+		all, err = s.sessions()
+		if err != nil {
+			return err
+		}
+	} else {
+		v, err := s.refresh(id)
+		if err != nil {
+			return err
+		}
+		all = []session{v}
+	}
+	for _, v := range all {
+		r, seen := rooms[v.ID]
+		if v.EndedAt != "" && !seen {
+			continue
+		}
+		if err := s.countUnread(&v); err != nil {
+			return err
+		}
+		state, err := json.Marshal(v)
+		if err != nil {
+			return err
+		}
+		var writeErr error
+		err = s.scan(v.ID, r.offset, func(m message, next int64) bool {
+			writeErr = emitJSON(out, struct {
+				Event   string  `json:"event"`
+				Room    string  `json:"room"`
+				Message message `json:"message"`
+			}{"message", v.ID, m})
+			if writeErr == nil {
+				r.offset = next
+			}
+			return writeErr == nil
+		})
+		if err != nil {
+			return err
+		}
+		if writeErr != nil {
+			return writeErr
+		}
+		if string(state) != r.state {
+			if err := emitJSON(out, struct {
+				Event string  `json:"event"`
+				Room  session `json:"room"`
+			}{"room", v}); err != nil {
+				return err
+			}
+			r.state = string(state)
+		}
+		rooms[v.ID] = r
+	}
+	return nil
+}
+
+func (s *store) watch(ctx context.Context, id string, out io.Writer) error {
+	rooms := make(map[string]watchRoom)
+	if err := s.watchSnapshot(id, rooms, out); err != nil {
+		return err
+	}
+	if err := emitJSON(out, struct {
+		Event string `json:"event"`
+	}{"ready"}); err != nil {
+		return err
+	}
+	tick := time.NewTicker(250 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-tick.C:
+			if err := s.watchSnapshot(id, rooms, out); err != nil {
+				return err
+			}
+		}
+	}
+}
+
+func (s *store) memberlog(ctx context.Context, id, role string, follow bool, out io.Writer) error {
+	v, err := s.refresh(id)
+	if err != nil {
+		return err
+	}
+	if v.member(role) == nil {
+		return fmt.Errorf("%q is not a participant in session %s", role, id)
+	}
+	var offset int64
+	tick := time.NewTicker(250 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		v, err = s.refresh(id)
+		if err != nil {
+			return err
+		}
+		lines, next, err := readLines(s.logPath(id, role), offset)
+		if err != nil {
+			return err
+		}
+		for _, line := range lines {
+			at, body := stamped(line)
+			for _, e := range memberLogLine(body) {
+				e.At = at
+				if err := emitJSON(out, e); err != nil {
+					return err
+				}
+			}
+		}
+		offset = next
+		if !follow || v.EndedAt != "" {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-tick.C:
+		}
+	}
 }

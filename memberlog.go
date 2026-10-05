@@ -23,10 +23,14 @@ const (
 // logEntry is one thing a member did, at the time its line was written;
 // At is zero in logs written before lines were stamped.
 type logEntry struct {
-	At     time.Time
-	Kind   logKind
-	Text   string
-	Failed bool
+	At     time.Time `json:"at"`
+	Kind   logKind   `json:"kind"`
+	Text   string    `json:"text"`
+	Failed bool      `json:"failed,omitempty"`
+}
+
+func (k logKind) MarshalJSON() ([]byte, error) {
+	return json.Marshal([]string{"raw", "text", "tool", "result"}[k])
 }
 
 // stamped splits the time stamp writes before a log line from the line.

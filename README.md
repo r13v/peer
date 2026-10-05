@@ -15,6 +15,7 @@ Built for a specific use case: a second (or third) opinion on a change without l
 - Main or you can kick a member and stop its agent
 - Several active rooms in one checkout at the same time
 - TUI (`peer` with no arguments): all rooms from all checkouts, transcripts, background member logs, search
+- Optional [Claude Code plugin](plugin/README.md): a room pane in Claude Code and room messages in main's chat as they come
 - Write to a room as `user`, ask main to add a member, or end a room from the TUI
 - Agents write in the language that you use with main
 - macOS notification when the room that you watch ends
@@ -52,13 +53,28 @@ The installer verifies the release checksum and puts `peer` in `~/.local/bin`. S
 go build -o "$HOME/.local/bin/peer" .
 ```
 
-**Agent skill:**
+**Agent skill** for Codex, pi and Claude Code without the plugin:
 
 ```bash
-npx skills add r13v/peer -g
+npx skills add r13v/peer -g --skill peer
 ```
 
 Then restart the agent apps.
+
+**Claude Code plugin (optional):** it brings its own skill, `/peer:team`, so Claude Code does not need the agent skill above. The plugin is for Claude Code only; other agents use the agent skill.
+
+```bash
+claude plugin marketplace add r13v/peer
+claude plugin install peer@r13v
+```
+
+If you installed the agent skill for Claude Code before, remove it there and keep it for the other agents:
+
+```bash
+npx skills remove peer -g -a claude-code
+```
+
+See [plugin/README.md](plugin/README.md).
 
 **Updating:**
 
@@ -83,13 +99,17 @@ Open a **local** Claude Code chat in your Git checkout. Do not use a separate wo
 /peer add CSV export to the reports page
 ```
 
+With the [Claude Code plugin](plugin/README.md), send `/peer:team add CSV export to the reports page` instead.
+
 Claude becomes main. It starts a room and runs Codex in the background as the reader. It also gives you a join prompt in the language of your chat, so you can add more agents later. See [How It Works](#how-it-works) for the steps that follow.
 
 To start from Codex, send `$peer <task>` in a local Codex chat. Codex becomes main and runs Claude Code as the reader. The agent that gets the task is always main.
 
-To watch the conversation, run `peer` in a terminal.
+To watch the conversation, run `peer` in a terminal, or open the plugin's pane with `/peer:room`.
 
 ### Examples
+
+The examples use the standalone skill's `/peer`; with the Claude Code plugin, use `/peer:team`.
 
 Add experts. Main runs each one in the background with its own role. Roles are free-form names:
 
@@ -211,13 +231,15 @@ Run `peer` with no arguments to open the TUI. Run the commands below inside the 
 | `peer start ROOM [--agent NAME]` | Start a room with you as main and print it as JSON |
 | `peer invite ROOM ROLE --as main --agent codex\|claude\|pi [--worker [--worktree]] [--model MODEL] [--brief TEXT]` | Add a member or a worker and start its agent |
 | `peer join ROOM ROLE [--agent NAME]` | Join a room as a member |
-| `peer kick ROOM ROLE --as main` | Remove a member from the room and stop its agent if `peer` started it; run it again to retry the stop |
+| `peer kick ROOM ROLE --as main\|user` | Remove a member from the room and stop its agent if `peer` started it; run it again to retry the stop |
 | `peer send ROOM --as ROLE [--to ROLE] [--text TEXT]` | Send a message from `--text` or stdin to all participants or to one; prints its `id` and how many messages are `unread` for you |
 | `peer wait ROOM --as ROLE [--timeout DURATION]` | Wait until messages come, the room ends or you are kicked, and print them as one batch; `--timeout` bounds the wait, and `0` returns at once |
-| `peer end ROOM --as main` | End the room |
+| `peer end ROOM --as main\|user` | End the room |
+| `peer watch [ROOM]` | Print the rooms and their messages, then every change, as JSON lines; marks nothing as read |
+| `peer memberlog ROOM ROLE [--follow]` | Print a background member's log as JSON lines; `--follow` waits for more until the room ends |
 | `peer status [ROOM]` | Show active rooms, or one room, with each member's `unread` count |
 | `peer history` | List all rooms in this checkout |
-| `peer log ROOM` | Print a transcript |
+| `peer log ROOM [--json]` | Print a transcript; `--json` prints one message per line |
 | `peer skills flow\|main\|member\|worker` | Print the agent instructions |
 | `peer update` | Update an installer copy of the CLI |
 | `peer --version` | Print the version |
