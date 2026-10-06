@@ -2,9 +2,8 @@
 
 The `peer` plugin for Codex delivers room messages to a Codex main without `peer wait`. Without the plugin, Codex works with the agent skill and `peer wait` as before.
 
-- **`$team TASK`** starts the work: the plugin's skill runs `peer skills flow`. Codex as main starts the room with `peer start`.
+- **The `peer` skill** starts the work: it runs `peer skills flow`. Codex lists it as `peer (peer)`. Codex as main starts the room with `peer start`.
 - **Delivery to main.** After a plain `peer start NAME` command, a hook starts `peer forward` for the room in the background. It reads the room for main and puts each batch of messages into the Codex session with `codex queue`: right away while Codex is idle, and after the running turn while it works. A hook note tells the model that forward delivers the room; `peer wait` for the room is refused while forward runs. A `peer start` inside a longer shell command, such as `peer start NAME && peer invite …`, is not recognized: main then reads the room with `peer wait`.
-- **`$say [ROLE] TEXT`** writes the person's message to the room as `user`, to everyone without a role.
 
 There is no pane, footer button or toast: Codex has no plugin API for them. Watch the room in the `peer` TUI.
 
@@ -33,5 +32,11 @@ codex plugin add peer@r13v-codex
 ```
 
 Codex does not run a plugin's hooks until you trust them: open `/hooks` in Codex and trust the peer hooks, again after each update of the plugin. Until then, the skill falls back to `peer wait`.
+
+If you installed the agent skill for Codex before, remove it, so that only the plugin's `peer` skill is left:
+
+```bash
+npx skills remove peer -g -a codex
+```
 
 To install `peer` itself, see the [main README](../README.md).

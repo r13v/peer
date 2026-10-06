@@ -62,7 +62,7 @@ npx skills add r13v/peer -g --skill peer
 
 Then restart the agent apps.
 
-**Claude Code plugin (optional):** it brings its own skill, `/peer:team`, so Claude Code does not need the agent skill above. The plugin is for Claude Code only; other agents use the agent skill.
+**Claude Code plugin (optional):** it brings its own skill, `/peer:peer`, so Claude Code does not need the agent skill above. The plugin is for Claude Code only; other agents use the agent skill.
 
 ```bash
 claude plugin marketplace add r13v/peer
@@ -77,14 +77,14 @@ npx skills remove peer -g -a claude-code
 
 See [plugin/README.md](plugin/README.md).
 
-**Codex plugin (optional):** as main, Codex gets room messages as turns of their own instead of running `peer wait`. It brings its own skill, `$team`. Without it, Codex uses the agent skill as before.
+**Codex plugin (optional):** as main, Codex gets room messages as turns of their own instead of running `peer wait`. It brings its own `peer` skill, so Codex does not need the agent skill above. Without the plugin, Codex uses the agent skill as before.
 
 ```bash
 codex plugin marketplace add r13v/peer
 codex plugin add peer@r13v-codex
 ```
 
-Then trust its hooks with `/hooks` in Codex. See [codex-plugin/README.md](codex-plugin/README.md).
+Then trust its hooks with `/hooks` in Codex, and remove the agent skill there: `npx skills remove peer -g -a codex`. See [codex-plugin/README.md](codex-plugin/README.md).
 
 **Updating:**
 
@@ -109,17 +109,17 @@ Open a **local** Claude Code chat in your Git checkout. Do not use a separate wo
 /peer add CSV export to the reports page
 ```
 
-With the [Claude Code plugin](plugin/README.md), send `/peer:team add CSV export to the reports page` instead.
+With the [Claude Code plugin](plugin/README.md), send `/peer:peer add CSV export to the reports page` instead.
 
 Claude becomes main. It starts a room and runs Codex in the background as the reader. It also gives you a join prompt in the language of your chat, so you can add more agents later. See [How It Works](#how-it-works) for the steps that follow.
 
 To start from Codex, send `$peer <task>` in a local Codex chat. Codex becomes main and runs Claude Code as the reader. The agent that gets the task is always main.
 
-To watch the conversation, run `peer` in a terminal, or open the plugin's pane with `/peer:room`.
+To watch the conversation, run `peer` in a terminal, or open the Claude Code plugin's pane with 👥 at the right of the prompt footer.
 
 ### Examples
 
-The examples use the standalone skill's `/peer`; with the Claude Code plugin, use `/peer:team`.
+The examples use the standalone skill's `/peer`; with the Claude Code plugin, use `/peer:peer`.
 
 Add experts. Main runs each one in the background with its own role. Roles are free-form names:
 

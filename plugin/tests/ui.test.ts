@@ -101,26 +101,6 @@ test('a long message shows its start until it is expanded', async ($, on) => {
   expect(drawn).toContain('show less')
 })
 
-test('/peer:say sends to a role, or to everyone', async ($, on) => {
-  const ran = await start($, on)
-  await $.command.run({ command: 'peer:say', args: 'reader please look', origin: { kind: 'person' } } as never)
-  await $.command.run({ command: 'peer:say', args: 'hello all of you', origin: { kind: 'person' } } as never)
-  const sends = ran.filter(argv => argv[1] === 'send')
-  expect(sends[0]).toEqual(['peer', 'send', 'csv-export', '--as', 'user', '--to', 'reader', '--text', 'please look'])
-  expect(sends[1]).toEqual(['peer', 'send', 'csv-export', '--as', 'user', '--to', '*', '--text', 'hello all of you'])
-})
-
-test('/peer:add asks main to add a member, and checks the agent', async ($, on) => {
-  const ran = await start($, on)
-  const bad = await $.command.run({ command: 'peer:add', args: 'gemini a tester', origin: { kind: 'person' } } as never)
-  expect(JSON.stringify(bad)).toContain('usage')
-  await $.command.run({ command: 'peer:add', args: 'codex security reviewer', origin: { kind: 'person' } } as never)
-  const send = ran.find(argv => argv[1] === 'send')
-  expect(send?.slice(0, 7)).toEqual(['peer', 'send', 'csv-export', '--as', 'user', '--to', 'main'])
-  expect(send?.[8]).toContain('Add a member using codex')
-  expect(send?.[8]).toContain('security reviewer')
-})
-
 test('the footer counts messages the pane has not shown and opens the pane', async ($, on) => {
   const ran = await start($, on)
   for (const surface of ['terminal', 'desktop'] as const) {
@@ -171,8 +151,11 @@ test('end room acts on a second press within three seconds', async ($, on) => {
 })
 
 test('an ended room shows every member stopped', async ($, on) => {
+  // The room this session started stays in the pane once it has ended.
+  on('tool.call', { tool: 'Bash' }, () => ({ result: { stdout: `${JSON.stringify(ROOM)}\n`, stderr: '', interrupted: false } }) as never)
+  on('prompt.submit', (_, e) => ({ text: e.text }) as never)
   await start($, on, lines({ event: 'room', room: { ...ROOM, ended_at: '2026-10-05T21:00:00Z' } }, { event: 'ready' }))
-  await $.command.run({ command: 'peer:room', args: 'csv-export', origin: { kind: 'person' } } as never)
+  await $.tool.call({ tool: 'Bash', command: 'peer start csv-export --agent claude' } as never)
   const ui = await $.ui.mount({ plugin: 'peer', surface: 'desktop', component: 'Pane', requestId: 'peer', props: PANE })
   const drawn = JSON.stringify(await ui.drawn())
   expect(drawn).toContain('○ reader')

@@ -1,5 +1,5 @@
 ---
-name: team
+name: peer
 description: "Work with other local coding agents on one task in this Git checkout through peer rooms: one main agent leads and edits, members discuss and review, and workers edit their part. Use when the user asks agents to discuss, implement, review or split a task together, or to join a peer room."
 ---
 
