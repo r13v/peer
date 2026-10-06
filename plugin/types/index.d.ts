@@ -40,6 +40,8 @@ export type PeerState = {
   // started or led here, or joined from here; a room stays once it ends.
   own: string[]
   watchError: string | null
+  // ackErrors holds, per led room, why main's cursor could not move.
+  ackErrors: Record<string, string>
   log: PeerLogEntry[]
   delivered: Record<string, PeerMark | null>
   notified: string[]

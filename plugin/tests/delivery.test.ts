@@ -120,3 +120,67 @@ test('a failed ack is tried again, and the batch is not delivered twice', async 
   expect(tools.acks).toEqual(['m1', 'm1'])
   expect(tools.submits).toHaveLength(1)
 })
+
+test("a room whose ack keeps failing does not hold back another room's delivery", async ($, on) => {
+  const clock = mock.clock(on)
+  const other = { ...ROOM, id: 'csv-import', started_at: '2026-10-05T21:00:00Z' }
+  const submits: string[] = []
+  const acks: string[] = []
+  let isAckOld = true
+  let release = () => {}
+  const gate = new Promise<void>(resolve => (release = resolve))
+  on('process.spawn', async function* (_, e, next) {
+    if (e.argv[1] !== 'watch') return yield* next(e)
+    yield { stream: 'stdout', text: lines({ event: 'room', room: ROOM }, { event: 'message', room: ROOM.id, message: message(1) }, { event: 'ready' }) }
+    await gate
+    yield { stream: 'stdout', text: lines({ event: 'room', room: other }, { event: 'message', room: other.id, message: message(2) }) }
+    await new Promise(() => {})
+    return { code: 0, signal: null } as never
+  })
+  on('process.run', (_, e) => {
+    if (e.argv[1] !== 'ack') return { value: { exitCode: 0, stdout: '', stderr: '' } } as never
+    acks.push(`${e.argv[2]}:${e.argv[e.argv.indexOf('--upto') + 1]}`)
+    // An old peer CLI knows no ack.
+    if (isAckOld && e.argv[2] === ROOM.id) return { value: { exitCode: 1, stdout: '', stderr: 'peer: usage: peer, peer --version' } } as never
+    return { value: { exitCode: 0, stdout: '', stderr: '' } } as never
+  })
+  on('prompt.submit', (_, e) => {
+    submits.push(e.text)
+    return { text: e.text } as never
+  })
+  on('tool.call', { tool: 'Bash' }, (_, e) => {
+    const room = e.command.includes(other.id) ? other : ROOM
+    return { result: { stdout: `${JSON.stringify(room)}\n`, stderr: '', interrupted: false } } as never
+  })
+  on('session.start', (_, e) => ({ cwd: e.cwd }) as never)
+  on('session.cwd', () => ({ value: '/repo' }) as never)
+  on('ui.open', () => ({ value: { isPlaced: true } }) as never)
+  on('ui.scroll', () => ({ value: {} }) as never)
+  on('ui.panes', () => ({ value: [] }) as never)
+  await $.session.start({ source: 'startup', cwd: '/repo' } as never)
+  await new Promise(resolve => setTimeout(resolve, 50))
+  await $.tool.call({ tool: 'Bash', command: `peer start ${ROOM.id} --agent claude` } as never)
+  await new Promise(resolve => setTimeout(resolve, 50))
+  expect(submits.map(delivered)).toEqual([[1]])
+  // The next pump fails on the first room's saved mark again.
+  await clock.advance(3000)
+  await new Promise(resolve => setTimeout(resolve, 50))
+  release()
+  await new Promise(resolve => setTimeout(resolve, 50))
+  await $.tool.call({ tool: 'Bash', command: `peer start ${other.id} --agent claude` } as never)
+  await new Promise(resolve => setTimeout(resolve, 50))
+  expect(submits.map(delivered)).toEqual([[1], [2]])
+  expect(acks).toContain(`${other.id}:m2`)
+  // The pane tells why the first room's cursor stands still.
+  const pane = await $.ui.mount({ plugin: 'peer', surface: 'desktop', component: 'Pane', requestId: 'peer', props: { isFocused: false } } as never)
+  const drawn = JSON.stringify(await pane.drawn())
+  expect(drawn).toContain(`peer ack failed for ${ROOM.id}: update the peer CLI`)
+  expect(drawn).not.toContain(`peer ack failed for ${other.id}`)
+  // Once ack works, the next try moves the cursor and the error goes.
+  isAckOld = false
+  const tried = acks.length
+  await clock.advance(3000)
+  await new Promise(resolve => setTimeout(resolve, 50))
+  expect(acks.slice(tried)).toContain(`${ROOM.id}:m1`)
+  expect(JSON.stringify(await pane.drawn())).not.toContain('peer ack failed')
+})

@@ -20,6 +20,7 @@ const INITIAL: PeerState = {
   led: [],
   own: [],
   watchError: null,
+  ackErrors: {},
   log: [],
   // delivered marks, per led room, the last message for main that is in
   // the chat, so a reload goes on from it.
@@ -38,6 +39,7 @@ const confirm = 'confirm'
 const led = 'led'
 const own = 'own'
 const watchError = 'watchError'
+const ackErrors = 'ackErrors'
 const log = 'log'
 const delivered = 'delivered'
 const notified = 'notified'
@@ -359,41 +361,54 @@ async function pump($: Engine) {
   }
   isPumping = true
   isPumpWanted = false
+  let hasFailed = false
   try {
     for (const id of await get($, led)) {
-      // watch can print a room's end before its last messages: read the
-      // whole transcript once the room has ended, before the end note.
-      const hasEnded = Boolean((await get($, rooms))[id]?.ended_at)
-      if (hasEnded && !(await readLog($, id))) throw new Error('no log')
-      for (;;) {
-        const pending = after(forMain((await get($, messages))[id] ?? []), (await get($, delivered))[id] ?? null)
-        const batch = pending.slice(0, 16)
-        const last = batch[batch.length - 1]
-        if (!last) break
-        if (!(await deliver($, id, batch))) throw new Error('not delivered')
-        await put($, delivered, all => ({ ...all, [id]: { id: last.id, at: last.at } }))
-        await ack($, id, last)
-      }
-      // Ack the saved mark too: an ack that failed before a reload is
-      // tried again here.
-      await ack($, id, (await get($, delivered))[id] ?? null)
-      const room = (await get($, rooms))[id]
-      if (hasEnded && room) {
-        if (!(await get($, notified)).includes(id)) {
-          const reason = room.ended_reason ? ` (${room.ended_reason})` : ''
-          const note = `peer room ${id} has ended${reason}. Its members no longer read or answer messages.`
-          if (!(await deliver($, id, [], note))) throw new Error('not delivered')
-          await put($, notified, list => [...list, id])
-        }
-        await put($, led, list => list.filter(one => one !== id))
+      // A room that fails is tried again later; the rooms after it go on.
+      try {
+        await pumpRoom($, id)
+      } catch {
+        hasFailed = true
       }
     }
   } catch {
-    $.clock.after(3000, () => void pump($))
+    hasFailed = true
   } finally {
     isPumping = false
   }
+  if (hasFailed) $.clock.after(3000, () => void pump($))
   if (isPumpWanted) void pump($)
+}
+
+// pumpRoom puts what is new for main in led room id into the chat, then
+// tells main that the room ended once it has.
+async function pumpRoom($: Engine, id: string) {
+  // watch can print a room's end before its last messages: read the
+  // whole transcript once the room has ended, before the end note.
+  const hasEnded = Boolean((await get($, rooms))[id]?.ended_at)
+  if (hasEnded && !(await readLog($, id))) throw new Error('no log')
+  for (;;) {
+    const pending = after(forMain((await get($, messages))[id] ?? []), (await get($, delivered))[id] ?? null)
+    const batch = pending.slice(0, 16)
+    const last = batch[batch.length - 1]
+    if (!last) break
+    if (!(await deliver($, id, batch))) throw new Error('not delivered')
+    await put($, delivered, all => ({ ...all, [id]: { id: last.id, at: last.at } }))
+    await ack($, id, last)
+  }
+  // Ack the saved mark too: an ack that failed before a reload is
+  // tried again here.
+  await ack($, id, (await get($, delivered))[id] ?? null)
+  const room = (await get($, rooms))[id]
+  if (hasEnded && room) {
+    if (!(await get($, notified)).includes(id)) {
+      const reason = room.ended_reason ? ` (${room.ended_reason})` : ''
+      const note = `peer room ${id} has ended${reason}. Its members no longer read or answer messages.`
+      if (!(await deliver($, id, [], note))) throw new Error('not delivered')
+      await put($, notified, list => [...list, id])
+    }
+    await put($, led, list => list.filter(one => one !== id))
+  }
 }
 
 // ack moves main's cursor just past mark, the last message in the chat, so
@@ -401,8 +416,21 @@ async function pump($: Engine) {
 // misses nothing. A failed ack throws, and the pump tries again later.
 async function ack($: Engine, id: string, mark: PeerMark | null) {
   if (!mark) return
-  const { exitCode } = await peer($, ['ack', id, '--as', 'main', '--upto', mark.id])
-  if (exitCode !== 0) throw new Error('not acked')
+  const { exitCode, stderr } = await peer($, ['ack', id, '--as', 'main', '--upto', mark.id])
+  if (exitCode !== 0) {
+    // An old peer CLI has no ack and prints its usage.
+    const reason = /usage|unknown/i.test(stderr)
+      ? 'update the peer CLI (peer update or brew upgrade --cask peer)'
+      : stderr.trim().slice(0, 200) || `exit code ${exitCode}`
+    const text = `peer ack failed for ${id}: ${reason}`
+    await put($, ackErrors, all => (all[id] === text ? all : { ...all, [id]: text }))
+    throw new Error('not acked')
+  }
+  await put($, ackErrors, all => {
+    if (!(id in all)) return all
+    const { [id]: _, ...rest } = all
+    return rest
+  })
 }
 
 // deliver queues one batch, or a note, as a turn of its own: the session
@@ -520,6 +548,11 @@ export const register: Register = on => {
         <Box flexDirection="column">
           <Text dimColor>No active peer room in this checkout. Start one with /peer:peer TASK.</Text>
           {st.watchError && <Text color="red">{st.watchError}</Text>}
+          {Object.entries(st.ackErrors).map(([id, text]) => (
+            <Text key={`ack-${id}`} color="red">
+              {text}
+            </Text>
+          ))}
         </Box>
       )
     }
@@ -599,6 +632,11 @@ export const register: Register = on => {
           {isOpen && armed('end', 'end', '⏹ end', ['end', room.id, '--as', 'user'])}
         </Box>
         {st.watchError && <Text color="red">{st.watchError}</Text>}
+        {Object.entries(st.ackErrors).map(([id, text]) => (
+          <Text key={`ack-${id}`} color="red">
+            {text}
+          </Text>
+        ))}
       </Box>
     )
 
