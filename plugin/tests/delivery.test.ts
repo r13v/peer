@@ -40,7 +40,7 @@ async function lead(
     return { code: 0, signal: null } as never
   })
   on('process.run', (_, e) => {
-    // ack moves main's cursor up to the message after --upto.
+    // ack moves main's cursor just past the --upto message.
     if (e.argv[1] === 'ack') {
       tools.acks.push(e.argv[e.argv.indexOf('--upto') + 1] ?? '')
       if (tools.failAcks > 0) {
