@@ -1,9 +1,9 @@
 {
   "name": "peer",
-  "version": "0.1.1",
   "description": "Watch and drive peer rooms from Claude Code, and deliver room messages to main as they come",
   "author": {
     "name": "r13v"
   },
-  "types": "./types/index.d.ts"
+  "types": "./types/index.d.ts",
+  "version": "0.1.31"
 }

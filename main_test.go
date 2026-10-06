@@ -25,6 +25,17 @@ var realStartMember func([]string, string, []string, string, string) (int, error
 var realStopMember func(int, string) error
 
 func TestMain(m *testing.M) {
+	if len(os.Args) > 1 && os.Args[1] == "forward" { // codexHook runs the test binary as peer
+		cwd, err := os.Getwd()
+		if err == nil {
+			err = run(os.Args[1:], os.Stdin, os.Stdout, cwd)
+		}
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "peer:", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
 	if len(os.Args) > 1 && os.Args[1] == "stamp" { // startMember runs the test binary as peer
 		if err := stamp(os.Stdin, os.Stdout); err != nil {
 			os.Exit(1)

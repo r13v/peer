@@ -36,7 +36,7 @@ var mainInstructions []byte
 //go:embed instructions/worker.md
 var workerInstructions []byte
 
-const usage = "usage: peer, peer --version, peer update, peer skills flow|main|member|worker, peer start NAME, peer join|invite|kick ID ROLE, peer send|wait|end ID --as ROLE, peer send ID --as ROLE --text TEXT, peer wait ID --as ROLE --timeout DURATION, peer status [ID], peer history, peer watch [ID], peer log ID [--json], or peer memberlog ID ROLE [--follow]"
+const usage = "usage: peer, peer --version, peer update, peer skills flow|main|member|worker, peer start NAME, peer join|invite|kick ID ROLE, peer send|wait|end ID --as ROLE, peer send ID --as ROLE --text TEXT, peer wait ID --as ROLE --timeout DURATION, peer ack ID --as ROLE --upto MESSAGE_ID, peer forward ID --as main --codex-thread UUID, peer status [ID], peer history, peer watch [ID], peer log ID [--json], or peer memberlog ID ROLE [--follow]"
 
 // version is set at release build time.
 var version = "dev"
@@ -76,6 +76,9 @@ func run(args []string, in io.Reader, out io.Writer, cwd string) error {
 	if args[0] == "stamp" { // hidden: startMember pipes a member's output through it
 		return stamp(in, out)
 	}
+	if args[0] == "codex-hook" { // hidden: the Codex plugin's hooks run it
+		return codexHook(in, out)
+	}
 	if args[0] == "skills" {
 		docs := map[string][]byte{"flow": flowInstructions, "main": mainInstructions, "member": memberInstructions, "worker": workerInstructions}
 		if len(args) != 2 || docs[args[1]] == nil {
@@ -99,6 +102,8 @@ func run(args []string, in io.Reader, out io.Writer, cwd string) error {
 	worker := fs.Bool("worker", false, "let the invited member edit files")
 	worktree := fs.Bool("worktree", false, "give the invited worker its own worktree")
 	model := fs.String("model", "", "model for the invited member's CLI")
+	upto := fs.String("upto", "", "message ID that ack marks read up to")
+	thread := fs.String("codex-thread", "", "Codex session UUID that forward queues messages to")
 	var text *string // send reads stdin unless --text is given
 	fs.Func("text", "message text for send instead of stdin", func(v string) error {
 		text = &v
@@ -239,6 +244,27 @@ func run(args []string, in io.Reader, out io.Writer, cwd string) error {
 			return err
 		}
 		return s.wait(id, *actor, timeout, out)
+	case "ack":
+		if err := needID("ack"); err != nil {
+			return err
+		}
+		if err := checkName(*actor); err != nil {
+			return err
+		}
+		if *upto == "" {
+			return errors.New("usage: peer ack ID --as ROLE --upto MESSAGE_ID")
+		}
+		return s.ack(id, *actor, *upto)
+	case "forward":
+		if err := needID("forward"); err != nil {
+			return err
+		}
+		if *actor != mainRole || !codexThread.MatchString(*thread) {
+			return errors.New("usage: peer forward ID --as main --codex-thread UUID; it delivers main's messages to the Codex session with that UUID")
+		}
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		return s.forward(ctx, id, *actor, *thread, out)
 	case "end":
 		if err := needID("end"); err != nil {
 			return err

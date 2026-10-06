@@ -17,7 +17,7 @@ const message = (i: number) => ({
 
 const lines = (...events: unknown[]) => events.map(event => `${JSON.stringify(event)}\n`).join('')
 
-type Tools = { submits: string[]; waits: number; release: () => void }
+type Tools = { submits: string[]; acks: string[]; failAcks: number; release: () => void }
 
 // lead starts the plugin, gives it a watch that prints the room and the
 // messages, then holds until released and prints more, and makes this
@@ -29,7 +29,7 @@ async function lead(
   later: unknown[],
   answer: (text: string, n: number, tools: Tools) => unknown,
 ) {
-  const tools: Tools = { submits: [], waits: 0, release: () => {} }
+  const tools: Tools = { submits: [], acks: [], failAcks: 0, release: () => {} }
   const gate = new Promise<void>(resolve => (tools.release = resolve))
   on('process.spawn', async function* (_, e, next) {
     if (e.argv[1] !== 'watch') return yield* next(e)
@@ -40,7 +40,14 @@ async function lead(
     return { code: 0, signal: null } as never
   })
   on('process.run', (_, e) => {
-    if (e.argv[1] === 'wait') tools.waits += 1
+    // ack moves main's cursor up to the message after --upto.
+    if (e.argv[1] === 'ack') {
+      tools.acks.push(e.argv[e.argv.indexOf('--upto') + 1] ?? '')
+      if (tools.failAcks > 0) {
+        tools.failAcks -= 1
+        return { value: { exitCode: 1, stdout: '', stderr: 'peer: no message' } } as never
+      }
+    }
     return { value: { exitCode: 0, stdout: '', stderr: '' } } as never
   })
   on('prompt.submit', async (_, e) => {
@@ -69,16 +76,17 @@ test('a refused batch is tried again alone; the cursor waits for it', async ($, 
   const tools = await lead($, on, all, [], (text, n) => (n === 2 ? { drop: 'busy' } : { text }))
   expect(delivered(tools.submits[0] ?? '')).toEqual(Array.from({ length: 16 }, (_, i) => i + 1))
   expect(delivered(tools.submits[1] ?? '')).toEqual([17, 18, 19, 20])
-  expect(tools.waits).toBe(0)
+  // The first batch is in the chat, so the cursor moves past it.
+  expect(tools.acks).toEqual(['m16'])
   await clock.advance(3000)
   await new Promise(resolve => setTimeout(resolve, 50))
   expect(tools.submits).toHaveLength(3)
   expect(delivered(tools.submits[2] ?? '')).toEqual([17, 18, 19, 20])
-  expect(tools.waits).toBeGreaterThan(0)
+  expect(tools.acks.at(-1)).toBe('m20')
 })
 
-test('a message that comes while a batch waits for its turn follows it, before the cursor moves', async ($, on) => {
-  let waitsAtSecond = -1
+test('a message that comes while a batch waits for its turn follows it, and the cursor never passes it', async ($, on) => {
+  let acksAtSecond = -1
   const tools = await lead(
     $,
     on,
@@ -89,12 +97,26 @@ test('a message that comes while a batch waits for its turn follows it, before t
         // While the first turn waits, the watch prints another message.
         held.release()
         await new Promise(resolve => setTimeout(resolve, 30))
-      } else waitsAtSecond = held.waits
+      } else acksAtSecond = held.acks.length
       return { text }
     },
   )
   await new Promise(resolve => setTimeout(resolve, 100))
   expect(tools.submits.map(delivered)).toEqual([[1], [2]])
-  expect(waitsAtSecond).toBe(0)
-  expect(tools.waits).toBeGreaterThan(0)
+  // The second message waits behind the first turn, not behind its ack.
+  expect(acksAtSecond).toBeLessThanOrEqual(1)
+  expect(tools.acks.at(-1)).toBe('m2')
+})
+
+test('a failed ack is tried again, and the batch is not delivered twice', async ($, on) => {
+  const clock = mock.clock(on)
+  const tools = await lead($, on, [{ event: 'message', room: ROOM.id, message: message(1) }], [], (text, n, held) => {
+    if (n === 1) held.failAcks = 1
+    return { text }
+  })
+  expect(tools.acks).toEqual(['m1'])
+  await clock.advance(3000)
+  await new Promise(resolve => setTimeout(resolve, 50))
+  expect(tools.acks).toEqual(['m1', 'm1'])
+  expect(tools.submits).toHaveLength(1)
 })

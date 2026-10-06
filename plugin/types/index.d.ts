@@ -36,6 +36,9 @@ export type PeerState = {
   tab: string
   confirm: string | null
   led: string[]
+  // own lists the rooms of this session, the only ones the plugin shows:
+  // started or led here, or joined from here; a room stays once it ends.
+  own: string[]
   watchError: string | null
   log: PeerLogEntry[]
   delivered: Record<string, PeerMark | null>
