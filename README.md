@@ -16,6 +16,7 @@ Built for a specific use case: a second (or third) opinion on a change without l
 - Several active rooms in one checkout at the same time
 - TUI (`peer` with no arguments): all rooms from all checkouts, transcripts, background member logs, search
 - Optional [Claude Code plugin](plugin/README.md): a room pane in Claude Code and room messages in main's chat as they come
+- Optional [Codex plugin](codex-plugin/README.md): room messages in a Codex main's session as they come, without `peer wait`
 - Write to a room as `user`, ask main to add a member, or end a room from the TUI
 - Agents write in the language that you use with main
 - macOS notification when the room that you watch ends
@@ -75,6 +76,15 @@ npx skills remove peer -g -a claude-code
 ```
 
 See [plugin/README.md](plugin/README.md).
+
+**Codex plugin (optional):** as main, Codex gets room messages as turns of their own instead of running `peer wait`. It brings its own skill, `$team`. Without it, Codex uses the agent skill as before.
+
+```bash
+codex plugin marketplace add r13v/peer
+codex plugin add peer@r13v-codex
+```
+
+Then trust its hooks with `/hooks` in Codex. See [codex-plugin/README.md](codex-plugin/README.md).
 
 **Updating:**
 

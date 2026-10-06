@@ -737,35 +737,18 @@ func (s *store) deliverBatch(sid, as string, write func(batch) error) (bool, err
 		if err := v.check(as); err != nil {
 			return err
 		}
+		if isForwarded, err := s.forwarding(v.ID, as); err != nil {
+			return err
+		} else if isForwarded {
+			return fmt.Errorf("peer forward delivers room %s for %s; do not run peer wait for this room", v.ID, as)
+		}
 		offset, err := s.cursor(v.ID, as)
 		if err != nil {
 			return err
 		}
-		var b batch
-		size, full := 0, false
-		err = s.scan(v.ID, offset, func(m message, next int64) bool {
-			if !m.isFor(as) {
-				offset = next
-				return true
-			}
-			j, _ := json.Marshal(m)
-			if full || len(b.Messages) > 0 && size+len(j) > batchBytes {
-				b.HasMore = true
-				return false
-			}
-			b.Messages, size, offset = append(b.Messages, m), size+len(j), next
-			b.Oversized = len(j) > batchBytes
-			full = b.Oversized || len(b.Messages) == batchCount
-			return true
-		})
+		b, offset, err := s.nextBatch(v, as, offset)
 		if err != nil {
 			return err
-		}
-		switch {
-		case !b.HasMore && v.EndedAt != "":
-			b.Status, b.Reason = "ended", v.EndedReason
-		case len(b.Messages) > 0:
-			b.Status = "messages"
 		}
 		if b.Status != "" {
 			if err := write(b); err != nil {
@@ -778,6 +761,79 @@ func (s *store) deliverBatch(sid, as string, write func(batch) error) (bool, err
 		return writeAtomic(s.cursorPath(v.ID, as), []byte(strconv.FormatInt(offset, 10)+"\n"))
 	})
 	return delivered, err
+}
+
+// nextBatch reads as's next batch of room v after offset and returns it with
+// the offset just past it; its status is empty while the room is active and
+// nothing is unread. The caller holds the store lock.
+func (s *store) nextBatch(v session, as string, offset int64) (batch, int64, error) {
+	var b batch
+	size, full := 0, false
+	err := s.scan(v.ID, offset, func(m message, next int64) bool {
+		if !m.isFor(as) {
+			offset = next
+			return true
+		}
+		j, _ := json.Marshal(m)
+		if full || len(b.Messages) > 0 && size+len(j) > batchBytes {
+			b.HasMore = true
+			return false
+		}
+		b.Messages, size, offset = append(b.Messages, m), size+len(j), next
+		b.Oversized = len(j) > batchBytes
+		full = b.Oversized || len(b.Messages) == batchCount
+		return true
+	})
+	if err != nil {
+		return b, offset, err
+	}
+	switch {
+	case !b.HasMore && v.EndedAt != "":
+		b.Status, b.Reason = "ended", v.EndedReason
+	case len(b.Messages) > 0:
+		b.Status = "messages"
+	}
+	return b, offset, nil
+}
+
+// ack moves as's cursor in room sid to just past message upto, and never
+// back: a message already behind the cursor is acknowledged already.
+func (s *store) ack(sid, as, upto string) error {
+	return s.locked(func() error {
+		v, err := s.load(sid)
+		if err != nil {
+			return err
+		}
+		if err := v.check(as); err != nil {
+			return err
+		}
+		offset, err := s.cursor(v.ID, as)
+		if err != nil {
+			return err
+		}
+		next := int64(-1)
+		err = s.scan(v.ID, offset, func(m message, end int64) bool {
+			if m.ID == upto {
+				next = end
+			}
+			return next < 0
+		})
+		if err != nil {
+			return err
+		}
+		if next >= 0 {
+			return writeAtomic(s.cursorPath(v.ID, as), []byte(strconv.FormatInt(next, 10)+"\n"))
+		}
+		isBehind := false
+		err = s.scan(v.ID, 0, func(m message, end int64) bool {
+			isBehind = m.ID == upto
+			return !isBehind && end < offset
+		})
+		if err != nil || isBehind {
+			return err
+		}
+		return fmt.Errorf("no message %s in room %s", upto, v.ID)
+	})
 }
 
 // wait prints as's unread messages as one batch once there are any, or a

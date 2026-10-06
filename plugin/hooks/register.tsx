@@ -353,12 +353,11 @@ async function pump($: Engine) {
         if (!last) break
         if (!(await deliver($, id, batch))) throw new Error('not delivered')
         await put($, delivered, all => ({ ...all, [id]: { id: last.id, at: last.at } }))
+        await ack($, id, last)
       }
-      // Move main's cursor to the end, so unread counts stay right. It can
-      // pass messages that are not in the chat yet: the transcript, not the
-      // cursor, is what this plugin delivers from, so they still come; only
-      // a wait run after the plugin is turned off would miss them.
-      await ack($, id)
+      // Ack the saved mark too: an ack that failed before a reload is
+      // tried again here.
+      await ack($, id, (await get($, delivered))[id] ?? null)
       const room = (await get($, rooms))[id]
       if (hasEnded && room) {
         if (!(await get($, notified)).includes(id)) {
@@ -378,12 +377,13 @@ async function pump($: Engine) {
   if (isPumpWanted) void pump($)
 }
 
-// ack moves main's cursor to the end of the room.
-async function ack($: Engine, id: string) {
-  for (let i = 0; i < 20; i++) {
-    const { exitCode, stdout } = await peer($, ['wait', id, '--as', 'main', '--timeout', '0'])
-    if (exitCode !== 0 || !stdout.includes('"has_more":true')) return
-  }
+// ack moves main's cursor just past mark, the last message in the chat, so
+// unread counts stay right and a wait run after the plugin is turned off
+// misses nothing. A failed ack throws, and the pump tries again later.
+async function ack($: Engine, id: string, mark: PeerMark | null) {
+  if (!mark) return
+  const { exitCode } = await peer($, ['ack', id, '--as', 'main', '--upto', mark.id])
+  if (exitCode !== 0) throw new Error('not acked')
 }
 
 // deliver queues one batch, or a note, as a turn of its own: the session

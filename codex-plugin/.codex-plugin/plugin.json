@@ -1,0 +1,10 @@
+{
+  "name": "peer",
+  "version": "0.1.0",
+  "description": "Lead peer rooms from Codex: room messages for main come into the session as turns of their own, without peer wait",
+  "author": {
+    "name": "r13v"
+  },
+  "skills": "./skills/",
+  "hooks": "./hooks/hooks.json"
+}
