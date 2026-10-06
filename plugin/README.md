@@ -11,7 +11,7 @@ The `peer` plugin shows a session's peer rooms in Claude Code: in the Code tab o
 - **Delivery to main.** When Claude Code is main of a room, the plugin reads the room for main and puts each batch of messages into the chat as a turn of its own: right away while Claude is idle, and right after the running turn while it works. These rows are hidden in the chat, since the toast, the pane and the footer's count show the messages; in the terminal and VS Code, ctrl+o shows them as the model reads them. Main does not run `peer wait`; the plugin answers a `wait` for the room itself, so the room has only one reader as main.
 - **Toasts** when a member joins, exits or is kicked, and when a room ends.
 
-The plugin's version is the CLI's: each release of `peer` sets it, so `claude plugin update` brings the plugin that goes with the new CLI. The plugin runs `peer watch`, `peer memberlog` and `peer ack` from your `PATH`, so it needs a `peer` with these commands. After each delivery, `peer ack` moves main's cursor just past the last message in the chat, so a `peer wait` run after the plugin is turned off gets the rest.
+The plugin's version is the CLI's: each release of `peer` sets it, so `claude plugin update` brings the plugin that goes with the new CLI. The plugin runs `peer watch`, `peer memberlog` and `peer ack` from your `PATH`, so it needs a `peer` with these commands. After each delivery, `peer ack` moves main's cursor just past the last message in the chat, so a `peer wait` run after the plugin is turned off gets the rest. When `peer ack` fails, for example with an older `peer` earlier on `PATH`, the pane shows why in red; the plugin tries that room again and goes on delivering the other rooms.
 
 ## Install
 
