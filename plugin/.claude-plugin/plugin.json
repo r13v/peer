@@ -5,5 +5,6 @@
   "author": {
     "name": "r13v"
   },
-  "types": "./types/index.d.ts"
+  "types": "./types/index.d.ts",
+  "version": "0.1.31"
 }

@@ -39,4 +39,6 @@ If you installed the agent skill for Codex before, remove it, so that only the p
 npx skills remove peer -g -a codex
 ```
 
+The plugin's version is the CLI's: each release of `peer` sets it, so `codex plugin marketplace upgrade` brings the plugin that goes with the new CLI.
+
 To install `peer` itself, see the [main README](../README.md).

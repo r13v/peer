@@ -36,26 +36,45 @@ jobs:
         run: |
           [ -n "$HOMEBREW_TAP_TOKEN" ] || { echo "HOMEBREW_TAP_TOKEN is not set" >&2; exit 1; }
           git fetch --force --tags origin main
+          semver='^v[0-9]+\.[0-9]+\.[0-9]+$'
+          tagged() { git tag --points-at "$1" | grep -E "$semver" | sort -V | tail -n 1 || true; }
+          head="$(git rev-parse FETCH_HEAD)"
+          # The release is the tagged commit that sets the plugins' version.
+          # A rerun or a dispatch reuses it while it is main's head: this
+          # commit, or the release commit made for this commit.
+          tag=''
+          if [ "$head" = "$GITHUB_SHA" ] || [ "$(git rev-parse "$head^" 2>/dev/null)" = "$GITHUB_SHA" ]; then
+            tag="$(tagged "$head")"
+          fi
+          if [ -n "$tag" ]; then
+            git checkout -q "$tag"
+            echo "tag=$tag" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           # A queued run for an older commit must not publish over a newer release.
-          if [ "$(git rev-parse FETCH_HEAD)" != "$GITHUB_SHA" ]; then
+          if [ "$head" != "$GITHUB_SHA" ]; then
             echo "main moved past $GITHUB_SHA; skipping release"
             echo "skip=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          semver='^v[0-9]+\.[0-9]+\.[0-9]+$'
-          # A rerun reuses the tag already on this commit.
-          tag="$(git tag --points-at "$GITHUB_SHA" | grep -E "$semver" | sort -V | tail -n 1 || true)"
-          if [ -z "$tag" ]; then
-            last="$(git tag --list 'v*' | grep -E "$semver" | sort -V | tail -n 1 || true)"
-            if [ -z "$last" ]; then
-              tag=v0.1.0
-            else
-              IFS=. read -r major minor patch <<< "${last#v}"
-              tag="v$major.$minor.$((patch + 1))"
-            fi
-            git tag "$tag" "$GITHUB_SHA"
-            git push origin "refs/tags/$tag"
+          last="$(git tag --list 'v*' | grep -E "$semver" | sort -V | tail -n 1 || true)"
+          if [ -z "$last" ]; then
+            tag=v0.1.0
+          else
+            IFS=. read -r major minor patch <<< "${last#v}"
+            tag="v$major.$minor.$((patch + 1))"
           fi
+          # The plugins carry the CLI's version, so Claude Code and Codex see
+          # each release as an update of them too.
+          for manifest in plugin/.claude-plugin/plugin.json codex-plugin/.codex-plugin/plugin.json; do
+            jq --arg v "${tag#v}" '.version = $v' "$manifest" > "$manifest.new"
+            mv "$manifest.new" "$manifest"
+          done
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+            commit -q -m "Release $tag" -- plugin/.claude-plugin/plugin.json codex-plugin/.codex-plugin/plugin.json
+          git tag "$tag"
+          # Both or neither: a main that moved since the fetch refuses the push.
+          git push --atomic origin HEAD:main "refs/tags/$tag"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
       - name: Release
         if: steps.tag.outputs.skip != 'true'
