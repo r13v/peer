@@ -34,16 +34,24 @@ const WATCH = lines({ event: 'room', room: ROOM }, ...MESSAGES.map(message => ({
 
 // start runs the plugin against a checkout that tracks main.go, in UTC+3,
 // with watch printing what it is given and memberlog printing memberlog,
-// and records the commands it runs and the panes it opens.
+// and records the commands it runs and the panes it opens. The session
+// joins each room that watch prints unless isOwn is false, so the rooms
+// are its own.
 async function start(
   $: Parameters<Parameters<typeof test>[1]>[0],
   on: Parameters<Parameters<typeof test>[1]>[1],
-  watch = WATCH,
+  watch: string | { stderr: string } = WATCH,
   memberlog = '',
+  isOwn = true,
 ) {
   const ran: string[][] = []
   on('process.spawn', async function* (_, e, next) {
     if (e.argv[1] !== 'watch') return yield* next(e)
+    ran.push([...e.argv])
+    if (typeof watch !== 'string') {
+      yield { stream: 'stderr', text: watch.stderr }
+      return { code: 1, signal: null } as never
+    }
     yield { stream: 'stdout', text: watch }
     return { code: 0, signal: null } as never
   })
@@ -60,8 +68,20 @@ async function start(
   })
   on('ui.scroll', () => ({ value: {} }) as never)
   on('ui.panes', () => ({ value: [] }) as never)
+  // A Bash call prints the room it names, as peer join and peer start do;
+  // a join as main, a reserved role, fails and prints nothing.
+  on('tool.call', { tool: 'Bash' }, (_, e) => {
+    const command = (e as { command: string }).command
+    const id = /peer \w+ ([a-z0-9-]+)/.exec(command)?.[1] ?? ROOM.id
+    if (/^peer join \S+ main$/.test(command)) return { result: { stdout: '', stderr: 'peer: role "main" is reserved\n', interrupted: false } } as never
+    return { result: { stdout: `${JSON.stringify({ ...ROOM, id })}\n`, stderr: '', interrupted: false } } as never
+  })
   await $.session.start({ source: 'startup', cwd: '/repo' } as never)
   await new Promise(resolve => setTimeout(resolve, 50))
+  if (isOwn && typeof watch === 'string') {
+    const ids = new Set([...watch.matchAll(/"event":"room","room":\{"id":"([^"]+)"/g)].map(match => match[1]))
+    for (const id of ids) await $.tool.call({ tool: 'Bash', command: `peer join ${id} reader` } as never)
+  }
   return ran
 }
 
@@ -152,7 +172,6 @@ test('end room acts on a second press within three seconds', async ($, on) => {
 
 test('an ended room shows every member stopped', async ($, on) => {
   // The room this session started stays in the pane once it has ended.
-  on('tool.call', { tool: 'Bash' }, () => ({ result: { stdout: `${JSON.stringify(ROOM)}\n`, stderr: '', interrupted: false } }) as never)
   on('prompt.submit', (_, e) => ({ text: e.text }) as never)
   await start($, on, lines({ event: 'room', room: { ...ROOM, ended_at: '2026-10-05T21:00:00Z' } }, { event: 'ready' }))
   await $.tool.call({ tool: 'Bash', command: 'peer start csv-export --agent claude' } as never)
@@ -190,4 +209,54 @@ test("the plugin's own rows are hidden; others and the terminal's ctrl+o draw as
   })
   expect(JSON.stringify(await terminal.drawn())).toContain('engine')
   expect(JSON.stringify(await (await row('peer room is a nice idea', { kind: 'composer' })).drawn())).toContain('engine')
+})
+
+test("another session's room of the checkout is not shown", async ($, on) => {
+  // Beneath the plugin, the engine's own footer.
+  on('ui.render', { component: 'SessionMode' }, () => ({ type: 'Text', props: {}, children: ['engine'] }) as never)
+  const ran = await start($, on, WATCH, '', false)
+  expect(ran.some(argv => argv[0] === 'ui.open')).toBe(false)
+  const ui = await $.ui.mount({ plugin: 'peer', surface: 'desktop', component: 'Pane', requestId: 'peer', props: PANE })
+  const drawn = JSON.stringify(await ui.drawn())
+  expect(drawn).toContain('No active peer room')
+  expect(drawn).not.toContain('reader joined')
+  const footer = await $.ui.mount({ plugin: 'peer', surface: 'desktop', component: 'SessionMode', props: { modes: [] } })
+  expect(JSON.stringify(await footer.drawn())).toBe(JSON.stringify({ type: 'Text', props: {}, children: ['engine'] }))
+  // A failed join adopts nothing: alone, or inside a longer command line
+  // that prints the room with main in it.
+  await $.tool.call({ tool: 'Bash', command: 'peer join csv-export main' } as never)
+  await $.tool.call({ tool: 'Bash', command: 'peer join csv-export main; peer status csv-export' } as never)
+  expect(JSON.stringify(await footer.drawn())).not.toContain('👥')
+})
+
+test('outside a Git checkout, a failing watch writes nothing to the chat', async ($, on) => {
+  const clock = mock.clock(on)
+  const logged: string[] = []
+  on('ui.log', (_, e) => {
+    logged.push(e.text)
+    return { value: undefined } as never
+  })
+  const ran = await start($, on, { stderr: 'peer: run this command inside the shared Git checkout\n' })
+  for (let i = 0; i < 12; i++) {
+    await clock.advance(10_000)
+    await new Promise(resolve => setTimeout(resolve, 5))
+  }
+  const tries = ran.filter(argv => argv[1] === 'watch').length
+  expect(logged).toEqual([])
+  // It tries again, less and less often: a cd into a checkout is picked up.
+  expect(tries).toBeGreaterThan(1)
+  expect(tries).toBeLessThan(10)
+})
+
+test('a state from before own counts the rooms it led as its own', async ($, on) => {
+  // The session's state as an older module wrote it, until the first write.
+  const old = { selected: null, tab: 'chat', led: ['csv-export'], rooms: {}, messages: {} }
+  on('state.get', async (_, e, next) => {
+    const read = (await next(e)) as { value: { value: unknown; version: number } }
+    return (read.value.value === undefined ? { value: { ...read.value, value: old } } : read) as never
+  })
+  const ran = await start($, on, WATCH, '', false)
+  const ui = await $.ui.mount({ plugin: 'peer', surface: 'desktop', component: 'Pane', requestId: 'peer', props: PANE })
+  expect(ran.some(argv => argv[0] === 'ui.open')).toBe(true)
+  expect(JSON.stringify(await ui.drawn())).toContain('reader joined')
 })

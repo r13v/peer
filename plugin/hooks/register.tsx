@@ -18,6 +18,7 @@ const INITIAL: PeerState = {
   tab: 'chat',
   confirm: null,
   led: [],
+  own: [],
   watchError: null,
   log: [],
   // delivered marks, per led room, the last message for main that is in
@@ -35,6 +36,7 @@ const selected = 'selected'
 const tab = 'tab'
 const confirm = 'confirm'
 const led = 'led'
+const own = 'own'
 const watchError = 'watchError'
 const log = 'log'
 const delivered = 'delivered'
@@ -47,6 +49,10 @@ const HANDOFF =
 
 // Module variables start over on a reload; everything drawn is in $.state.
 let isReady = false
+// watch's last failure, so the transcript tells of each kind once, and its
+// pause before the next try.
+let lastWatchError = ''
+let watchRetry = 2500
 let isStarted = false
 let isPumping = false
 let isPumpWanted = false
@@ -61,16 +67,22 @@ let files = { repo: '', paths: new Set<string>() }
 
 // get reads a field of the plugin's state; while a drawing reads it, a
 // later put draws that drawing again.
+// normalize fills in what a state written by an older module lacks: own
+// starts as the rooms that state led.
+function normalize(value: Partial<PeerState> | undefined): PeerState {
+  return { ...INITIAL, ...value, own: value?.own ?? value?.led ?? [] }
+}
+
 async function get<K extends keyof PeerState>($: Engine, field: K): Promise<PeerState[K]> {
   const { value } = await $.state.get(STATE)
-  return (value ?? INITIAL)[field]
+  return normalize(value)[field]
 }
 
 // snapshot reads the whole state at once: a drawing reads it once, not
 // once per field.
 async function snapshot($: Engine): Promise<PeerState> {
   const { value } = await $.state.get(STATE)
-  return { ...INITIAL, ...value }
+  return normalize(value)
 }
 
 // put applies fn to a field and writes the state, again when another write
@@ -79,7 +91,7 @@ async function snapshot($: Engine): Promise<PeerState> {
 async function put<K extends keyof PeerState>($: Engine, field: K, fn: (old: PeerState[K]) => PeerState[K]) {
   for (;;) {
     const { value, version } = await $.state.get(STATE)
-    const old = value ?? INITIAL
+    const old = normalize(value)
     const next = fn(old[field])
     if (next === old[field]) return
     const written = await $.state.set(STATE, { ...old, [field]: next }, { ifVersion: version })
@@ -134,18 +146,19 @@ function peer($: Engine, argv: string[], timeoutMs = 30_000) {
   return $.process.run(['peer', ...argv], { timeoutMs })
 }
 
-// activeRooms lists the active rooms, the ones this session leads first,
-// then the newest first.
+// activeRooms lists this session's active rooms, the ones it leads first,
+// then the newest first. Other sessions' rooms of the checkout are theirs:
+// the plugin does not show them.
 function activeRooms(st: PeerState) {
   const isLed = (room: PeerRoom) => (st.led.includes(room.id) ? 0 : 1)
   return Object.values(st.rooms)
-    .filter(room => !room.ended_at)
+    .filter(room => !room.ended_at && st.own.includes(room.id))
     .sort((a, b) => isLed(a) - isLed(b) || b.started_at.localeCompare(a.started_at))
 }
 
 // current is the room the pane shows: the one picked, else the first active.
 function current(st: PeerState) {
-  const picked = st.selected ? st.rooms[st.selected] : undefined
+  const picked = st.selected && st.own.includes(st.selected) ? st.rooms[st.selected] : undefined
   return picked ?? activeRooms(st)[0] ?? null
 }
 
@@ -175,13 +188,22 @@ function watch($: Engine) {
     } catch (err) {
       stderr += String(err)
     }
-    $.ui.log(`peer watch stopped: ${stderr.trim().slice(0, 300) || 'no output'}`, { to: 'transcript' })
+    const reason = stderr.trim().slice(0, 300) || 'no output'
+    // A session outside a Git checkout has no rooms: that is not an error,
+    // and a cd into a checkout is picked up by the next try.
+    const isOutside = /inside the shared Git checkout/.test(reason)
+    if (!isOutside && reason !== lastWatchError) $.ui.log(`peer watch stopped: ${reason}`, { to: 'transcript' })
+    lastWatchError = reason
     await put($, watchError, () =>
-      /usage|unknown|not found|no such file/i.test(stderr)
-        ? 'peer watch failed: update the peer CLI (peer update or brew upgrade --cask peer)'
-        : `peer watch stopped${stderr ? `: ${stderr.trim().slice(0, 200)}` : ''}; retrying`,
+      isOutside
+        ? null
+        : /usage|unknown|not found|no such file/i.test(stderr)
+          ? 'peer watch failed: update the peer CLI (peer update or brew upgrade --cask peer)'
+          : `peer watch stopped: ${reason.slice(0, 200)}; retrying`,
     )
-    $.clock.after(5000, () => watch($))
+    // Each failure in a row waits twice as long, up to a minute.
+    watchRetry = Math.min(watchRetry * 2, 60_000)
+    $.clock.after(watchRetry, () => watch($))
   })()
 }
 
@@ -229,12 +251,19 @@ async function apply($: Engine, lines: string[]) {
     })
   }
   await put($, watchError, old => (old === null ? old : null))
+  if (ready) {
+    watchRetry = 2500
+    lastWatchError = ''
+  }
   if (isReady) {
+    const mine = new Set(await get($, own))
     for (const room of roomEvents) {
       const was = before[room.id]
+      if (!mine.has(room.id)) continue
       if (room.ended_at && was && !was.ended_at) $.ui.toast(`peer: room ${room.id} ended`)
     }
     for (const [id, list] of Object.entries(fresh)) {
+      if (!mine.has(id)) continue
       for (const m of list) {
         if (m.from === 'peer') $.ui.toast(`${id}: ${m.text}`)
       }
@@ -247,8 +276,9 @@ async function apply($: Engine, lines: string[]) {
     // of a led room's transcript, then its state, from log and status.
     const listed = new Set(roomEvents.map(room => room.id))
     const isLed = new Set(await get($, led))
+    const mine = new Set(await get($, own))
     for (const room of Object.values(await get($, rooms))) {
-      if (room.ended_at || listed.has(room.id)) continue
+      if (room.ended_at || listed.has(room.id) || !mine.has(room.id)) continue
       if (isLed.has(room.id) && !(await readLog($, room.id))) continue
       const { exitCode, stdout } = await peer($, ['status', room.id])
       if (exitCode === 0 && stdout.trim()) {
@@ -287,6 +317,7 @@ async function readLog($: Engine, id: string) {
 // a queued turn and its mark brings that batch again: at least once, not
 // exactly once.
 async function lead($: Engine, id: string, isNew = false) {
+  await put($, own, list => (list.includes(id) ? list : [...list, id]))
   if ((await get($, led)).includes(id)) return
   if (!(id in (await get($, delivered)))) {
     // From a new room, deliver everything; otherwise start after what main
@@ -461,9 +492,16 @@ export const register: Register = on => {
     for (const args of commands) {
       if (args[0] === 'end' && args[1] && asMain(args)) await put($, notified, list => [...list, args[1] ?? ''])
     }
+    // A room this session joins as a member is its own too: a peer join on
+    // a line of its own that printed the room with that role. On a longer
+    // line, another command can print the room after a failed join.
+    const stdout = (ran.result as { stdout?: string } | undefined)?.stdout ?? ''
+    const [cmd, id, role] = commands[0] ?? []
+    if (all.length === 1 && cmd === 'join' && id && role && joinedRoom(stdout, id, role)) {
+      await put($, own, list => (list.includes(id) ? list : [...list, id]))
+    }
     const start = commands.find(args => args[0] === 'start' && args[1])
     if (!start) return ran
-    const stdout = (ran.result as { stdout?: string } | undefined)?.stdout ?? ''
     const room = (await startedRoom(stdout)) ?? (await newRoom($, start[1] ?? '', startedAt))
     if (!room) return ran
     await put($, selected, () => room.id)
@@ -712,6 +750,19 @@ async function startedRoom(stdout: string) {
   } catch {
     return null
   }
+}
+
+// joinedRoom reports whether stdout holds room id as peer join prints it,
+// with role among its members.
+function joinedRoom(stdout: string, id: string, role: string) {
+  return stdout.split('\n').some(line => {
+    try {
+      const room = JSON.parse(line) as PeerRoom
+      return room.id === id && room.members?.some(m => m.role === role)
+    } catch {
+      return false
+    }
+  })
 }
 
 // newRoom finds the room a peer start NAME made when its output was cut or
