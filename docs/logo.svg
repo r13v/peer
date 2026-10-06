@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-labelledby="title">
+  <title id="title">peer — a second pair of eyes on your code</title>
+  <!-- All letter strokes are 28 units wide; pupils are 14-unit squares. -->
+  <g fill="#171717" transform="translate(76.76 329.72) scale(1.86)">
+    <path fill-rule="evenodd" d="M14 0H98Q112 0 112 14V126Q112 140 98 140H28V182Q28 196 14 196Q0 196 0 182V14Q0 0 14 0ZM28 28V112H84V28Z"/>
+    <g transform="translate(128)">
+      <path fill-rule="evenodd" d="M14 0H98Q112 0 112 14V70Q112 84 98 84H28V112H98Q112 112 112 126Q112 140 98 140H14Q0 140 0 126V14Q0 0 14 0ZM28 28H84V56H28Z"/>
+      <rect x="34" y="35" width="14" height="14"/>
+    </g>
+    <g transform="translate(256)">
+      <path fill-rule="evenodd" d="M14 0H98Q112 0 112 14V70Q112 84 98 84H28V112H98Q112 112 112 126Q112 140 98 140H14Q0 140 0 126V14Q0 0 14 0ZM28 28H84V56H28Z"/>
+      <rect x="34" y="35" width="14" height="14"/>
+    </g>
+    <path transform="translate(384)" d="M14 0H70Q84 0 84 14Q84 28 70 28H28V126Q28 140 14 140Q0 140 0 126V14Q0 0 14 0Z"/>
+  </g>
+</svg>

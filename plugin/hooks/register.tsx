@@ -5,7 +5,7 @@ import type { PeerLogEntry, PeerMark, PeerState, PeerMember, PeerMessage, PeerRo
 const PANE = 'peer'
 const EVERYONE = '*'
 // ICON stands for peer in the prompt footer.
-const ICON = '👥'
+const ICON = '👀'
 
 // All of the plugin's session state is one value: the engine lists the
 // values a module reads and writes, so each reference is a literal.

@@ -6,5 +6,9 @@
     "name": "r13v"
   },
   "skills": "./skills/",
-  "hooks": "./hooks/hooks.json"
+  "hooks": "./hooks/hooks.json",
+  "interface": {
+    "logo": "./assets/logo.png",
+    "composerIcon": "./assets/logo.png"
+  }
 }
