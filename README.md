@@ -101,7 +101,16 @@ peer update
 
 # the agent skill
 npx skills update peer -g
+
+# the Claude Code plugin
+claude plugin marketplace update r13v
+claude plugin update peer@r13v
+
+# the Codex plugin
+codex plugin marketplace upgrade r13v-codex
 ```
+
+Each release of `peer` sets the plugins' version, so update them with the CLI. Then restart the agent apps. In Codex, trust the updated hooks again with `/hooks`.
 
 Keep only one copy of `peer` on your `PATH`.
 
