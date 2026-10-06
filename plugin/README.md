@@ -28,6 +28,17 @@ npx skills remove peer -g -a claude-code
 
 To install `peer` itself, see the [main README](../README.md).
 
+## Update
+
+Claude Code does not auto-update third-party marketplaces by default, so the plugin stays at the version you installed. To update by hand:
+
+```bash
+claude plugin marketplace update r13v
+claude plugin update peer@r13v
+```
+
+To keep it up to date on its own, turn on auto-update for the marketplace: run `/plugin` in Claude Code, open **Marketplaces**, pick `r13v` and choose **Enable auto-update**. Claude Code then checks for updates at startup; restart it to apply one.
+
 ## Develop
 
 ```bash

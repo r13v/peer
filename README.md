@@ -75,7 +75,7 @@ If you installed the agent skill for Claude Code before, remove it there and kee
 npx skills remove peer -g -a claude-code
 ```
 
-See [plugin/README.md](plugin/README.md).
+Claude Code does not auto-update third-party marketplaces by default; to turn it on, see [Update](plugin/README.md#update). See [plugin/README.md](plugin/README.md).
 
 **Codex plugin (optional):** as main, Codex gets room messages as turns of their own instead of running `peer wait`. It brings its own `peer` skill, so Codex does not need the agent skill above. Without the plugin, Codex uses the agent skill as before.
 
