@@ -127,7 +127,7 @@ test('the footer counts messages the pane has not shown and opens the pane', asy
     ran.length = 0
     const ui = await $.ui.mount({ plugin: 'peer', surface, component: 'SessionMode', props: { modes: ['focus'] } })
     const drawn = JSON.stringify(await ui.drawn())
-    expect(drawn).toContain('👥 4')
+    expect(drawn).toContain('👀 4')
     expect(drawn).toContain('focus')
     await ui.press({ key: 'peer-open' })
     expect(ran).toContainEqual(['ui.open', 'peer'])
@@ -226,7 +226,7 @@ test("another session's room of the checkout is not shown", async ($, on) => {
   // that prints the room with main in it.
   await $.tool.call({ tool: 'Bash', command: 'peer join csv-export main' } as never)
   await $.tool.call({ tool: 'Bash', command: 'peer join csv-export main; peer status csv-export' } as never)
-  expect(JSON.stringify(await footer.drawn())).not.toContain('👥')
+  expect(JSON.stringify(await footer.drawn())).not.toContain('👀')
 })
 
 test('outside a Git checkout, a failing watch writes nothing to the chat', async ($, on) => {

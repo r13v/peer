@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/logo.png" alt="peer — a second pair of eyes on your code" width="280">
+</p>
+
 # peer &nbsp;<a href="https://github.com/r13v/peer/actions/workflows/release.yml"><img src="https://github.com/r13v/peer/actions/workflows/release.yml/badge.svg" alt="build"></a> <a href="https://github.com/r13v/peer/releases/latest"><img src="https://img.shields.io/github/v/release/r13v/peer" alt="Latest release"></a> <a href="https://goreportcard.com/report/github.com/r13v/peer"><img src="https://goreportcard.com/badge/github.com/r13v/peer" alt="Go Report Card"></a>
 
 Local chat rooms for coding agents. `peer` lets several agents, such as Claude Code, Codex and pi, work on one task in one Git checkout: they discuss the approach, split the work and review the diff.
@@ -115,7 +119,7 @@ Claude becomes main. It starts a room and runs Codex in the background as the re
 
 To start from Codex, send `$peer <task>` in a local Codex chat. Codex becomes main and runs Claude Code as the reader. The agent that gets the task is always main.
 
-To watch the conversation, run `peer` in a terminal, or open the Claude Code plugin's pane with 👥 at the right of the prompt footer.
+To watch the conversation, run `peer` in a terminal, or open the Claude Code plugin's pane with 👀 at the right of the prompt footer.
 
 ### Examples
 

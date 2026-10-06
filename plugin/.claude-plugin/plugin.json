@@ -1,5 +1,6 @@
 {
   "name": "peer",
+  "icon": "./assets/logo.png",
   "description": "Watch and drive peer rooms from Claude Code, and deliver room messages to main as they come",
   "author": {
     "name": "r13v"
