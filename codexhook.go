@@ -102,18 +102,16 @@ func codexHook(in io.Reader, out io.Writer) error {
 	}})
 }
 
-// forwardNote tells the model that forward delivers rooms.
 func forwardNote(rooms []string) string {
 	return "peer forward delivers the messages for main of peer room " + strings.Join(rooms, ", ") +
 		" into this Codex session through codex queue: each batch comes as a turn of its own. Do not run peer wait for these rooms; peer refuses it while forward runs."
 }
 
-// startedRoom returns the room that a successful peer start printed in a
-// Bash tool call, if this call was one: the whole command is a plain peer
-// start NAME, the call did not report a failing exit code, and the room it
-// printed exists in its checkout's store, active, with the same start time
-// and main alone in it. A peer start inside a longer shell command is not
-// recognized; main then reads the room with peer wait.
+// startedRoom returns the room that a peer start printed in a Bash tool
+// call, if this call was one: the whole command is a plain peer start NAME,
+// and the room it printed exists in its checkout's store, active, with the
+// same start time and main alone in it. A peer start inside a longer shell
+// command is not recognized; main then reads the room with peer wait.
 func startedRoom(e codexEvent) (session, bool) {
 	var input struct {
 		Command json.RawMessage `json:"command"`
@@ -132,7 +130,7 @@ func startedRoom(e codexEvent) (session, bool) {
 			names = append(names, words[2])
 		}
 	}
-	if len(names) == 0 || failed(e.ToolResponse) {
+	if len(names) == 0 {
 		return session{}, false
 	}
 	for _, text := range jsonStrings(e.ToolResponse) {
@@ -156,20 +154,6 @@ func startedRoom(e codexEvent) (session, bool) {
 		}
 	}
 	return session{}, false
-}
-
-// failed reports whether a tool's response holds a nonzero exit code.
-func failed(raw json.RawMessage) bool {
-	var v map[string]any
-	if json.Unmarshal(raw, &v) != nil {
-		return false
-	}
-	for _, key := range []string{"exit_code", "exitCode"} {
-		if code, ok := v[key].(float64); ok && code != 0 {
-			return true
-		}
-	}
-	return false
 }
 
 // jsonStrings collects every string in a JSON value, since Codex does not
@@ -199,7 +183,6 @@ func jsonStrings(raw json.RawMessage) []string {
 	return out
 }
 
-// readBindings reads the bindings of a session from its directory.
 func readBindings(dir string) ([]codexBinding, error) {
 	files, err := filepath.Glob(filepath.Join(dir, "*.json"))
 	if err != nil {

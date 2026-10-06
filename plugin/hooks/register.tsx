@@ -201,7 +201,6 @@ function watch($: Engine) {
           ? 'peer watch failed: update the peer CLI (peer update or brew upgrade --cask peer)'
           : `peer watch stopped: ${reason.slice(0, 200)}; retrying`,
     )
-    // Each failure in a row waits twice as long, up to a minute.
     watchRetry = Math.min(watchRetry * 2, 60_000)
     $.clock.after(watchRetry, () => watch($))
   })()

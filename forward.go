@@ -80,7 +80,7 @@ func (s *store) forwardHolder(id, role string) (forwardHolder, bool, error) {
 }
 
 // forward reads room sid for as and queues each batch as a turn of the
-// Codex session thread, until the room ends, as is kicked or ctx is done.
+// Codex session thread, until the room ends or ctx is done.
 // It prints {"status":"ready"} once it holds the role's delivery, or
 // {"status":"done"} when an earlier forward delivered the room's end.
 // A batch is read under the store lock, queued without it, and marked read
@@ -146,9 +146,6 @@ func (s *store) forward(ctx context.Context, sid, as, thread string, out io.Writ
 		if err != nil {
 			return err
 		}
-		if b.Status == "kicked" { // main cannot be kicked
-			return nil
-		}
 		if b.Status != "" {
 			if err := codexQueue(ctx, thread, forwardText(sid, as, b)); err != nil {
 				if ctx.Err() != nil {
@@ -184,10 +181,6 @@ func (s *store) readBatch(sid, as string) (b batch, from, next int64, err error)
 		v, err := s.load(sid)
 		if err != nil {
 			return err
-		}
-		if m := v.member(as); m != nil && m.Kicked {
-			b.Status = "kicked"
-			return nil
 		}
 		if err := v.check(as); err != nil {
 			return err

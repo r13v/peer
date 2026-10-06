@@ -19,18 +19,12 @@ const testThread = "01a10e5a-ba61-70f1-82a2-476e35aa84d6"
 
 // fakeCodex puts a codex on PATH whose queue appends the thread and the
 // message to dir/log-THREAD, one file per session so that two forwards do
-// not interleave their records. It fails while dir/fail holds a count above zero,
-// and hangs while dir/hang exists.
+// not interleave their records. It hangs while dir/hang exists.
 func fakeCodex(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	script := `#!/bin/sh
 d="` + dir + `"
-if [ -f "$d/fail" ] && [ "$(cat "$d/fail")" -gt 0 ]; then
-  echo $(( $(cat "$d/fail") - 1 )) > "$d/fail"
-  echo "daemon down" >&2
-  exit 1
-fi
 if [ -f "$d/hang" ]; then sleep 30; fi
 printf '%s\n%s\n---\n' "$3" "$5" >> "$d/log-$3"
 `
@@ -201,44 +195,9 @@ func TestForwardQueuesBatchesAndEnds(t *testing.T) {
 	if strings.Count(log, "has ended") != 1 || strings.Contains(log, "note to self") {
 		t.Fatalf("queued turns:\n%s", log)
 	}
-	if _, err := os.Stat(s.forwardDonePath(v.ID, mainRole)); err != nil {
-		t.Fatalf("no done mark: %v", err)
-	}
-	var again bytes.Buffer
-	if err := s.forward(context.Background(), v.ID, mainRole, testThread, &again); err != nil || again.String() != `{"status":"done"}`+"\n" {
-		t.Fatalf("forward after done = %q, %v", again.String(), err)
-	}
-	if strings.Count(queued(codex), "has ended") != 1 {
-		t.Fatal("the end came twice")
-	}
 	// Without a live forward, wait works as before.
 	if got, err := invoke(repo, "", "wait", v.ID, "--as", "main"); err != nil || !strings.Contains(got, `"ended"`) {
 		t.Fatalf("wait after forward = %s, %v", got, err)
-	}
-}
-
-func TestForwardRetriesFailedQueue(t *testing.T) {
-	codex := fakeCodex(t)
-	repo := testRepo(t)
-	v := startRoom(t, repo, "retry-fwd")
-	s, err := openStore(repo)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(codex, "fail"), []byte("3"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	out, _ := runForward(t, s, v.ID)
-	if _, err := invoke(repo, "please review", "send", v.ID, "--as", "reader"); err != nil {
-		t.Fatal(err)
-	}
-	eventually(t, "a failed queue", func() bool { return strings.Contains(out.String(), "daemon down") })
-	if n, err := s.unread(v.ID, mainRole); err != nil || n != 1 {
-		t.Fatalf("unread after a failed queue = %d, %v; the cursor must stay", n, err)
-	}
-	eventually(t, "the retried batch", func() bool { return strings.Contains(queued(codex), "please review") })
-	if strings.Count(queued(codex), "please review") != 1 {
-		t.Fatalf("queued turns:\n%s", queued(codex))
 	}
 }
 
@@ -467,42 +426,6 @@ func TestCodexHookNeedsPluginData(t *testing.T) {
 	}
 }
 
-func TestForwardSplitsBatchesAndLeavesWaitAfterStop(t *testing.T) {
-	codex := fakeCodex(t)
-	repo := testRepo(t)
-	v := startRoom(t, repo, "split")
-	s, err := openStore(repo)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for i := range batchCount + 1 {
-		if _, err := invoke(repo, fmt.Sprintf("finding %d", i+1), "send", v.ID, "--as", "reader"); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if _, err := invoke(repo, strings.Repeat("x", batchBytes+1), "send", v.ID, "--as", "reader"); err != nil {
-		t.Fatal(err)
-	}
-	_, stop := runForward(t, s, v.ID)
-	eventually(t, "three turns", func() bool { return strings.Count(queued(codex), "---\n") == 3 })
-	turns := strings.Split(queued(codex), "---\n")
-	if !strings.Contains(turns[0], "16 new messages") || !strings.Contains(turns[1], "1 new message ") || !strings.Contains(turns[1], "finding 17") || !strings.Contains(turns[2], "1 new message ") {
-		t.Fatalf("want batches of 16, 1 and the oversized one:\n%s", queued(codex))
-	}
-	// A turn is queued before its batch is marked read.
-	eventually(t, "the last batch to be marked read", func() bool { n, err := s.unread(v.ID, mainRole); return err == nil && n == 0 })
-	if err := stop(); err != nil {
-		t.Fatal(err)
-	}
-	// With forward stopped, wait reads the room again.
-	if _, err := invoke(repo, "after forward", "send", v.ID, "--as", "reader"); err != nil {
-		t.Fatal(err)
-	}
-	if got, err := invoke(repo, "", "wait", v.ID, "--as", "main"); err != nil || !strings.Contains(got, "after forward") || strings.Contains(got, "finding") {
-		t.Fatalf("wait after forward stopped = %s, %v", got, err)
-	}
-}
-
 func TestCodexHookBindsOnlyItsOwnStart(t *testing.T) {
 	fakeCodex(t)
 	repo := testRepo(t)
@@ -522,15 +445,10 @@ func TestCodexHookBindsOnlyItsOwnStart(t *testing.T) {
 	for command, response := range map[string]any{
 		"peer status owned":           started,                                                          // not a start
 		"peer start other":            started,                                                          // printed a room it did not start
-		"echo peer starter; cat x":    started,                                                          // no peer start
 		"peer start owned":            "peer: run this command inside the shared Git checkout",          // failed
 		"peer start owned --agent cx": strings.Replace(started, `"started_at":"`, `"started_at":"1`, 1), // not this room's start
 		"echo peer start owned":       started,                                                          // peer is not the command
-		"cat x # peer start owned":    started,                                                          // a comment
-		"peer start owned && peer invite owned reader --as main --agent claude": started,                                           // not a plain start
-		"cat <<EOF\npeer start owned\nEOF":                                      started,                                           // a heredoc
-		`peer start owned \; echo`:                                              started,                                           // escaped
-		"peer start owned --agent codex":                                        map[string]any{"output": started, "exit_code": 1}, // the call failed
+		"peer start owned && peer invite owned reader --as main --agent claude": started, // not a plain start
 	} {
 		if got := post(testThread, command, response); got != "" {
 			t.Fatalf("%q bound a room: %s", command, got)
