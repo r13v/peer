@@ -62,12 +62,20 @@ async function start(
   })
   on('session.start', (_, e) => ({ cwd: e.cwd }) as never)
   on('session.cwd', () => ({ value: '/repo' }) as never)
+  // The pane is shown from its open to its close.
+  let isShown = false
   on('ui.open', (_, e) => {
     ran.push(['ui.open', e.id])
+    isShown = true
     return { value: { isPlaced: true } } as never
   })
+  on('ui.close', (_, e) => {
+    ran.push(['ui.close', e.id])
+    isShown = false
+    return { value: undefined } as never
+  })
   on('ui.scroll', () => ({ value: {} }) as never)
-  on('ui.panes', () => ({ value: [] }) as never)
+  on('ui.panes', () => ({ value: isShown ? [{ id: 'peer', title: 'peer', isShown, isPlaced: true }] : [] }) as never)
   // A Bash call prints the room it names, as peer join and peer start do;
   // a join as main, a reserved role, fails and prints nothing.
   on('tool.call', { tool: 'Bash' }, (_, e) => {
@@ -121,7 +129,7 @@ test('a long message shows its start until it is expanded', async ($, on) => {
   expect(drawn).toContain('show less')
 })
 
-test('the footer counts messages the pane has not shown and opens the pane', async ($, on) => {
+test('the footer counts messages the pane has not shown and toggles the pane', async ($, on) => {
   const ran = await start($, on)
   for (const surface of ['terminal', 'desktop'] as const) {
     ran.length = 0
@@ -131,6 +139,8 @@ test('the footer counts messages the pane has not shown and opens the pane', asy
     expect(drawn).toContain('focus')
     await ui.press({ key: 'peer-open' })
     expect(ran).toContainEqual(['ui.open', 'peer'])
+    await ui.press({ key: 'peer-open' })
+    expect(ran).toContainEqual(['ui.close', 'peer'])
   }
 })
 
