@@ -6,5 +6,5 @@
     "name": "r13v"
   },
   "types": "./types/index.d.ts",
-  "version": "0.1.36"
+  "version": "0.1.37"
 }
