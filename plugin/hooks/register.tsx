@@ -737,13 +737,17 @@ export const register: Register = on => {
 
   // The prompt footer gets the peer icon, with the count of messages that
   // came since the pane last showed: one room opens the pane on it; with
-  // several, a numbered button per room, in the pane's order.
+  // several, a numbered button per room, in the pane's order. A press on the
+  // room the shown pane holds closes it.
   on('ui.render', { component: 'SessionMode' }, async ($, e, next) => {
     const st = await snapshot($)
     const active = activeRooms(st)
     if (active.length === 0) return next(e)
     const { Box, Text, Button } = $.ui.resolve(e)
     const show = (id: string) => async () => {
+      // A press on the room the shown pane already holds closes the pane.
+      const isShown = (await $.ui.panes()).some(pane => pane.id === PANE && pane.isShown)
+      if (isShown && current(await snapshot($))?.id === id) return $.ui.close({ id: PANE })
       await put($, selected, () => id)
       await openPane($)
     }
