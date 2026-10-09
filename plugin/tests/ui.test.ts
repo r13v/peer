@@ -270,3 +270,13 @@ test('a state from before own counts the rooms it led as its own', async ($, on)
   expect(ran.some(argv => argv[0] === 'ui.open')).toBe(true)
   expect(JSON.stringify(await ui.drawn())).toContain('reader joined')
 })
+
+test('after a rewind the rooms its conversation started are its own and led again', async ($, on) => {
+  // A rewind starts the session with an empty state; its chat holds the start.
+  const use = { tool_use_id: 't1', tool: 'Bash', input: { command: 'peer start csv-export --agent claude' }, result: { stdout: `${JSON.stringify(ROOM)}\n` } }
+  on('session.messages', () => ({ value: [{ role: 'assistant', text: '', toolUses: [use] }] }) as never)
+  const ran = await start($, on, WATCH, '', false)
+  expect(ran.some(argv => argv[0] === 'ui.open')).toBe(true)
+  // Leading it reads main's unread count, so what main read is not delivered again.
+  expect(ran.some(argv => argv[1] === 'status' && argv[2] === ROOM.id)).toBe(true)
+})

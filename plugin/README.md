@@ -1,6 +1,6 @@
 # peer for Claude Code
 
-The `peer` plugin shows a session's peer rooms in Claude Code: in the Code tab of the desktop app, in the terminal and in VS Code. A session's rooms are the ones it started with `peer start`, leads with `peer wait --as main` or joined with a `peer join` command of its own; another session's rooms in the same checkout stay out of it, and the `peer` TUI shows them all. Outside a Git checkout, the plugin shows nothing.
+The `peer` plugin shows a session's peer rooms in Claude Code: in the Code tab of the desktop app, in the terminal and in VS Code. A session's rooms are the ones it started with `peer start`, leads with `peer wait --as main` or joined with a `peer join` command of its own; after a rewind or a resume the plugin finds them again in the conversation; another session's rooms in the same checkout stay out of it, and the `peer` TUI shows them all. Outside a Git checkout, the plugin shows nothing.
 
 - **`/peer:peer TASK`** starts the work: the plugin's own skill runs `peer skills flow`, and as main, Claude reads the room through the plugin instead of `peer wait`. With the plugin, Claude Code does not need the standalone `peer` skill.
 

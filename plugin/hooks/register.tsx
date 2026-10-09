@@ -58,6 +58,8 @@ let watchRetry = 2500
 let isStarted = false
 let isPumping = false
 let isPumpWanted = false
+// The rooms restore found this session started, led once watch is ready.
+let toLead: string[] = []
 // Whether the person holds the pane's keyboard: then a new message does not
 // scroll it, so what they read stays put.
 let isPaneFocused = false
@@ -108,11 +110,35 @@ async function begin($: Engine) {
   isStarted = true
   // A pane left open by the module before a reload is drawn by this one.
   $.ui.invalidate('ui.render')
+  await restore($)
   watch($)
   $.clock.every(3000, () => void refresh($))
   void loadOffset($)
   $.clock.every(60_000, () => void loadFiles($))
   void loadFiles($)
+}
+
+// restore finds this session's rooms in its conversation when its state
+// starts empty while the chat goes on, as after a rewind or a resume: a
+// room joined there is its own again, and one started there is led again
+// once watch is ready.
+async function restore($: Engine) {
+  if ((await $.state.get(STATE)).value !== undefined) return
+  const found = await $.session.messages().catch(() => [])
+  if ('deny' in found) return
+  const joined: string[] = []
+  for (const use of found.flatMap(m => m.toolUses)) {
+    if (use.tool !== 'Bash' || use.isError || typeof use.input.command !== 'string') continue
+    const all = shellCommands(use.input.command)
+    const commands = all.map(peerArgs).filter((args): args is string[] => args !== null)
+    const stdout = (use.result as { stdout?: string } | undefined)?.stdout ?? ''
+    const [cmd, id, role] = commands[0] ?? []
+    if (all.length === 1 && cmd === 'join' && id && role && joinedRoom(stdout, id, role)) joined.push(id)
+    const room = commands.some(args => args[0] === 'start') ? await startedRoom(stdout) : null
+    if (room) toLead.push(room.id)
+  }
+  const mine = [...new Set([...joined, ...toLead])]
+  if (mine.length > 0) await put($, own, () => mine)
 }
 
 // loadOffset reads the host's UTC offset, as +0300, and draws the times again.
@@ -288,6 +314,11 @@ async function apply($: Engine, lines: string[]) {
       }
     }
     if (!isReady) {
+      // Lead the restored rooms now that their messages are in: lead
+      // marks what main read against them.
+      const all = await get($, rooms)
+      for (const id of toLead) if (all[id] && !all[id].ended_at) await lead($, id)
+      toLead = []
       isReady = true
       if (activeRooms(await snapshot($)).length > 0) void openPane($)
     }
