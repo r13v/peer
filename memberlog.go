@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"cmp"
 	"encoding/json"
+	"io"
+	"os"
 	"strings"
 	"time"
 
@@ -245,4 +247,57 @@ func toolResult(content json.RawMessage) string {
 		}
 	}
 	return strings.Join(parts, "\n")
+}
+
+// exitReasonTail bounds how much of a member's log exitReason reads, and
+// exitReasonLen how long a reason it returns.
+const (
+	exitReasonTail = 64 * 1024
+	exitReasonLen  = 200
+)
+
+// exitLinePrefix starts the line startMember's wrapper writes when a
+// member's process exits.
+const exitLinePrefix = "[peer] exited with status "
+
+// exitReason is the last error of the member's app in its latest run in
+// the log at path, such as a model at capacity, or "" when there is none.
+// A role invited again appends to the same log, and each run ends with the
+// wrapper's exit line. Failed commands are left out: the member saw them
+// and went on.
+func exitReason(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	if fi, err := f.Stat(); err == nil && fi.Size() > exitReasonTail {
+		_, _ = f.Seek(-exitReasonTail, io.SeekEnd)
+	}
+	tail, err := io.ReadAll(f)
+	if err != nil {
+		return ""
+	}
+	// The app's own error explains more than peer's, which comes after it,
+	// such as peer drive's failed turn.
+	app, own, latest := "", "", ""
+	for line := range bytes.Lines(tail) {
+		_, line = stamped(line)
+		// The exit line can follow output that did not end its line.
+		if bytes.Contains(line, []byte(exitLinePrefix)) {
+			latest, app, own = cmp.Or(app, own), "", ""
+			continue
+		}
+		if bytes.HasPrefix(line, []byte("peer: ")) {
+			own = strings.TrimSpace(string(line[len("peer: "):]))
+			continue
+		}
+		for _, e := range memberLogLine(line) {
+			if e.Kind == logRaw && e.Failed {
+				app = strings.TrimSpace(e.Text)
+			}
+		}
+	}
+
+	return ansi.Truncate(strings.Join(strings.Fields(latest), " "), exitReasonLen, "…")
 }

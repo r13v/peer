@@ -41,7 +41,7 @@ Priorities: readability, simplicity, maintainability. The rules apply to Go and 
 
 ## Code structure
 
-- **Root, Go `package main`:** the CLI (`main.go`), the TUI (`tui.go`), the room store (`store.go`), agent start-up (`agent.go`), message forwarding (`forward.go`), member logs (`memberlog.go`), the Codex hook (`codexhook.go`), the `peer board` commands (`boardcmd.go`) and the board server start-up and room provider for the TUI (`boardserver.go`). Tests sit next to the code as `*_test.go`.
+- **Root, Go `package main`:** the CLI (`main.go`), the TUI (`tui.go`), the room store (`store.go`), agent start-up (`agent.go`), message forwarding (`forward.go`), the turns of background members (`drive.go`), member logs (`memberlog.go`), the Codex hook (`codexhook.go`), the `peer board` commands (`boardcmd.go`) and the board server start-up and room provider for the TUI (`boardserver.go`). Tests sit next to the code as `*_test.go`.
 - **`internal/board`** (board feature): the board model, validation and `apply` of an operation batch.
 - **`internal/boardhttp`** (board feature): the local HTTP server, the board API and SSE.
 - **`web/`** (board feature): the SPA on Vite, React and `@xyflow/react`, and the Go package `web` (`web/embed.go`) that embeds the build. Source code is in `web/src`; shared helpers are in `web/src/lib`. The build goes to `web/dist`, which the Go binary embeds.

@@ -225,16 +225,15 @@ func TestStartMemberStampsOutputAndKeepsStatus(t *testing.T) {
 	if _, err := realStartMember([]string{"sh", "-c", "echo out; echo err >&2; printf tail; exit 3"}, dir, nil, logPath, exitPath); err != nil {
 		t.Fatal(err)
 	}
-	var data []byte
-	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
-		data, _ = os.ReadFile(logPath)
-		if bytes.Contains(data, []byte("[peer] exited")) {
-			break
-		}
+	// The status comes once the log is complete.
+	var status []byte
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline) && len(status) == 0; time.Sleep(20 * time.Millisecond) {
+		status, _ = os.ReadFile(exitPath)
 	}
-	if status, _ := os.ReadFile(exitPath); strings.TrimSpace(string(status)) != "3" {
+	if strings.TrimSpace(string(status)) != "3" {
 		t.Fatalf("exit status %q, want 3", status)
 	}
+	data, _ := os.ReadFile(logPath)
 	var got []string
 	for _, line := range strings.SplitAfter(strings.TrimSuffix(string(data), "\n"), "\n") {
 		at, rest := stamped([]byte(line))
@@ -473,9 +472,10 @@ func TestMemberExit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	exit := func(role string, status int) {
+	exit := func(role string, status int, output string) {
 		t.Helper()
-		if _, err := realStartMember([]string{"sh", "-c", fmt.Sprintf("exit %d", status)}, repo, nil, s.logPath(v.ID, role), s.exitPath(v.ID, role)); err != nil {
+		script := fmt.Sprintf("printf '%%s\\n' '%s'; exit %d", output, status)
+		if _, err := realStartMember([]string{"sh", "-c", script}, repo, nil, s.logPath(v.ID, role), s.exitPath(v.ID, role)); err != nil {
 			t.Fatal(err)
 		}
 		want := fmt.Sprintf("%d\n", status)
@@ -490,9 +490,10 @@ func TestMemberExit(t *testing.T) {
 			time.Sleep(20 * time.Millisecond)
 		}
 	}
-	exit("tests", 1)
+	// Main hears why the member's app stopped, from its last error.
+	exit("tests", 1, `{"type":"error","message":"Selected model is at capacity"}`)
 	got, err := invoke(repo, "", "wait", v.ID, "--as", "main")
-	for _, want := range []string{`"text":"tests joined"`, `"text":"tests exited with status 1"`} {
+	for _, want := range []string{`"text":"tests joined"`, `"text":"tests exited with status 1: Selected model is at capacity"`} {
 		if err != nil || !strings.Contains(got, want) {
 			t.Fatalf("main got %s, %v; want %s", got, err, want)
 		}
@@ -507,8 +508,8 @@ func TestMemberExit(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Rooms stay open when every member has exited; main ends them.
-	exit("reader", 2)
-	if got, err := invoke(repo, "", "wait", v.ID, "--as", "main"); err != nil || !strings.Contains(got, "reader exited with status 2") {
+	exit("reader", 2, "")
+	if got, err := invoke(repo, "", "wait", v.ID, "--as", "main"); err != nil || !strings.Contains(got, `"text":"reader exited with status 2"`) {
 		t.Fatalf("main missed the reader exit: %s, %v", got, err)
 	}
 	if _, err := invoke(repo, "", "wait", v.ID, "--as", "reader"); err != nil {
@@ -575,25 +576,31 @@ func TestInvite(t *testing.T) {
 			t.Fatalf("invite: %q, %v", out, err)
 		}
 		resolved, _ := filepath.EvalSymlinks(repo)
-		if len(launched) != 1 || launched[0][0] != tc.agent || dirs[0] != resolved || !slices.Equal(envs[0], []string{"PEER_REPO=" + resolved}) || filepath.Base(logs[0]) != "test-expert.log" || filepath.Base(filepath.Dir(logs[0])) != v.ID {
+		if len(launched) != 1 || dirs[0] != resolved || !slices.Equal(envs[0], []string{"PEER_REPO=" + resolved}) || filepath.Base(logs[0]) != "test-expert.log" || filepath.Base(filepath.Dir(logs[0])) != v.ID {
 			t.Fatalf("%+v: want one %s in the checkout, got argv %q, dirs %q, env %q, logs %q", tc, tc.agent, launched, dirs, envs, logs)
 		}
-		joined := strings.Join(launched[0], " ")
-		prompt := launched[0][len(launched[0])-1]
-		if !strings.Contains(prompt, "the test-expert in peer room "+v.ID) || !strings.Contains(prompt, tc.focus) || !strings.Contains(prompt, "edge cases") || !strings.Contains(prompt, "Nobody reads this chat") {
-			t.Fatalf("wrong prompt: %q", prompt)
+		// Codex and Claude resume their sessions, so peer drive runs them
+		// a turn per batch; pi has no session and waits on its own.
+		if tc.agent != "pi" && !slices.Equal(launched[0][1:], []string{"drive", v.ID, "test-expert", "--brief", "edge cases"}) {
+			t.Fatalf("%s is not driven: %q", tc.agent, launched[0])
 		}
-		if tc.agent == "codex" && !strings.Contains(joined, "-C "+resolved) {
-			t.Fatalf("codex runs outside the checkout: %q", launched[0])
+		if tc.agent == "pi" {
+			prompt := launched[0][len(launched[0])-1]
+			if launched[0][0] != "pi" || !strings.Contains(prompt, "the test-expert in peer room "+v.ID) || !strings.Contains(prompt, tc.focus) || !strings.Contains(prompt, "edge cases") || !strings.Contains(prompt, "Keep calling peer wait") || !strings.Contains(prompt, "# Worker") {
+				t.Fatalf("wrong pi launch: %q", launched[0])
+			}
 		}
-		if tc.model != "" && !strings.Contains(joined, " "+tc.model+" ") {
-			t.Fatalf("model %s not passed: %q", tc.model, launched[0])
+		want := `"model":"` + tc.model + `"`
+		switch {
+		case tc.agent == "claude" && tc.model == "":
+			want = `"model":"opus","effort":"medium"`
+		case tc.agent == "codex" && tc.model == "":
+			want = `"model":"gpt-6.1-sol","effort":"medium"`
+		case tc.agent == "pi":
+			want = `"agent":"pi"`
 		}
-		if tc.agent == "claude" && tc.model == "" && !strings.Contains(joined, " --model opus --effort medium ") {
-			t.Fatalf("claude does not default to opus at medium effort: %q", launched[0])
-		}
-		if tc.agent == "codex" && tc.model == "" && !strings.Contains(joined, " -m gpt-6.1-sol -c model_reasoning_effort=medium ") {
-			t.Fatalf("codex does not default to the latest sol at medium effort: %q", launched[0])
+		if got, _ := invoke(repo, "", "status", v.ID); !strings.Contains(got, want) {
+			t.Fatalf("%+v: member lacks %s: %s", tc, want, got)
 		}
 	}
 	repo := testRepo(t)
@@ -1001,7 +1008,7 @@ func TestPostFromUser(t *testing.T) {
 }
 
 func TestClaudeMemberIsSandboxedWithoutEditTools(t *testing.T) {
-	argv, err := memberArgs(&store{dir: "/store/room"}, member{Agent: "claude"}, "/repo", "p")
+	argv, err := memberArgs(&store{dir: "/store/room"}, member{Agent: "claude"}, "/repo", "p", "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1046,7 +1053,7 @@ func TestClaudeMemberIsSandboxedWithoutEditTools(t *testing.T) {
 }
 
 func TestCodexMemberHasNetwork(t *testing.T) {
-	argv, err := memberArgs(&store{dir: "/store/room"}, member{Agent: "codex"}, "/repo", "p")
+	argv, err := memberArgs(&store{dir: "/store/room"}, member{Agent: "codex"}, "/repo", "p", "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1056,7 +1063,7 @@ func TestCodexMemberHasNetwork(t *testing.T) {
 }
 
 func TestPiMemberHasNoEditTools(t *testing.T) {
-	argv, err := memberArgs(&store{dir: "/store/room"}, member{Agent: "pi"}, "/repo", "p")
+	argv, err := memberArgs(&store{dir: "/store/room"}, member{Agent: "pi"}, "/repo", "p", "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1069,7 +1076,7 @@ func TestPiMemberHasNoEditTools(t *testing.T) {
 }
 
 func TestUnknownAgentHasNoLaunch(t *testing.T) {
-	if _, err := memberArgs(&store{}, member{Agent: "copilot"}, "/repo", "p"); err == nil {
+	if _, err := memberArgs(&store{}, member{Agent: "copilot"}, "/repo", "p", "", false); err == nil {
 		t.Fatal("memberArgs accepted copilot")
 	}
 }
@@ -1080,7 +1087,7 @@ func TestWorkerHasNoLimits(t *testing.T) {
 		"codex":  {[]string{"--dangerously-bypass-approvals-and-sandbox"}, []string{"workspace-write", "--add-dir"}},
 		"pi":     {[]string{"--approve"}, []string{"--no-approve", "--tools"}},
 	} {
-		argv, err := memberArgs(&store{dir: "/store/room"}, member{Agent: agent, Worker: true}, "/repo", "p")
+		argv, err := memberArgs(&store{dir: "/store/room"}, member{Agent: agent, Worker: true}, "/repo", "p", "", false)
 		if err != nil {
 			t.Fatal(err)
 		}

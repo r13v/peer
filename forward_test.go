@@ -164,7 +164,7 @@ func TestForwardQueuesBatchesAndEnds(t *testing.T) {
 	if got, err := invoke(repo, "", "forward", v.ID, "--as", "main", "--codex-thread", testThread); err == nil || !strings.Contains(err.Error(), "another peer forward") || got != "" {
 		t.Fatalf("second forward = %q, %v", got, err)
 	}
-	if _, err := invoke(repo, "", "wait", v.ID, "--as", "main"); err == nil || !strings.Contains(err.Error(), "peer forward delivers") {
+	if _, err := invoke(repo, "", "wait", v.ID, "--as", "main"); err == nil || !strings.Contains(err.Error(), "peer delivers room") {
 		t.Fatalf("wait beside forward = %v", err)
 	}
 	if _, err := invoke(repo, "looks good", "send", v.ID, "--as", "reader"); err != nil {
