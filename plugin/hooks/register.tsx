@@ -1012,7 +1012,6 @@ export const register: Register = (on) => {
 						<els.Svg
 							source={svg}
 							alt={`Schematic of board ${ref.title ?? ""}`}
-							isInteractive
 						/>
 					)}
 					{lines.map((line) => (

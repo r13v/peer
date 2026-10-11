@@ -260,8 +260,8 @@ The plugin's pane has a **boards** tab for the room it shows. It gives a simple 
   - Each frame holds its children in layers along the edges between them; a layer wraps when it is wider than the drawing. Two layers that a labeled edge joins have more space between them for the label. The frames at the top go by `order`.
   - A card or an image is a box of fixed width with its text wrapped, cut to four lines and clipped to the box. An edge is an arrow between the borders of its two boxes; a loop is an arc on the right side of its box.
   - The edges between one pair of boxes are drawn side by side and share one label: each edge's label with an arrow for its way, such as `↓ next · ↑ fix`. An edge that would cross another card goes around on the right, if that way is clear; otherwise it stays straight.
-  - A label is cut to the free room inside its frame. A label with no free room shows only on hover.
-  - A box or an edge shows its full text on hover. A frame or a node with open threads on it has a badge with their count.
+  - A label is cut to the free room inside its frame; a label with no free room is left out.
+  - The preview is an image, not an interactive frame: the pane draws it again every few seconds, and a frame would reload each time. A frame or a node with open threads on it has a badge with their count.
   - If the schematic does not fit the `Svg` size limit, the plugin draws only the frames.
 - In the terminal, the preview is a list of frames with their node counts and open threads.
 - The board's title is a `Link` that opens the board in the browser. A line under it counts the frames, the nodes and the open threads. One hint under the boards says: if a link does not open, start `peer`.
