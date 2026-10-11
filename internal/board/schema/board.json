@@ -1,0 +1,353 @@
+{
+	"$schema": "https://json-schema.org/draft/2020-12/schema",
+	"$id": "https://github.com/r13v/peer/schema/board.json",
+	"title": "peer board.json, formatVersion 1",
+	"type": "object",
+	"additionalProperties": false,
+	"required": [
+		"formatVersion",
+		"id",
+		"title",
+		"revision",
+		"nodes",
+		"edges",
+		"threads",
+		"deleted",
+		"nextId"
+	],
+	"properties": {
+		"formatVersion": {
+			"const": 1
+		},
+		"id": {
+			"type": "string",
+			"pattern": "^b_[A-Za-z0-9_-]{1,64}$"
+		},
+		"title": {
+			"type": "string"
+		},
+		"roomId": {
+			"type": "string"
+		},
+		"revision": {
+			"type": "integer",
+			"minimum": 0
+		},
+		"nodes": {
+			"type": "array",
+			"items": {
+				"$ref": "#/$defs/node"
+			}
+		},
+		"edges": {
+			"type": "array",
+			"items": {
+				"$ref": "#/$defs/edge"
+			}
+		},
+		"threads": {
+			"type": "array",
+			"items": {
+				"$ref": "#/$defs/thread"
+			}
+		},
+		"deleted": {
+			"type": "array",
+			"items": {
+				"type": "object",
+				"additionalProperties": false,
+				"required": ["id", "rev"],
+				"properties": {
+					"id": {
+						"type": "string",
+						"pattern": "^[fnet][1-9][0-9]*$"
+					},
+					"rev": {
+						"type": "integer",
+						"minimum": 1
+					}
+				}
+			}
+		},
+		"nextId": {
+			"type": "integer",
+			"minimum": 1
+		}
+	},
+	"$defs": {
+		"node": {
+			"oneOf": [
+				{
+					"type": "object",
+					"additionalProperties": false,
+					"required": ["id", "rev", "type", "text"],
+					"properties": {
+						"id": {
+							"type": "string",
+							"pattern": "^n[1-9][0-9]*$"
+						},
+						"type": {
+							"const": "card"
+						},
+						"rev": {
+							"type": "integer",
+							"minimum": 0
+						},
+						"parentId": {
+							"type": "string",
+							"pattern": "^[fn][1-9][0-9]*$"
+						},
+						"text": {
+							"type": "string"
+						},
+						"color": {
+							"enum": ["gray", "yellow", "green", "blue", "purple", "red"]
+						},
+						"x": {
+							"type": "number"
+						},
+						"y": {
+							"type": "number"
+						},
+						"w": {
+							"type": "number"
+						},
+						"h": {
+							"type": "number"
+						},
+						"z": {
+							"type": "number"
+						}
+					},
+					"dependentRequired": {
+						"x": ["y"],
+						"y": ["x"]
+					}
+				},
+				{
+					"type": "object",
+					"additionalProperties": false,
+					"required": ["id", "rev", "type", "asset"],
+					"properties": {
+						"id": {
+							"type": "string",
+							"pattern": "^n[1-9][0-9]*$"
+						},
+						"type": {
+							"const": "image"
+						},
+						"rev": {
+							"type": "integer",
+							"minimum": 0
+						},
+						"parentId": {
+							"type": "string",
+							"pattern": "^[fn][1-9][0-9]*$"
+						},
+						"asset": {
+							"type": "string",
+							"pattern": "^assets/[0-9a-f]{64}\\.(png|jpg|gif|webp)$"
+						},
+						"caption": {
+							"type": "string"
+						},
+						"x": {
+							"type": "number"
+						},
+						"y": {
+							"type": "number"
+						},
+						"w": {
+							"type": "number"
+						},
+						"h": {
+							"type": "number"
+						},
+						"z": {
+							"type": "number"
+						}
+					},
+					"dependentRequired": {
+						"x": ["y"],
+						"y": ["x"]
+					}
+				},
+				{
+					"type": "object",
+					"additionalProperties": false,
+					"required": ["id", "rev", "type", "title", "order"],
+					"properties": {
+						"id": {
+							"type": "string",
+							"pattern": "^f[1-9][0-9]*$"
+						},
+						"type": {
+							"const": "frame"
+						},
+						"rev": {
+							"type": "integer",
+							"minimum": 0
+						},
+						"parentId": {
+							"type": "string",
+							"pattern": "^[fn][1-9][0-9]*$"
+						},
+						"title": {
+							"type": "string"
+						},
+						"order": {
+							"type": "number"
+						},
+						"preset": {
+							"const": "slide"
+						},
+						"x": {
+							"type": "number"
+						},
+						"y": {
+							"type": "number"
+						},
+						"w": {
+							"type": "number"
+						},
+						"h": {
+							"type": "number"
+						},
+						"z": {
+							"type": "number"
+						}
+					},
+					"dependentRequired": {
+						"x": ["y"],
+						"y": ["x"]
+					}
+				}
+			]
+		},
+		"edge": {
+			"type": "object",
+			"additionalProperties": false,
+			"required": ["id", "rev", "from", "to"],
+			"properties": {
+				"id": {
+					"type": "string",
+					"pattern": "^e[1-9][0-9]*$"
+				},
+				"rev": {
+					"type": "integer",
+					"minimum": 0
+				},
+				"from": {
+					"type": "string",
+					"pattern": "^[fn][1-9][0-9]*$"
+				},
+				"to": {
+					"type": "string",
+					"pattern": "^[fn][1-9][0-9]*$"
+				},
+				"label": {
+					"type": "string"
+				}
+			}
+		},
+		"thread": {
+			"type": "object",
+			"additionalProperties": false,
+			"required": ["id", "rev", "target", "resolved", "orphaned", "messages"],
+			"properties": {
+				"id": {
+					"type": "string",
+					"pattern": "^t[1-9][0-9]*$"
+				},
+				"rev": {
+					"type": "integer",
+					"minimum": 0
+				},
+				"target": {
+					"$ref": "#/$defs/target"
+				},
+				"resolved": {
+					"type": "boolean"
+				},
+				"orphaned": {
+					"type": "boolean"
+				},
+				"targetLabel": {
+					"type": "string"
+				},
+				"messages": {
+					"type": "array",
+					"minItems": 1,
+					"items": {
+						"$ref": "#/$defs/message"
+					}
+				}
+			}
+		},
+		"message": {
+			"type": "object",
+			"additionalProperties": false,
+			"required": ["id", "author", "body", "createdAt"],
+			"properties": {
+				"id": {
+					"type": "string",
+					"pattern": "^m[1-9][0-9]*$"
+				},
+				"author": {
+					"$ref": "#/$defs/author"
+				},
+				"body": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 65536
+				},
+				"createdAt": {
+					"type": "string",
+					"format": "date-time"
+				}
+			}
+		},
+		"author": {
+			"type": "object",
+			"additionalProperties": false,
+			"required": ["role"],
+			"properties": {
+				"role": {
+					"type": "string",
+					"minLength": 1
+				},
+				"roomId": {
+					"type": "string"
+				}
+			}
+		},
+		"target": {
+			"oneOf": [
+				{
+					"type": "object",
+					"additionalProperties": false,
+					"required": ["kind"],
+					"properties": {
+						"kind": {
+							"const": "board"
+						}
+					}
+				},
+				{
+					"type": "object",
+					"additionalProperties": false,
+					"required": ["kind", "id"],
+					"properties": {
+						"kind": {
+							"enum": ["frame", "node", "edge"]
+						},
+						"id": {
+							"type": "string",
+							"pattern": "^[fne][1-9][0-9]*$"
+						}
+					}
+				}
+			]
+		}
+	}
+}

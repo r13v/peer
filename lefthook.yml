@@ -1,0 +1,23 @@
+pre-commit:
+  parallel: true
+  commands:
+    check:
+      glob: "*.{js,ts,cjs,mjs,d.cts,d.mts,jsx,tsx,json,jsonc,css}"
+      run: npx @biomejs/biome check --no-errors-on-unmatched --files-ignore-unknown=true {staged_files}
+
+    knip:
+      run: npm run knip
+
+    # Biome and Knip do not check TypeScript types.
+    typecheck:
+      glob: "*.{ts,tsx,mts,cts}"
+      run: npm run typecheck
+
+    go-fmt:
+      glob: "*.go"
+      run: golangci-lint fmt --diff {staged_files}
+
+    # golangci-lint checks whole packages, so it runs on the module, not on single files.
+    go-lint:
+      glob: "*.go"
+      run: golangci-lint run

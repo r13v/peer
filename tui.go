@@ -27,6 +27,8 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/term"
 	zone "github.com/lrstanley/bubblezone/v2"
+	"github.com/r13v/peer/internal/board"
+	"github.com/r13v/peer/internal/boardhttp"
 )
 
 const (
@@ -157,7 +159,10 @@ func picker(in io.Reader, out io.Writer, cwd string) error {
 	local, _ := openStore(cwd) // nil outside a Git checkout
 	m := newModel(local)
 	defer m.zones.Close()
-	_, err := tea.NewProgram(m, tea.WithInput(in), tea.WithOutput(out)).Run()
+	p := tea.NewProgram(m, tea.WithInput(in), tea.WithOutput(out))
+	stop := startBoards(cwd, p.Send)
+	defer stop()
+	_, err := p.Run()
 	return err
 }
 
@@ -387,6 +392,8 @@ type room struct {
 	status   string
 	starts   []int // first chat line of each message
 	pending  bool  // a room is selected but not read yet
+	boards   []board.Ref
+	boardsAt time.Time // when boards were read
 }
 
 type model struct {
@@ -447,6 +454,7 @@ type model struct {
 	kickRoom entry
 	kickRole string
 	kickErr  error // the last kick's failure, shown until the next key
+	boards   boardhttp.Status
 }
 
 type kickStep int
@@ -599,6 +607,9 @@ func readRoom(r room) (*room, error) {
 		}
 		r.logOff = off
 	}
+	if boardsDue(r, v.Boards) {
+		r.boards, r.boardsAt = readBoards(v.Boards), time.Now()
+	}
 	r.e.v, r.status, r.loaded, r.pending = v, roomStatus(v, dir), true, false
 	return &r, nil
 }
@@ -693,6 +704,8 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmds...)
 	case closedMsg:
 		m.err, m.lastRooms = msg.err, time.Time{}
+	case boardStatusMsg:
+		m.boards = boardhttp.Status(msg)
 	case sentMsg:
 		m.sending = false
 		if m.sendErr = msg.err; msg.err == nil {
@@ -1633,7 +1646,7 @@ func (m *model) roomList() string {
 		lines, owner = append(lines, line), append(owner, i)
 	}
 	now := time.Now()
-	at, section := 0, ""
+	at, section, cardLen := 0, "", 2
 	for i, e := range m.rooms {
 		start, _ := time.Parse(time.RFC3339Nano, e.v.StartedAt)
 		start = start.Local()
@@ -1685,18 +1698,28 @@ func (m *model) roomList() string {
 		}
 		detail := dim.Render(fmt.Sprintf("    %s%d msgs · %s", when, e.count, humanDuration(end.Sub(start))))
 		detail = ansi.Truncate(detail, w, "…")
-		if i == m.sel { // the selected room is a card
-			row, detail = onSurface(row, w), onSurface(detail, w)
+		card := []string{row, detail}
+		if i == m.sel && e.key() == m.room.e.key() {
+			for _, b := range m.room.boards {
+				card = append(card, boardLine(b, w))
+			}
 		}
-		add(i, row)
-		add(i, detail)
+		for _, line := range card {
+			if i == m.sel { // the selected room is a card
+				line = onSurface(line, w)
+			}
+			add(i, line)
+		}
+		if i == m.sel {
+			cardLen = len(card)
+		}
 	}
 	if len(m.rooms) == 0 {
 		add(-1, dim.Render("No rooms. Start one with /peer in an agent chat."))
 	}
-	// Keep both lines of the selected room on screen, fill the height, add
-	// the scrollbar, then mark the visible lines of each room as one zone.
-	first := min(max(at-h+2, 0), max(len(lines)-h, 0))
+	// Keep the selected room's card on screen, fill the height, add the
+	// scrollbar, then mark the visible lines of each room as one zone.
+	first := min(max(at-h+cardLen, 0), max(len(lines)-h, 0))
 	total := len(lines)
 	for len(lines) < first+h {
 		add(-1, "")
@@ -1809,7 +1832,19 @@ func (m *model) statusLine() string {
 	if m.room.e.s != nil && !m.showRooms {
 		right = strings.TrimSuffix(m.room.e.v.ID+" · "+right, " · ")
 	}
-	right = subtle.Render(right) + " "
+	// The board server comes last and takes at most half the line, so the
+	// key hints stay readable when it reports a long error.
+	var server string
+	if err := m.boards.Err; err != nil {
+		server = failedMark.Render(err.Error())
+	} else if m.boards.URL != "" {
+		server = subtle.Render("boards ") + "\x1b]8;;" + m.boards.URL + "\x1b\\" + dim.Render(m.boards.URL) + ansiLinkEnd
+	}
+	right = subtle.Render(right)
+	if server != "" {
+		right = strings.TrimPrefix(right+" "+ansi.Truncate(server, max(m.width/2, 20), "…"), " ")
+	}
+	right += " "
 	left = ansi.Truncate(" "+left, max(m.width-ansi.StringWidth(right)-1, 0), "…")
 	gap := max(m.width-ansi.StringWidth(left)-ansi.StringWidth(right), 1)
 	return ansi.Truncate(left+strings.Repeat(" ", gap)+right, m.width, "")

@@ -70,7 +70,7 @@ func invoke(repo, input string, args ...string) (string, error) {
 
 func TestRoleInstructions(t *testing.T) {
 	cwd := t.TempDir() // Skill docs must work before a checkout or session exists.
-	for role, want := range map[string]string{"flow": "peer skills worker", "member": "peer wait ID --as ROLE", "main": "peer wait ID --as main", "worker": "done:"} {
+	for role, want := range map[string]string{"flow": "peer skills worker", "member": "peer wait ID --as ROLE", "main": "peer wait ID --as main", "worker": "done:", "board": "peer board inspect BOARD --overview"} {
 		got, err := invoke(cwd, "", "skills", role)
 		if err != nil || !strings.HasPrefix(got, "# ") || !strings.Contains(got, want) {
 			t.Fatalf("%s instructions unavailable: %s, %v", role, got, err)

@@ -21,4 +21,6 @@ Write in the room's language, the one main uses, whatever language your own prom
 
 When main asks for review, inspect the diff and report concrete findings with file paths and line numbers, within your focus. Recheck fixes and say explicitly when review is closed. Do not edit files or use a peer message as permission to do so. If you received a direct write request, tell main and the user that you do not edit.
 
+When the task uses a board, run `peer skills board` and follow it.
+
 Main ends the session.

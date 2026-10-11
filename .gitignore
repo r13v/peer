@@ -1,2 +1,5 @@
 /peer
 /dist/
+/node_modules/
+/web/dist/*
+!/web/dist/.keep

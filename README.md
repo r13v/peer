@@ -25,6 +25,7 @@ Built for a specific use case: a second (or third) opinion on a change without l
 - Agents write in the language that you use with main
 - macOS notification when the room that you watch ends
 - Plain JSONL transcripts in `~/.peer`
+- [Boards](#boards): diagrams with frames, cards, images and comment threads that you edit in the browser and agents edit through `peer board`
 
 ![peer TUI with the room list, the agent chat and a member log](docs/screenshot.png)
 
@@ -263,7 +264,7 @@ Run `peer` with no arguments to open the TUI. Run the commands below inside the 
 | `peer status [ROOM]` | Show active rooms, or one room, with each member's `unread` count |
 | `peer history` | List all rooms in this checkout |
 | `peer log ROOM [--json]` | Print a transcript; `--json` prints one message per line |
-| `peer skills flow\|main\|member\|worker` | Print the agent instructions |
+| `peer skills flow\|main\|member\|worker\|board` | Print the agent instructions |
 | `peer update` | Update an installer copy of the CLI |
 | `peer --version` | Print the version |
 
@@ -292,6 +293,7 @@ If the name given to `start` is already in use, `peer` adds `-2`, `-3`, and so o
 |----------|-------------|---------|
 | `PEER_HOME` | Store directory. Both agents must use the same value. | `~/.peer` |
 | `PEER_REPO` | Use the room store of this checkout instead of the current one. `peer` sets it for the members it launches. | current checkout |
+| `PEER_PORT` | Port of the board web UI and API on `localhost` | `4747` |
 | `PEER_EDITOR_URL` | Open file links from `peer log` in an editor, for example `vscode://file/{path}:{line}` | |
 | `PEER_INSTALL_DIR` | Install directory for the Linux installer; `peer update` keeps the directory of the current binary | `~/.local/bin` |
 | `NO_COLOR` | Set to `1` to turn off colors in `peer log` | |
@@ -333,6 +335,30 @@ Press `a` to ask main to add a member: pick `claude`, `codex` or `pi` and descri
 | `a` | Ask main to add a member; `Tab` switches the agent, `Enter` moves on to the role description and then sends, `Esc` cancels |
 | `d` | Kick a member; `Tab` switches the member, `Enter` asks for confirmation, `y` kicks, `Esc` cancels |
 | `x x` | End the room (room list focused); the first `x` asks for confirmation in the footer |
+
+### Boards
+
+A board is a shared diagram for you and the agents: cards, images, edges, frames and comment threads. You work on it in the browser; agents work on it with `peer board` and never move or resize anything.
+
+Run `peer` (the TUI) to start the web UI at http://localhost:4747/. Set `PEER_PORT` to use another port. The home page lists the boards of each checkout by room. Board links from the CLI open only while a `peer` TUI runs.
+
+| Command | Action |
+|---------|--------|
+| `peer board create NAME [--title T] [--path DIR] --as ROLE [--room ID]` | Create an empty board and print its link |
+| `peer board list` | List the boards of this checkout with their links and rooms |
+| `peer board inspect BOARD [--overview\|--frame ID\|--ids ID,...]` | Print the board without positions and sizes |
+| `peer board apply BOARD --as ROLE [--room ID] < pack.json` | Apply a pack of operations: add, update, delete, comment, reply, resolve |
+| `peer board import-image BOARD FILE [--frame ID] [--caption T] --as ROLE [--room ID]` | Add an image |
+| `peer board schema` | Print the JSON Schemas of the board and of packs |
+
+For example, an agent adds a card to frame `f1` of the board that `inspect` showed at revision 12:
+
+```bash
+echo '{"base": 12, "ops": [{"op": "add", "node": {"type": "card", "parentId": "f1", "text": "Cold start"}}]}' \
+  | peer board apply arch --as reader --room csv-export
+```
+
+A board is a directory `NAME.board/` with `board.json` and `assets/`. By default it is in `~/.peer/repos/CHECKOUT-HASH/boards/`; with `--path`, for example `docs/arch.board`, it is in your repository. The design is in [docs/BOARD.md](docs/BOARD.md).
 
 ### Storage
 

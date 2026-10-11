@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -16,6 +17,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/exp/teatest/v2"
+	"github.com/r13v/peer/internal/board"
 )
 
 func press(r rune) tea.KeyPressMsg { return tea.KeyPressMsg{Code: r, Text: string(r)} }
@@ -1003,5 +1005,36 @@ func TestKickFromTUI(t *testing.T) {
 	m.startCompose()
 	if slices.Contains(m.targets(), "docs") {
 		t.Fatalf("the composer still addresses docs: %q", m.targets())
+	}
+}
+
+func TestRoomCardLinksItsBoards(t *testing.T) {
+	repo := testRepo(t)
+	v := startRoom(t, repo, "boards")
+	out, err := invoke(repo, "", "board", "create", "plan", "--title", "Release plan", "--as", "main", "--room", v.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ref board.Ref
+	if err := json.Unmarshal([]byte(out), &ref); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := invoke(repo, "", "board", "create", "gone", "--as", "main", "--room", v.ID); err != nil {
+		t.Fatal(err)
+	}
+	s, err := openStore(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(filepath.Join(s.dir, "boards", "gone.board")); err != nil {
+		t.Fatal(err)
+	}
+	m := loaded(t, s)
+	list := m.roomList()
+	if !strings.Contains(list, "\x1b]8;;"+ref.URL+"\x1b\\") || !strings.Contains(ansi.Strip(list), "▦ Release plan") {
+		t.Fatalf("the room card does not link its board:\n%q", list)
+	}
+	if !strings.Contains(ansi.Strip(list), "▦ gone missing") {
+		t.Fatalf("the room card does not report a removed board:\n%s", ansi.Strip(list))
 	}
 }

@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	_ "embed"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -22,6 +23,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/x/term"
+	"github.com/r13v/peer/internal/board"
 )
 
 //go:embed instructions/flow.md
@@ -36,7 +38,10 @@ var mainInstructions []byte
 //go:embed instructions/worker.md
 var workerInstructions []byte
 
-const usage = "usage: peer, peer --version, peer update, peer skills flow|main|member|worker, peer start NAME, peer join|invite|kick ID ROLE, peer send|wait|end ID --as ROLE, peer send ID --as ROLE --text TEXT, peer wait ID --as ROLE --timeout DURATION, peer ack ID --as ROLE --upto MESSAGE_ID, peer forward ID --as main --codex-thread UUID, peer status [ID], peer history, peer watch [ID], peer log ID [--json], or peer memberlog ID ROLE [--follow]"
+//go:embed instructions/board.md
+var boardInstructions []byte
+
+const usage = "usage: peer, peer --version, peer update, peer skills flow|main|member|worker|board, peer start NAME, peer join|invite|kick ID ROLE, peer send|wait|end ID --as ROLE, peer send ID --as ROLE --text TEXT, peer wait ID --as ROLE --timeout DURATION, peer ack ID --as ROLE --upto MESSAGE_ID, peer forward ID --as main --codex-thread UUID, peer status [ID], peer history, peer watch [ID], peer log ID [--json], peer memberlog ID ROLE [--follow], or peer board create|list|inspect|apply|import-image|schema"
 
 // version is set at release build time.
 var version = "dev"
@@ -49,6 +54,11 @@ func main() {
 	cwd, err := os.Getwd()
 	if err == nil {
 		err = run(os.Args[1:], os.Stdin, os.Stdout, cwd)
+	}
+	var be *board.Error
+	if errors.As(err, &be) { // board commands answer errors as contract JSON
+		_ = json.NewEncoder(os.Stderr).Encode(be)
+		os.Exit(1)
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "peer:", err)
@@ -80,12 +90,15 @@ func run(args []string, in io.Reader, out io.Writer, cwd string) error {
 		return codexHook(in, out)
 	}
 	if args[0] == "skills" {
-		docs := map[string][]byte{"flow": flowInstructions, "main": mainInstructions, "member": memberInstructions, "worker": workerInstructions}
+		docs := map[string][]byte{"flow": flowInstructions, "main": mainInstructions, "member": memberInstructions, "worker": workerInstructions, "board": boardInstructions}
 		if len(args) != 2 || docs[args[1]] == nil {
-			return errors.New("usage: peer skills flow|main|member|worker")
+			return errors.New("usage: peer skills flow|main|member|worker|board")
 		}
 		_, err := out.Write(docs[args[1]])
 		return err
+	}
+	if args[0] == "board" {
+		return runBoard(args[1:], in, out, cwd)
 	}
 	s, err := openStore(cwd)
 	if err != nil {

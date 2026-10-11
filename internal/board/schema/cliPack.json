@@ -1,0 +1,558 @@
+{
+	"$schema": "https://json-schema.org/draft/2020-12/schema",
+	"$id": "https://github.com/r13v/peer/schema/cliPack.json",
+	"title": "peer board cliPack",
+	"description": "A pack from peer board apply: no geometry fields (x, y, w, h, z, preset) and no restore.",
+	"oneOf": [
+		{
+			"type": "object",
+			"additionalProperties": false,
+			"required": ["base", "ops"],
+			"properties": {
+				"base": {
+					"type": "integer",
+					"minimum": 0
+				},
+				"ops": {
+					"type": "array",
+					"minItems": 1,
+					"items": {
+						"oneOf": [
+							{
+								"type": "object",
+								"additionalProperties": false,
+								"required": ["op", "node"],
+								"properties": {
+									"op": {
+										"const": "add"
+									},
+									"ref": {
+										"type": "string",
+										"pattern": "^\\$[A-Za-z0-9_-]{1,64}$"
+									},
+									"node": {
+										"$ref": "#/$defs/newNode"
+									}
+								}
+							},
+							{
+								"type": "object",
+								"additionalProperties": false,
+								"required": ["op", "edge"],
+								"properties": {
+									"op": {
+										"const": "add"
+									},
+									"ref": {
+										"type": "string",
+										"pattern": "^\\$[A-Za-z0-9_-]{1,64}$"
+									},
+									"edge": {
+										"type": "object",
+										"additionalProperties": false,
+										"required": ["from", "to"],
+										"properties": {
+											"from": {
+												"type": "string",
+												"pattern": "^([fn][1-9][0-9]*|\\$[A-Za-z0-9_-]{1,64})$"
+											},
+											"to": {
+												"type": "string",
+												"pattern": "^([fn][1-9][0-9]*|\\$[A-Za-z0-9_-]{1,64})$"
+											},
+											"label": {
+												"type": "string"
+											}
+										}
+									}
+								}
+							},
+							{
+								"type": "object",
+								"additionalProperties": false,
+								"required": ["op", "id", "set"],
+								"properties": {
+									"op": {
+										"const": "update"
+									},
+									"id": {
+										"type": "string",
+										"pattern": "^([fne][1-9][0-9]*|\\$[A-Za-z0-9_-]{1,64})$"
+									},
+									"set": {
+										"type": "object",
+										"minProperties": 1,
+										"additionalProperties": false,
+										"properties": {
+											"text": {
+												"type": "string"
+											},
+											"color": {
+												"oneOf": [
+													{
+														"enum": [
+															"gray",
+															"yellow",
+															"green",
+															"blue",
+															"purple",
+															"red"
+														]
+													},
+													{
+														"type": "null"
+													}
+												]
+											},
+											"caption": {
+												"type": ["string", "null"]
+											},
+											"title": {
+												"type": "string"
+											},
+											"order": {
+												"type": "number"
+											},
+											"parentId": {
+												"oneOf": [
+													{
+														"type": "string",
+														"pattern": "^([fn][1-9][0-9]*|\\$[A-Za-z0-9_-]{1,64})$"
+													},
+													{
+														"type": "null"
+													}
+												]
+											},
+											"from": {
+												"type": "string",
+												"pattern": "^([fn][1-9][0-9]*|\\$[A-Za-z0-9_-]{1,64})$"
+											},
+											"to": {
+												"type": "string",
+												"pattern": "^([fn][1-9][0-9]*|\\$[A-Za-z0-9_-]{1,64})$"
+											},
+											"label": {
+												"type": ["string", "null"]
+											}
+										}
+									}
+								}
+							},
+							{
+								"type": "object",
+								"additionalProperties": false,
+								"required": ["op", "id"],
+								"properties": {
+									"op": {
+										"const": "delete"
+									},
+									"id": {
+										"type": "string",
+										"pattern": "^([fnet][1-9][0-9]*|\\$[A-Za-z0-9_-]{1,64})$"
+									},
+									"cascade": {
+										"type": "boolean"
+									}
+								}
+							},
+							{
+								"type": "object",
+								"additionalProperties": false,
+								"required": ["op", "target", "body"],
+								"properties": {
+									"op": {
+										"const": "comment"
+									},
+									"ref": {
+										"type": "string",
+										"pattern": "^\\$[A-Za-z0-9_-]{1,64}$"
+									},
+									"target": {
+										"oneOf": [
+											{
+												"type": "object",
+												"additionalProperties": false,
+												"required": ["kind"],
+												"properties": {
+													"kind": {
+														"const": "board"
+													}
+												}
+											},
+											{
+												"type": "object",
+												"additionalProperties": false,
+												"required": ["kind", "id"],
+												"properties": {
+													"kind": {
+														"enum": ["frame", "node", "edge"]
+													},
+													"id": {
+														"type": "string",
+														"pattern": "^([fne][1-9][0-9]*|\\$[A-Za-z0-9_-]{1,64})$"
+													}
+												}
+											}
+										]
+									},
+									"body": {
+										"type": "string",
+										"minLength": 1,
+										"maxLength": 65536
+									}
+								}
+							},
+							{
+								"type": "object",
+								"additionalProperties": false,
+								"required": ["op", "thread", "body"],
+								"properties": {
+									"op": {
+										"const": "reply"
+									},
+									"thread": {
+										"type": "string",
+										"pattern": "^(t[1-9][0-9]*|\\$[A-Za-z0-9_-]{1,64})$"
+									},
+									"body": {
+										"type": "string",
+										"minLength": 1,
+										"maxLength": 65536
+									}
+								}
+							},
+							{
+								"type": "object",
+								"additionalProperties": false,
+								"required": ["op", "thread", "resolved"],
+								"properties": {
+									"op": {
+										"const": "resolve"
+									},
+									"thread": {
+										"type": "string",
+										"pattern": "^(t[1-9][0-9]*|\\$[A-Za-z0-9_-]{1,64})$"
+									},
+									"resolved": {
+										"type": "boolean"
+									}
+								}
+							}
+						]
+					}
+				}
+			}
+		},
+		{
+			"type": "object",
+			"additionalProperties": false,
+			"required": ["expect", "ops"],
+			"properties": {
+				"expect": {
+					"type": "object",
+					"additionalProperties": {
+						"type": "integer",
+						"minimum": 0
+					}
+				},
+				"ops": {
+					"type": "array",
+					"minItems": 1,
+					"items": {
+						"oneOf": [
+							{
+								"type": "object",
+								"additionalProperties": false,
+								"required": ["op", "node"],
+								"properties": {
+									"op": {
+										"const": "add"
+									},
+									"ref": {
+										"type": "string",
+										"pattern": "^\\$[A-Za-z0-9_-]{1,64}$"
+									},
+									"node": {
+										"$ref": "#/$defs/newNode"
+									}
+								}
+							},
+							{
+								"type": "object",
+								"additionalProperties": false,
+								"required": ["op", "edge"],
+								"properties": {
+									"op": {
+										"const": "add"
+									},
+									"ref": {
+										"type": "string",
+										"pattern": "^\\$[A-Za-z0-9_-]{1,64}$"
+									},
+									"edge": {
+										"type": "object",
+										"additionalProperties": false,
+										"required": ["from", "to"],
+										"properties": {
+											"from": {
+												"type": "string",
+												"pattern": "^([fn][1-9][0-9]*|\\$[A-Za-z0-9_-]{1,64})$"
+											},
+											"to": {
+												"type": "string",
+												"pattern": "^([fn][1-9][0-9]*|\\$[A-Za-z0-9_-]{1,64})$"
+											},
+											"label": {
+												"type": "string"
+											}
+										}
+									}
+								}
+							},
+							{
+								"type": "object",
+								"additionalProperties": false,
+								"required": ["op", "id", "set"],
+								"properties": {
+									"op": {
+										"const": "update"
+									},
+									"id": {
+										"type": "string",
+										"pattern": "^([fne][1-9][0-9]*|\\$[A-Za-z0-9_-]{1,64})$"
+									},
+									"set": {
+										"type": "object",
+										"minProperties": 1,
+										"additionalProperties": false,
+										"properties": {
+											"text": {
+												"type": "string"
+											},
+											"color": {
+												"oneOf": [
+													{
+														"enum": [
+															"gray",
+															"yellow",
+															"green",
+															"blue",
+															"purple",
+															"red"
+														]
+													},
+													{
+														"type": "null"
+													}
+												]
+											},
+											"caption": {
+												"type": ["string", "null"]
+											},
+											"title": {
+												"type": "string"
+											},
+											"order": {
+												"type": "number"
+											},
+											"parentId": {
+												"oneOf": [
+													{
+														"type": "string",
+														"pattern": "^([fn][1-9][0-9]*|\\$[A-Za-z0-9_-]{1,64})$"
+													},
+													{
+														"type": "null"
+													}
+												]
+											},
+											"from": {
+												"type": "string",
+												"pattern": "^([fn][1-9][0-9]*|\\$[A-Za-z0-9_-]{1,64})$"
+											},
+											"to": {
+												"type": "string",
+												"pattern": "^([fn][1-9][0-9]*|\\$[A-Za-z0-9_-]{1,64})$"
+											},
+											"label": {
+												"type": ["string", "null"]
+											}
+										}
+									}
+								}
+							},
+							{
+								"type": "object",
+								"additionalProperties": false,
+								"required": ["op", "id"],
+								"properties": {
+									"op": {
+										"const": "delete"
+									},
+									"id": {
+										"type": "string",
+										"pattern": "^([fnet][1-9][0-9]*|\\$[A-Za-z0-9_-]{1,64})$"
+									},
+									"cascade": {
+										"type": "boolean"
+									}
+								}
+							},
+							{
+								"type": "object",
+								"additionalProperties": false,
+								"required": ["op", "target", "body"],
+								"properties": {
+									"op": {
+										"const": "comment"
+									},
+									"ref": {
+										"type": "string",
+										"pattern": "^\\$[A-Za-z0-9_-]{1,64}$"
+									},
+									"target": {
+										"oneOf": [
+											{
+												"type": "object",
+												"additionalProperties": false,
+												"required": ["kind"],
+												"properties": {
+													"kind": {
+														"const": "board"
+													}
+												}
+											},
+											{
+												"type": "object",
+												"additionalProperties": false,
+												"required": ["kind", "id"],
+												"properties": {
+													"kind": {
+														"enum": ["frame", "node", "edge"]
+													},
+													"id": {
+														"type": "string",
+														"pattern": "^([fne][1-9][0-9]*|\\$[A-Za-z0-9_-]{1,64})$"
+													}
+												}
+											}
+										]
+									},
+									"body": {
+										"type": "string",
+										"minLength": 1,
+										"maxLength": 65536
+									}
+								}
+							},
+							{
+								"type": "object",
+								"additionalProperties": false,
+								"required": ["op", "thread", "body"],
+								"properties": {
+									"op": {
+										"const": "reply"
+									},
+									"thread": {
+										"type": "string",
+										"pattern": "^(t[1-9][0-9]*|\\$[A-Za-z0-9_-]{1,64})$"
+									},
+									"body": {
+										"type": "string",
+										"minLength": 1,
+										"maxLength": 65536
+									}
+								}
+							},
+							{
+								"type": "object",
+								"additionalProperties": false,
+								"required": ["op", "thread", "resolved"],
+								"properties": {
+									"op": {
+										"const": "resolve"
+									},
+									"thread": {
+										"type": "string",
+										"pattern": "^(t[1-9][0-9]*|\\$[A-Za-z0-9_-]{1,64})$"
+									},
+									"resolved": {
+										"type": "boolean"
+									}
+								}
+							}
+						]
+					}
+				}
+			}
+		}
+	],
+	"$defs": {
+		"newNode": {
+			"oneOf": [
+				{
+					"type": "object",
+					"additionalProperties": false,
+					"required": ["type", "text"],
+					"properties": {
+						"type": {
+							"const": "card"
+						},
+						"parentId": {
+							"type": "string",
+							"pattern": "^([fn][1-9][0-9]*|\\$[A-Za-z0-9_-]{1,64})$"
+						},
+						"text": {
+							"type": "string"
+						},
+						"color": {
+							"enum": ["gray", "yellow", "green", "blue", "purple", "red"]
+						}
+					}
+				},
+				{
+					"type": "object",
+					"additionalProperties": false,
+					"required": ["type", "asset"],
+					"properties": {
+						"type": {
+							"const": "image"
+						},
+						"parentId": {
+							"type": "string",
+							"pattern": "^([fn][1-9][0-9]*|\\$[A-Za-z0-9_-]{1,64})$"
+						},
+						"asset": {
+							"type": "string",
+							"pattern": "^assets/[0-9a-f]{64}\\.(png|jpg|gif|webp)$"
+						},
+						"caption": {
+							"type": "string"
+						}
+					}
+				},
+				{
+					"type": "object",
+					"additionalProperties": false,
+					"required": ["type", "title", "order"],
+					"properties": {
+						"type": {
+							"const": "frame"
+						},
+						"parentId": {
+							"type": "string",
+							"pattern": "^([fn][1-9][0-9]*|\\$[A-Za-z0-9_-]{1,64})$"
+						},
+						"title": {
+							"type": "string"
+						},
+						"order": {
+							"type": "number"
+						}
+					}
+				}
+			]
+		}
+	}
+}
