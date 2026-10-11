@@ -123,6 +123,14 @@ func TestBoardImportAndInspect(t *testing.T) {
 	}
 	_, err = invoke(repo, "", "board", "inspect", "missing")
 	boardErr(t, err, board.KindNotFound)
+	if out, err := invoke(repo, "", "board", "inspect", "b", "--format", "mermaid"); err != nil || !strings.Contains(out, "\nflowchart TB\n") {
+		t.Fatalf("mermaid: %s, %v", out, err)
+	}
+	// A part of a board would draw its outside edge ends as cards.
+	_, err = invoke(repo, "", "board", "inspect", "b", "--frame", "f1", "--format", "mermaid")
+	boardErr(t, err, board.KindInvalid)
+	_, err = invoke(repo, "", "board", "inspect", "b", "--format", "svg")
+	boardErr(t, err, board.KindInvalid)
 	if out, err := invoke(repo, "", "board", "schema"); err != nil || !strings.Contains(out, `"cliPack"`) {
 		t.Fatalf("schema: %v", err)
 	}

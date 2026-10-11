@@ -347,7 +347,7 @@ Run `peer` (the TUI) to start the web UI at http://localhost:4747/. Set `PEER_PO
 |---------|--------|
 | `peer board create NAME [--title T] [--path DIR] --as ROLE [--room ID]` | Create an empty board and print its link |
 | `peer board list` | List the boards of this checkout with their links and rooms |
-| `peer board inspect BOARD [--overview\|--frame ID\|--ids ID,...]` | Print the board without positions and sizes |
+| `peer board inspect BOARD [--overview\|--frame ID\|--ids ID,...\|--format mermaid]` | Print the board without positions and sizes; `--format mermaid` prints the whole board as a Mermaid flowchart |
 | `peer board apply BOARD --as ROLE [--room ID] < pack.json` | Apply a pack of operations: add, update, delete, comment, reply, resolve |
 | `peer board import-image BOARD FILE [--frame ID] [--caption T] --as ROLE [--room ID]` | Add an image |
 | `peer board schema` | Print the JSON Schemas of the board and of packs |

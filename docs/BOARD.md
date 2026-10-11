@@ -149,14 +149,14 @@ Only the browser has undo, and the history is in the memory of the tab.
 
 ## CLI for agents
 
-Agents work with boards through `peer board`. Every command writes JSON to stdout. On an error, a JSON object `{"error": "...", ...}` goes to stderr and the command exits with a non-zero code.
+Agents work with boards through `peer board`. Every command writes JSON to stdout, except `inspect --format mermaid`. On an error, a JSON object `{"error": "...", ...}` goes to stderr and the command exits with a non-zero code.
 
 `BOARD` is the name of a board in the store of the current checkout, or the path of a `*.board` directory.
 
 ```
 peer board create NAME [--title T] [--path DIR] --as ROLE [--room ID]
 peer board list
-peer board inspect BOARD [--overview | --frame ID | --ids ID,...] [--as ROLE --room ID]
+peer board inspect BOARD [--overview | --frame ID | --ids ID,... | --format mermaid] [--as ROLE --room ID]
 peer board apply BOARD --as ROLE [--room ID]        < ops.json
 peer board import-image BOARD FILE [--frame ID] [--caption T] --as ROLE [--room ID]
 peer board schema
@@ -169,6 +169,7 @@ peer board schema
   - `--frame ID` gives all of a frame: its nodes, their edges and threads.
   - `--ids` gives the listed entities.
   - Without a flag, it gives the whole board.
+  - `--format mermaid` gives the whole board as a Mermaid flowchart for a person or an agent to read, and to paste where Mermaid renders. It is a view: the keys are the real ids, and an edge's id is in a comment before it, but colors, frame order, image paths and thread messages are only in the JSON. A part of a board has no Mermaid form, because the outside ends of its edges would show as cards.
   - Each result has the board's `id`, `title`, path and `url`, and `revision`, which is the `base` of the next `apply`.
   - An image has an absolute path instead of the relative one, computed from where the board is now. The agent reads the image at this path itself.
 - **`apply`** reads a pack from stdin. The result has the new `revision`, the map from `ref` to `id`, and the changed, created and deleted ids, implicit changes included.

@@ -170,6 +170,27 @@ type Overview = {
 }
 ```
 
+`--format mermaid` prints the whole board as a Mermaid flowchart instead of JSON; with `--overview`, `--frame` or `--ids` it fails with `invalid`, because the outside ends of a part's edges would show as cards. Errors stay JSON on stderr.
+
+```
+%% {"key":"…","path":"…","url":"…","id":"…","title":"…","revision":12}
+flowchart TB
+	subgraph f1["Plan"]
+		n2["Parse the input"]
+		n4[["chart"]]
+	end
+	n3["Validate it"]
+	%% e5
+	n2 -->|"then"| n3
+	%% thread t6 on n2: open, 2 messages
+```
+
+- The first line is the `Inspect["board"]` header as one line of JSON, with `warnings` when `--room` gives one.
+- A frame is a `subgraph` keyed by its id, nested as the frames nest. A card is `id["text"]`; an image is `id[["caption"]]`, or `"image"` without a caption.
+- Each edge follows a `%% eN` line with its id. A thread is a `%%` line with its id, target, state and message count.
+- Labels are plain text: `#`, `"`, `&`, `<`, `>`, `|`, `` ` ``, `*`, `[`, `]`, `\` and `_` outside a word become Mermaid entity codes, and so does a character that starts a markdown block or `%%` at the start of a line. A line break stays a real one.
+- Card colors, frame `order`, image paths, `rev` and thread messages are only in the JSON.
+
 `peer board apply` and `peer board import-image` print `ApplyResult`. `peer board schema` prints `{ "board": <JSON Schema>, "cliPack": <JSON Schema>, "browserPack": <JSON Schema> }`.
 
 ## HTTP

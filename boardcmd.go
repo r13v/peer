@@ -15,7 +15,7 @@ import (
 	"github.com/r13v/peer/internal/board"
 )
 
-const boardUsage = "usage: peer board create NAME [--title T] [--path DIR] --as ROLE [--room ID], peer board list, peer board inspect BOARD [--overview|--frame ID|--ids ID,...] [--as ROLE --room ID], peer board apply BOARD --as ROLE [--room ID] < pack.json, peer board import-image BOARD FILE [--frame ID] [--caption T] --as ROLE [--room ID], or peer board schema"
+const boardUsage = "usage: peer board create NAME [--title T] [--path DIR] --as ROLE [--room ID], peer board list, peer board inspect BOARD [--overview|--frame ID|--ids ID,...|--format mermaid] [--as ROLE --room ID], peer board apply BOARD --as ROLE [--room ID] < pack.json, peer board import-image BOARD FILE [--frame ID] [--caption T] --as ROLE [--room ID], or peer board schema"
 
 // boardName is a board in the checkout's store, boards/<NAME>.board.
 var boardName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
@@ -42,8 +42,8 @@ func roomError(format string, args ...any) error {
 }
 
 type boardFlags struct {
-	title, path, as, room, frame, ids, caption string
-	overview                                   bool
+	title, path, as, room, frame, ids, caption, format string
+	overview                                           bool
 }
 
 func boardCommand(args []string, in io.Reader, out io.Writer, cwd string) error {
@@ -67,6 +67,7 @@ func boardCommand(args []string, in io.Reader, out io.Writer, cwd string) error 
 	fs.StringVar(&f.ids, "ids", "", "comma-separated ids")
 	fs.StringVar(&f.caption, "caption", "", "image caption")
 	fs.BoolVar(&f.overview, "overview", false, "short overview")
+	fs.StringVar(&f.format, "format", "json", "inspect output: json or mermaid")
 	if err := fs.Parse(rest); err != nil {
 		return usageError("%v; %s", err, boardUsage)
 	}
@@ -231,6 +232,13 @@ func boardInspect(out io.Writer, cwd, arg string, f boardFlags) error {
 	if given > 1 {
 		return usageError("give at most one of --overview, --frame and --ids")
 	}
+	switch {
+	case f.format != "json" && f.format != "mermaid":
+		return usageError("--format is json or mermaid")
+	case f.format == "mermaid" && given > 0:
+		// A part of a board would show its outside edge ends as cards.
+		return usageError("--format mermaid shows the whole board; read a part with --overview, --frame or --ids as JSON")
+	}
 	_, s, err := boardActor(cwd, f, false)
 	if err != nil {
 		return err
@@ -257,6 +265,14 @@ func boardInspect(out io.Writer, cwd, arg string, f boardFlags) error {
 		v = board.Inspect(b, dir)
 	}
 	warnings := link(s, f.room, dir)
+	if f.format == "mermaid" {
+		text, err := board.Mermaid(v.(board.Inspection), warnings)
+		if err != nil {
+			return err
+		}
+		_, err = io.WriteString(out, text)
+		return err
+	}
 	if len(warnings) == 0 {
 		return printJSON(out, v)
 	}
