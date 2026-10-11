@@ -1,0 +1,32 @@
+name: Claude Code
+
+# Runs the plugin's tests against the latest Claude Code every day, so a
+# Claude Code release that breaks the plugin fails here before users update.
+# The tests run in the kit inside the claude binary and need no login. The
+# typecheck needs the types that only an interactive load writes, so it runs
+# locally: npm run engine-check.
+
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  plugin:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - name: Install Claude Code
+        run: |
+          npm install -g @anthropic-ai/claude-code@latest
+          claude --version
+      - name: Validate
+        run: claude plugin validate plugin
+      - name: Test
+        run: claude plugin test plugin
