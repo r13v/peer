@@ -50,7 +50,6 @@ type Node struct {
 	Caption  string   `json:"caption,omitempty"`
 	Title    *string  `json:"title,omitempty"`
 	Order    *float64 `json:"order,omitempty"`
-	Preset   string   `json:"preset,omitempty"`
 	X        *float64 `json:"x,omitempty"`
 	Y        *float64 `json:"y,omitempty"`
 	W        *float64 `json:"w,omitempty"`
@@ -244,6 +243,7 @@ func Parse(data []byte, dir string) (*Board, error) {
 	}
 	// encoding/json fills missing and null fields with zero values, so
 	// required fields are checked on the raw JSON first.
+	data = dropRemovedFields(data)
 	if problems := checkRequired(data); len(problems) > 0 {
 		return nil, invalidAll(problems)
 	}
@@ -256,6 +256,38 @@ func Parse(data []byte, dir string) (*Board, error) {
 		return nil, invalidAll(problems)
 	}
 	return &b, nil
+}
+
+// dropRemovedFields removes frame fields that the format no longer has, so
+// an older board still opens; its next write leaves them out. Data that is
+// not a board object stays as it is, for the checks to report.
+func dropRemovedFields(data []byte) []byte {
+	var obj map[string]json.RawMessage
+	var nodes []map[string]json.RawMessage
+	if json.Unmarshal(data, &obj) != nil || json.Unmarshal(obj["nodes"], &nodes) != nil {
+		return data
+	}
+	dropped := false
+	for _, n := range nodes {
+		// "preset": "slide" kept a frame at 16:9; slides are now plain frames.
+		if _, ok := n["preset"]; ok && string(n["type"]) == `"frame"` {
+			delete(n, "preset")
+			dropped = true
+		}
+	}
+	if !dropped {
+		return data
+	}
+	raw, err := json.Marshal(nodes)
+	if err != nil {
+		return data
+	}
+	obj["nodes"] = raw
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return data
+	}
+	return out
 }
 
 // decodeStrict decodes one JSON value and rejects unknown fields and

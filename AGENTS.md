@@ -39,6 +39,6 @@ These rules apply to the whole checkout. Work from the repository root.
 - **One reader per role.** `wait` marks each printed message as read. A change must not let two readers of one role divide messages or drop a printed message.
 - **The file store is the source of truth.** Rooms, members and messages live under `PEER_HOME`. Every change of a store runs under its exclusive `flock` on `.lock`; the TUI and the plugins go through the `peer` CLI or read the store, and never write it directly.
 - **Roles.** A member does not edit files. A worker edits only its zone and does not touch the Git index. A kicked role is not reused in the room.
-- **Boards: the CLI never writes geometry.** A CLI batch cannot set `x`, `y`, `w`, `h`, `z` or `preset`; only the browser places nodes.
+- **Boards: the CLI never writes geometry.** A CLI batch cannot set `x`, `y`, `w`, `h` or `z`; only the browser places nodes.
 - **Boards: one write path.** Every board write, from the CLI or the HTTP server, goes through one `apply` under the board `.lock` and replaces `board.json` atomically.
 - **Instructions match the CLI.** A change of a command, a flag or an output field updates `instructions/*.md` and the README in the same change.

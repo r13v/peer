@@ -219,7 +219,7 @@ func project(b *Board, dir string, node func(*Node) bool, edge func(*Edge) bool,
 // the board lies now, so a moved board still gives readable paths.
 func semantic(n *Node, dir string) *Node {
 	s := *n
-	s.X, s.Y, s.W, s.H, s.Z, s.Preset = nil, nil, nil, nil, nil, ""
+	s.X, s.Y, s.W, s.H, s.Z = nil, nil, nil, nil, nil
 	if n.Asset != nil {
 		abs := filepath.Join(dir, filepath.FromSlash(*n.Asset))
 		s.Asset = &abs

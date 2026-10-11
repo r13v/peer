@@ -2,7 +2,7 @@
 
 A board is a shared canvas for people and agents: cards, images, frames that group them, edges between nodes, and comment threads. It is a `NAME.board` directory with `board.json` and `assets/`. A human edits it in the browser; you work with it through `peer board`. Every command prints JSON, except `inspect --format mermaid`; an error goes to stderr as JSON with an `error` field, and the exit code is 1.
 
-You never send geometry. A pack from the CLI may not set `x`, `y`, `w`, `h`, `z` or `preset`, and may not use `restore`; the browser places and sizes new nodes when the board opens. Add a node to a frame with `parentId`, and order frames with `order`.
+You never send geometry. A pack from the CLI may not set `x`, `y`, `w`, `h` or `z`, and may not use `restore`; the browser places and sizes new nodes when the board opens. Add a node to a frame with `parentId`, and order frames with `order`.
 
 ## Commands
 

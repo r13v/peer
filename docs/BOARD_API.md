@@ -31,7 +31,7 @@ type Node = Geometry & {
 } & (
 		| { type: "card"; text: string; color?: CardColor }
 		| { type: "image"; asset: string; caption?: string } // asset: "assets/<sha256>.<ext>"
-		| { type: "frame"; title: string; order: number; preset?: "slide" }
+		| { type: "frame"; title: string; order: number }
 	)
 
 type CardColor = "gray" | "yellow" | "green" | "blue" | "purple" | "red"
@@ -57,7 +57,7 @@ type Message = { id: string; author: Author; body: string; createdAt: string } /
 
 Ids come from one counter: the prefix names the kind (`f` frame, `n` other node, `e` edge, `t` thread, `m` message), the number is `nextId`.
 
-Serialization: tabs for indentation, arrays in stored order, a final newline, no HTML escaping. Node keys go in this order: `id`, `type`, `rev`, `parentId`, `text`, `color`, `asset`, `caption`, `title`, `order`, `preset`, `x`, `y`, `w`, `h`, `z`. A board directory also holds `.gitignore` with `.lock`.
+Serialization: tabs for indentation, arrays in stored order, a final newline, no HTML escaping. Node keys go in this order: `id`, `type`, `rev`, `parentId`, `text`, `color`, `asset`, `caption`, `title`, `order`, `x`, `y`, `w`, `h`, `z`. A board directory also holds `.gitignore` with `.lock`.
 
 ## Packs
 
@@ -85,12 +85,12 @@ type Op =
   | image | `caption`, `parentId` |
   | frame | `title`, `order`, `parentId` |
   | edge | `from`, `to`, `label` |
-  | any node, browser only | `x`, `y`, `w`, `h`, `z`, `preset` (frame) |
+  | any node, browser only | `x`, `y`, `w`, `h`, `z` |
 
   Threads change only through `comment`, `reply`, `resolve`, `delete` and `restore`. Messages never change.
 - `delete` takes a node, edge or thread id. Undo of `comment` is `delete` of its thread; redo is `restore`.
 - Undo covers every browser pack except `reply`: a posted reply has no inverse operation, so the undo history stops at it — older steps stay undoable, the reply itself is skipped.
-- Geometry fields are `x`, `y`, `w`, `h`, `z` and `preset`. A CLI pack that sets any of them, or that contains `restore`, is rejected with `forbidden`.
+- Geometry fields are `x`, `y`, `w`, `h` and `z`. A CLI pack that sets any of them, or that contains `restore`, is rejected with `forbidden`.
 - The CLI author comes from `--as` / `--room`. The browser author is always `{ role: "user" }`.
 
 ## Apply result
@@ -159,7 +159,7 @@ type Inspect = {
 }
 ```
 
-`SemanticNode` is `Node` without `x`, `y`, `w`, `h`, `z`, `preset`. `--frame ID` keeps the frame, its descendants, the edges that touch them and the threads on any of them. `--ids` keeps the listed entities and the threads on them. `--overview` prints instead:
+`SemanticNode` is `Node` without `x`, `y`, `w`, `h`, `z`. `--frame ID` keeps the frame, its descendants, the edges that touch them and the threads on any of them. `--ids` keeps the listed entities and the threads on them. `--overview` prints instead:
 
 ```ts
 type Overview = {

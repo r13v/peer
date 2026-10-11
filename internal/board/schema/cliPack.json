@@ -2,7 +2,7 @@
 	"$schema": "https://json-schema.org/draft/2020-12/schema",
 	"$id": "https://github.com/r13v/peer/schema/cliPack.json",
 	"title": "peer board cliPack",
-	"description": "A pack from peer board apply: no geometry fields (x, y, w, h, z, preset) and no restore.",
+	"description": "A pack from peer board apply: no geometry fields (x, y, w, h, z) and no restore.",
 	"oneOf": [
 		{
 			"type": "object",

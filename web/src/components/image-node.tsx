@@ -1,8 +1,9 @@
-import { Handle, type NodeProps, NodeResizer, Position } from "@xyflow/react"
+import { type NodeProps, NodeResizer } from "@xyflow/react"
 import { assetUrl } from "../lib/api.ts"
 import { useBoardActions } from "../lib/board-context.ts"
 import type { FlowNode } from "../lib/flow.ts"
 import { InlineText } from "./inline-text.tsx"
+import { NodeHandles } from "./node-handles.tsx"
 import { ThreadBadge } from "./thread-badge.tsx"
 
 export function ImageNodeView({ id, data, selected }: NodeProps<FlowNode>) {
@@ -21,7 +22,6 @@ export function ImageNodeView({ id, data, selected }: NodeProps<FlowNode>) {
 				onResizeStart={actions.startResize}
 				onResizeEnd={(_, params) => actions.endResize(id, params)}
 			/>
-			<Handle type="target" position={Position.Top} />
 			<img
 				src={assetUrl(actions.boardKey, node.asset)}
 				alt={node.caption ?? ""}
@@ -37,7 +37,7 @@ export function ImageNodeView({ id, data, selected }: NodeProps<FlowNode>) {
 				}
 			/>
 			<ThreadBadge id={id} />
-			<Handle type="source" position={Position.Bottom} />
+			<NodeHandles />
 		</div>
 	)
 }

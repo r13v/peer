@@ -25,7 +25,6 @@ const nodeFields = [
 	"w",
 	"h",
 	"z",
-	"preset",
 ]
 const edgeFields = ["from", "to", "label"]
 

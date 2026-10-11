@@ -198,9 +198,6 @@
 						"order": {
 							"type": "number"
 						},
-						"preset": {
-							"const": "slide"
-						},
 						"x": {
 							"type": "number"
 						},

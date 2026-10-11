@@ -11,7 +11,7 @@ type Item = Size & { id: string }
 const frameHeader = 44
 const framePadding = 24
 const blockGap = 40
-const slideRatio = 16 / 9
+const settleGap = 24
 
 const defaultSizes: Record<BoardNode["type"], Size> = {
 	card: { w: 240, h: 80 },
@@ -75,14 +75,10 @@ export function blockOrigin(placed: Rect[], origin: Point): Point {
 	return { x: left, y: bottom + blockGap }
 }
 
-// Frame size that holds `content`, never smaller than now; a slide keeps 16:9.
-export function fitFrame(frame: FrameNode, current: Size, content: Size): Size {
-	let w = Math.max(current.w, content.w + framePadding)
-	let h = Math.max(current.h, content.h + framePadding)
-	if (frame.preset === "slide") {
-		w = Math.max(w, h * slideRatio)
-		h = w / slideRatio
-	}
+// Frame size that holds `content`, never smaller than now.
+function fitFrame(current: Size, content: Size): Size {
+	const w = Math.max(current.w, content.w + framePadding)
+	const h = Math.max(current.h, content.h + framePadding)
 
 	return { w: Math.round(w), h: Math.round(h) }
 }
@@ -130,13 +126,92 @@ function placeContainer(
 		h: Math.max(0, ...rects.map((r) => r.y + r.h)),
 	}
 	const current = sizeOf(container)
-	const frameSize = fitFrame(container, current, content)
+	const frameSize = fitFrame(current, content)
 	const changed =
 		container.w === undefined ||
 		frameSize.w !== current.w ||
 		frameSize.h !== current.h
 
 	return { positions, frameSize: changed ? frameSize : undefined }
+}
+
+// Pushes placed nodes down until no node covers the top of one below it in the same column.
+// A node below another keeps its x; nodes are taken from top to bottom, so a push carries on
+// down the column. Nodes on one row may overlap: only a node that starts lower is pushed.
+export function settleContainer(
+	rects: (Rect & { id: string })[],
+): Map<string, Point> {
+	const moved = new Map<string, Point>()
+	const order = [...rects].sort((a, b) => a.y - b.y || a.x - b.x)
+	const settled: (Rect & { top: number })[] = []
+	for (const rect of order) {
+		let y = rect.y
+		// A push can bring the node onto another node above it, so repeat until it is clear.
+		for (let pushed = true; pushed; ) {
+			pushed = false
+			for (const above of settled) {
+				const sameColumn =
+					rect.x < above.x + above.w && above.x < rect.x + rect.w
+				const covered = rect.y > above.top && y < above.y + above.h
+				if (sameColumn && covered) {
+					y = above.y + above.h + settleGap
+					pushed = true
+				}
+			}
+		}
+		if (y !== rect.y) {
+			moved.set(rect.id, { x: rect.x, y })
+		}
+		settled.push({ ...rect, y, top: rect.y })
+	}
+
+	return moved
+}
+
+// Moves and frame sizes that remove overlaps of placed nodes, container by container, deeper
+// frames first: a frame grows to hold its pushed content, and then pushes its own neighbours.
+// `measured` gives rendered sizes of cards and images, which may be larger than the stored ones.
+export function settleOps(board: Board, measured: Map<string, Size>): Op[] {
+	const nodes = nodeMap(board)
+	const known = new Map(
+		[...measured].filter(([id]) => nodes.get(id)?.type !== "frame"),
+	)
+	const sets = new Map<string, Record<string, number>>()
+	const frames = board.nodes.filter((n): n is FrameNode => n.type === "frame")
+	frames.sort((a, b) => depthOf(nodes, b.id) - depthOf(nodes, a.id))
+	for (const container of [...frames, undefined]) {
+		const children = board.nodes.filter(
+			(n) => n.parentId === container?.id && isPlaced(n),
+		)
+		const rects = children.map((n) => ({
+			id: n.id,
+			x: n.x ?? 0,
+			y: n.y ?? 0,
+			...sizeOf(n, known),
+		}))
+		for (const [id, p] of settleContainer(rects)) {
+			sets.set(id, { ...sets.get(id), y: p.y })
+			const rect = rects.find((r) => r.id === id)
+			if (rect) {
+				rect.y = p.y
+			}
+		}
+		if (!container || !isPlaced(container) || rects.length === 0) {
+			continue
+		}
+		const content = {
+			w: Math.max(...rects.map((r) => r.x + r.w)),
+			h: Math.max(...rects.map((r) => r.y + r.h)),
+		}
+		const current = sizeOf(container)
+		const size = fitFrame(current, content)
+		if (size.w !== current.w || size.h !== current.h) {
+			known.set(container.id, size)
+			sets.set(container.id, { ...sets.get(container.id), ...size })
+		}
+	}
+
+	return [...sets].map(([id, set]): Op => ({ op: "update", id, set }))
 }
 
 export type Placement = {

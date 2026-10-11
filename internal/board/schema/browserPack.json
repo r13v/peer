@@ -149,9 +149,6 @@
 											},
 											"z": {
 												"type": ["number", "null"]
-											},
-											"preset": {
-												"enum": ["slide", null]
 											}
 										}
 									}
@@ -449,9 +446,6 @@
 											},
 											"z": {
 												"type": ["number", "null"]
-											},
-											"preset": {
-												"enum": ["slide", null]
 											}
 										}
 									}
@@ -702,9 +696,6 @@
 						"order": {
 							"type": "number"
 						},
-						"preset": {
-							"const": "slide"
-						},
 						"x": {
 							"type": "number"
 						},
@@ -850,9 +841,6 @@
 						},
 						"order": {
 							"type": "number"
-						},
-						"preset": {
-							"const": "slide"
 						},
 						"x": {
 							"type": "number"

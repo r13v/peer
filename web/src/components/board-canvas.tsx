@@ -3,11 +3,13 @@ import {
 	applyNodeChanges,
 	Background,
 	type Connection,
+	ConnectionMode,
 	Controls,
 	type EdgeChange,
 	MarkerType,
 	MiniMap,
 	type NodeChange,
+	type OnConnectEnd,
 	ReactFlow,
 	type ResizeParams,
 	useReactFlow,
@@ -16,11 +18,11 @@ import {
 import { type DragEvent, useEffect, useMemo, useRef, useState } from "react"
 import { errorText, uploadAsset } from "../lib/api.ts"
 import {
+	threadCounts as countThreads,
 	depthOf,
 	isInside,
 	isPlaced,
 	nodeMap,
-	openThreadCounts,
 	targetFor,
 } from "../lib/board.ts"
 import { type BoardActions, BoardContext } from "../lib/board-context.ts"
@@ -31,9 +33,10 @@ import {
 	type FlowNode,
 	toFlowEdges,
 	toFlowNodes,
+	withSides,
 } from "../lib/flow.ts"
 import { fontsSettled, loadFonts } from "../lib/fonts.ts"
-import { placementOps, planPlacement } from "../lib/layout.ts"
+import { placementOps, planPlacement, settleOps } from "../lib/layout.ts"
 import type {
 	Board,
 	CardColor,
@@ -46,6 +49,7 @@ import type {
 import { BoardEdgeView } from "./board-edge.tsx"
 import { CardNodeView } from "./card-node.tsx"
 import { FrameNodeView } from "./frame-node.tsx"
+import { Icon } from "./icon.tsx"
 import { ImageNodeView } from "./image-node.tsx"
 import { SearchBox } from "./search-box.tsx"
 import { ThreadPanel } from "./thread-panel.tsx"
@@ -59,6 +63,14 @@ const nodeTypes = {
 const edgeTypes = { board: BoardEdgeView }
 const defaultEdgeOptions = { markerEnd: { type: MarkerType.ArrowClosed } }
 
+function minimapClass(flowNode: FlowNode): string {
+	const { node } = flowNode.data
+
+	return node.type === "card"
+		? `mm-card color-${node.color ?? "none"}`
+		: `mm-${node.type}`
+}
+
 const measureDelay = 300 // ms after the last render before sizes are written
 const toastTimeout = 6000
 const imageMaxWidth = 480
@@ -66,7 +78,6 @@ const dropStep = 24
 const imageTypes = ["image/png", "image/jpeg", "image/gif", "image/webp"]
 const newCard = { w: 240, h: 80 }
 const newFrame = { w: 480, h: 320 }
-const newSlide = { w: 960, h: 540 }
 
 type Props = {
 	boardKey: string
@@ -118,11 +129,12 @@ export function BoardCanvas({ boardKey, sync, state, snapshot }: Props) {
 	const { board } = snapshot
 	const flow = useReactFlow<FlowNode, FlowEdge>()
 	const placement = useMemo(() => planPlacement(board), [board])
-	const threadCounts = useMemo(() => openThreadCounts(board), [board])
+	const threadCounts = useMemo(() => countThreads(board), [board])
 	const [nodes, setNodes] = useState<FlowNode[]>([])
 	const [edges, setEdges] = useState<FlowEdge[]>([])
 	const [editingId, setEditingId] = useState<string>()
 	const [panelOpen, setPanelOpen] = useState(true)
+	const [threadFocus, setThreadFocus] = useState<{ id: string }>()
 	const [slide, setSlide] = useState<number>()
 	const [fontsReady, setFontsReady] = useState(false)
 	const interacting = useRef(false)
@@ -134,6 +146,7 @@ export function BoardCanvas({ boardKey, sync, state, snapshot }: Props) {
 	boardRef.current = board
 
 	const frames = useMemo(() => slideFrames(board), [board])
+	const shownEdges = useMemo(() => withSides(edges, nodes), [edges, nodes])
 	const selectedNodes = nodes.filter((n) => n.selected)
 	const selectedEdges = edges.filter((e) => e.selected)
 	const single =
@@ -205,14 +218,22 @@ export function BoardCanvas({ boardKey, sync, state, snapshot }: Props) {
 			if (placing || busy || !fontsReady || !fontsSettled()) {
 				return
 			}
-			const ops: Op[] = []
-			for (const [id, size] of measuredSizes(nodes, board)) {
+			const measured = measuredSizes(nodes, board)
+			const sets = new Map<string, Record<string, unknown>>()
+			for (const [id, size] of measured) {
 				const node = board.nodes.find((n) => n.id === id)
 				const set = node && isPlaced(node) && changedSet(node, size)
 				if (set) {
-					ops.push({ op: "update", id, set })
+					sets.set(id, set)
 				}
 			}
+			// A card that grew must not cover the nodes below it.
+			for (const op of settleOps(board, measured)) {
+				if (op.op === "update") {
+					sets.set(op.id, { ...sets.get(op.id), ...op.set })
+				}
+			}
+			const ops = [...sets].map(([id, set]): Op => ({ op: "update", id, set }))
 			const key = `${snapshot.hash}:${JSON.stringify(ops)}`
 			if (ops.length === 0 || measuredKey.current === key) {
 				return
@@ -336,17 +357,16 @@ export function BoardCanvas({ boardKey, sync, state, snapshot }: Props) {
 	}
 
 	// A frame goes under existing nodes so it does not hide them.
-	function addFrame(asSlide: boolean) {
-		const size = asSlide ? newSlide : newFrame
+	function addFrame() {
 		const order = Math.max(0, ...frames.map((f) => f.order)) + 1
 		const frame: NewNode = {
 			type: "frame",
-			title: asSlide ? "New slide" : "New frame",
+			title: "New frame",
 			order,
-			...size,
+			...newFrame,
 			z: zRange().min - 1,
 		}
-		addAtCenter(asSlide ? { ...frame, preset: "slide" } : frame, size)
+		addAtCenter(frame, newFrame)
 	}
 
 	function deleteSelection(cascade: boolean) {
@@ -419,6 +439,25 @@ export function BoardCanvas({ boardKey, sync, state, snapshot }: Props) {
 		])
 	}
 
+	// Releasing a new edge anywhere on a node connects to it, not only on a handle.
+	const onConnectEnd: OnConnectEnd = (event, state) => {
+		if (state.isValid || !state.fromNode) {
+			return
+		}
+		const point = "changedTouches" in event ? event.changedTouches[0] : event
+		const target = document
+			.elementFromPoint(point.clientX, point.clientY)
+			?.closest<HTMLElement>(".react-flow__node")?.dataset.id
+		if (target && target !== state.fromNode.id) {
+			onConnect({
+				source: state.fromNode.id,
+				target,
+				sourceHandle: null,
+				targetHandle: null,
+			})
+		}
+	}
+
 	function onReconnect(old: FlowEdge, connection: Connection) {
 		const set = changedSet(
 			{ from: old.source, to: old.target },
@@ -475,11 +514,15 @@ export function BoardCanvas({ boardKey, sync, state, snapshot }: Props) {
 		}
 	}
 
-	function focusNode(id: string) {
+	function select(id: string) {
 		setNodes((prev) => prev.map((n) => ({ ...n, selected: n.id === id })))
 		setEdges((prev) =>
 			prev.map((edge) => ({ ...edge, selected: edge.id === id })),
 		)
+	}
+
+	function focusNode(id: string) {
+		select(id)
 		const edge = board.edges.find((candidate) => candidate.id === id)
 		const ids = edge ? [edge.from, edge.to] : [id]
 		void flow.fitView({
@@ -548,6 +591,8 @@ export function BoardCanvas({ boardKey, sync, state, snapshot }: Props) {
 		return () => window.removeEventListener("keydown", listener)
 	}, [])
 
+	const selectRef = useRef(select)
+	selectRef.current = select
 	const beginGestureRef = useRef(beginGesture)
 	const endResizeRef = useRef(endResize)
 	endResizeRef.current = endResize
@@ -555,6 +600,12 @@ export function BoardCanvas({ boardKey, sync, state, snapshot }: Props) {
 		(): BoardActions => ({
 			boardKey,
 			threadCounts,
+			// A new object each time, so a second click on the same badge scrolls again.
+			showThreads: (id) => {
+				selectRef.current(id)
+				setPanelOpen(true)
+				setThreadFocus({ id })
+			},
 			setEditing: (id) => {
 				if (id) {
 					beginGestureRef.current()
@@ -581,11 +632,15 @@ export function BoardCanvas({ boardKey, sync, state, snapshot }: Props) {
 		<BoardContext value={actions}>
 			<div className={presenting ? "board-page presenting" : "board-page"}>
 				<header className="board-header">
-					<a href="/" className="home-link">
+					<a href="/" className="home-link" title="All boards">
+						<Icon name="back" />
 						Boards
 					</a>
+					<span className="divider" />
 					<h1 title={board.title}>{board.title}</h1>
-					<span className="muted">rev {board.revision}</span>
+					<span className="chip" title="Board revision">
+						rev {board.revision}
+					</span>
 					<Toolbar
 						canUndo={state.canUndo}
 						canRedo={state.canRedo}
@@ -593,6 +648,7 @@ export function BoardCanvas({ boardKey, sync, state, snapshot }: Props) {
 						canArrange={selectedFrame}
 						canPresent={frames.length > 0}
 						panelOpen={panelOpen}
+						openThreads={board.threads.filter((t) => !t.resolved).length}
 						onUndo={() => void sync.undo()}
 						onRedo={() => void sync.redo()}
 						onAddCard={addCard}
@@ -620,7 +676,7 @@ export function BoardCanvas({ boardKey, sync, state, snapshot }: Props) {
 					>
 						<ReactFlow<FlowNode, FlowEdge>
 							nodes={nodes}
-							edges={edges}
+							edges={shownEdges}
 							nodeTypes={nodeTypes}
 							edgeTypes={edgeTypes}
 							defaultEdgeOptions={defaultEdgeOptions}
@@ -636,6 +692,8 @@ export function BoardCanvas({ boardKey, sync, state, snapshot }: Props) {
 							}}
 							onNodeDragStop={onNodeDragStop}
 							onConnect={onConnect}
+							onConnectEnd={onConnectEnd}
+							connectionMode={ConnectionMode.Loose}
 							onReconnect={onReconnect}
 							onEdgeDoubleClick={onEdgeDoubleClick}
 							deleteKeyCode={null}
@@ -643,9 +701,11 @@ export function BoardCanvas({ boardKey, sync, state, snapshot }: Props) {
 							minZoom={0.05}
 							fitView
 						>
-							{!presenting && <MiniMap pannable zoomable />}
+							{!presenting && (
+								<MiniMap pannable zoomable nodeClassName={minimapClass} />
+							)}
 							{!presenting && <Controls />}
-							<Background />
+							<Background gap={20} size={1.2} />
 						</ReactFlow>
 					</div>
 					{panelOpen && !presenting && (
@@ -660,13 +720,43 @@ export function BoardCanvas({ boardKey, sync, state, snapshot }: Props) {
 								apply([{ op: "resolve", thread, resolved }])
 							}
 							onFocus={focusNode}
+							focus={threadFocus}
 						/>
 					)}
 				</div>
 				{presenting && (
 					<div className="slide-hint">
-						{frames[slide]?.title} · {slide + 1}/{frames.length} · arrows or
-						space to move, Esc to exit
+						<button
+							type="button"
+							className="icon-button"
+							onClick={() => stepSlide(-1)}
+							disabled={slide === 0}
+							aria-label="Previous slide"
+						>
+							<Icon name="back" />
+						</button>
+						<span className="slide-title">{frames[slide]?.title}</span>
+						<span className="muted">
+							{slide + 1} / {frames.length}
+						</span>
+						<button
+							type="button"
+							className="icon-button"
+							onClick={() => stepSlide(1)}
+							disabled={slide === frames.length - 1}
+							aria-label="Next slide"
+						>
+							<Icon name="next" />
+						</button>
+						<button
+							type="button"
+							className="icon-button"
+							onClick={() => setSlide(undefined)}
+							title="Exit (Esc)"
+							aria-label="Exit presentation"
+						>
+							<Icon name="close" />
+						</button>
 					</div>
 				)}
 				{state.toast && (
