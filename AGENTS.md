@@ -18,7 +18,7 @@ These rules apply to the whole checkout. Work from the repository root.
 - Go: `make test` (race detector), `make lint`, `make build`. `make build` also builds the SPA; `make fmt` formats Go code.
 - TypeScript and the SPA: install with `npm ci`, then run `npm run verify` — `tsc`, the SPA unit tests (`npm run test:web`), Biome, Knip and the production build into `web/dist`.
 - Plugin types: `npm run typecheck` also runs `typecheck:plugin` (`tsc -p plugin/tsconfig.json`). It needs `plugin/.claude-plugin/types`, which Claude Code generates when it loads the plugin. Without it, for example in CI, the step prints SKIPPED; run it locally before you change `plugin/`.
-- Claude Code plugin: `claude plugin validate plugin` and `claude plugin test plugin`.
+- Claude Code plugin: `claude plugin validate plugin` and `claude plugin test plugin`. After a Claude Code update: `npm run engine-check` (see [plugin/README.md](plugin/README.md)).
 - Documentation only: follow [docs/DOCS.md](docs/DOCS.md) and run `git diff --check`.
 - Targeted: `npx --no-install biome check <files>`. Do not format unrelated files.
 - Git hooks: `npm ci` installs Lefthook (`lefthook.yml`); pre-commit runs Biome, Knip, `tsc` and `golangci-lint`.

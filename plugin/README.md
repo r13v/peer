@@ -36,3 +36,20 @@ claude plugin validate plugin
 claude plugin test plugin
 claude --plugin-dir plugin
 ```
+
+### Check against a new Claude Code
+
+Claude Code updates can break the plugin. Two checks catch it:
+
+- **Typecheck** (`npm run typecheck:plugin`) checks the hooks module and the tests against the types that Claude Code writes into `plugin/.claude-plugin/types` (`claude-code` and `claude-code-tools`, not `claude-code-mcp`, which depends on the machine's MCP servers). Only an interactive load of the plugin writes them: `claude --plugin-dir plugin` in a terminal, or the desktop app with the plugin. `claude -p` does not. The first line of `claude-code/index.d.ts` names the Claude Code that wrote them, which can differ from `claude --version` when the desktop app and the CLI differ.
+- **Tests** (`npm run test:plugin`) run `plugin/tests/*.test.ts` in the kit inside the `claude` binary, without a login. They catch changes of the hook API and of the plugin's logic. They do not catch engine semantics: everything below the plugin is a stub of the test. `engine.test.ts` pins the hooks that keep one reader as main: the plugin answers main's `peer wait` and denies a line that mixes it with other commands.
+
+`npm run engine-check` runs both once per pair of versions: the Claude Code that wrote the types and `claude --version`. It keeps the last pair that passed in `~/.cache/peer/engine-checked`, so the stamp belongs to the machine, not to the checkout; `--force` checks again. On a failure it prints the step and the last 30 lines of its output and exits 1. When the two versions differ, it says that the types of the CLI were not checked. `PEER_ENGINE_CHECK` set in the environment skips the check, so a Claude Code session that a step starts does not run it again.
+
+The [Claude Code workflow](../.github/workflows/engine.yml) runs `claude plugin validate` and the tests against the latest Claude Code every day and on demand, so a release that breaks the plugin fails there before you update; GitHub mails the failure. It cannot run the typecheck, since CI has no interactive load to write the types.
+
+To run `engine-check` when a session starts, add a hook to your own `.claude/settings.local.json`. Claude Code puts the hook's output into the session only on exit 0, hence `|| true`:
+
+```json
+"hooks": { "SessionStart": [{ "hooks": [{ "type": "command", "command": "cd \"$CLAUDE_PROJECT_DIR\" && node scripts/engine-check.ts || true", "timeout": 180 }] }] }
+```
