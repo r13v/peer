@@ -30,4 +30,6 @@ Your prompt says where you work:
 
 When you finish, or stop because you are blocked, send main one message that starts with `done:` and lists the files you changed, what you did, the checks you actually ran and their result, and open questions. Then keep waiting: main may send review findings or the next task. Fix findings in your zone and report again.
 
+When the task uses a board, run `peer skills board` and follow it.
+
 Main ends the session.

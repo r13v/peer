@@ -1,0 +1,65 @@
+{
+	"$schema": "https://biomejs.dev/schemas/2.5.15/schema.json",
+	"vcs": {
+		"enabled": true,
+		"clientKind": "git",
+		"useIgnoreFile": true
+	},
+	"files": {
+		"ignoreUnknown": true,
+		"includes": [
+			"**",
+			"!!**/node_modules",
+			"!!web/dist",
+			"!!plugin/.claude-plugin/types",
+			"!!.claude",
+			"!!.agents",
+			"!.claude-plugin/marketplace.json",
+			"!plugin/.claude-plugin/plugin.json",
+			"!codex-plugin/.codex-plugin/plugin.json",
+			"!plugin/hooks/hooks.json",
+			"!codex-plugin/hooks/hooks.json",
+			"!plugin/tsconfig.json"
+		]
+	},
+	"formatter": {
+		"enabled": true,
+		"indentStyle": "tab"
+	},
+	"linter": {
+		"enabled": true,
+		"rules": {
+			"preset": "recommended",
+			"nursery": {
+				"noFloatingPromises": "error",
+				"noMisusedPromises": "error"
+			},
+			"style": {
+				"noNestedTernary": "error",
+				"useSingleVarDeclarator": "error",
+				"useFilenamingConvention": {
+					"level": "error",
+					"options": {
+						"filenameCases": ["kebab-case"]
+					}
+				}
+			}
+		}
+	},
+	"javascript": {
+		"formatter": {
+			"quoteStyle": "double",
+			"arrowParentheses": "always",
+			"semicolons": "asNeeded",
+			"trailingCommas": "all"
+		}
+	},
+	"assist": {
+		"enabled": true,
+		"actions": {
+			"source": {
+				"organizeImports": "on"
+			}
+		}
+	}
+}

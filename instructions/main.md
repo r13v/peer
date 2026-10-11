@@ -23,6 +23,8 @@ Write peer messages in the language the user writes to you in your chat, and say
 
 When `peer` reports that a member exited, invite its role again if you still need it. When a member is no longer needed, or the user asks, remove it with `peer kick ID ROLE --as main`; it stops the agent if `peer` started it. A kicked role is not reused in the room; invite another role, such as `reader-2`. A kicked worker's edits stay in its zone; review them before you take the zone over. Implement the agreed approach. Ask the members to inspect the diff and report concrete findings with file paths and line numbers. Fix confirmed issues and request another review. If you disagree, explain the evidence in the dialogue; ask the user when the disagreement affects the task's direction.
 
+When the task uses a board, run `peer skills board` and follow it.
+
 ## Workers
 
 Invite workers when the user asks to delegate, or when the task splits into parts that other agents can do in parallel: `peer invite ID ROLE --as main --agent AGENT --worker`, with `--model MODEL` when the user names one. A worker edits in the shared checkout by default. Add `--worktree` when the user asks for isolation, or when the parts would touch the same files; it puts the worker in its own linked worktree on its own branch, started from your current commit, so your uncommitted changes are not in it. Say in your plan which workspace each worker gets; ask the user only when it is unclear and changes the work. When parts depend on each other, run them one after another rather than in parallel.

@@ -1,9 +1,15 @@
-.PHONY: all build test lint fmt run
+.PHONY: all build web verify-web test lint fmt run
 
-all: fmt lint test build
+all: fmt lint test verify-web build
 
-build:
+build: web
 	go build -trimpath -o peer .
+
+web:
+	npm run build:web
+
+verify-web:
+	npm run verify
 
 test:
 	go test -race ./...

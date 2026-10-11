@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -33,6 +34,9 @@ type session struct {
 	EndedAt   string   `json:"ended_at,omitempty"`
 	// EndedReason says why a session ended other than by its main's end.
 	EndedReason string `json:"ended_reason,omitempty"`
+	// Boards are the canonical paths of boards used with --room, in
+	// first-use order.
+	Boards []string `json:"boards,omitempty"`
 }
 
 // member is a participant, known in the room by its role. Agent names the
@@ -197,6 +201,53 @@ func (s session) check(role string) error {
 // openStore opens the store of cwd's checkout, or of PEER_REPO when it is
 // set, so a worker in its own worktree reaches the room it was invited to.
 func openStore(cwd string) (*store, error) {
+	s, err := locateStore(cwd)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(s.dir, 0700); err != nil {
+		return nil, err
+	}
+	if err := s.recordCheckout(); err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+// checkoutFile names the checkout a store belongs to, so the board server
+// can list the store's boards before the checkout has any room.
+const checkoutFile = "checkout.json"
+
+type checkoutInfo struct {
+	Repo string `json:"repo"`
+}
+
+// recordCheckout writes checkoutFile once; the read first keeps every
+// later open of the store free of writes.
+func (s *store) recordCheckout() error {
+	path := filepath.Join(s.dir, checkoutFile)
+	if c, err := readCheckout(s.dir); err == nil && c == s.repo {
+		return nil
+	}
+	return s.locked(func() error { return writeJSON(path, checkoutInfo{Repo: s.repo}) })
+}
+
+// readCheckout returns the checkout path recorded in store dir.
+func readCheckout(dir string) (string, error) {
+	data, err := os.ReadFile(filepath.Join(dir, checkoutFile))
+	if err != nil {
+		return "", err
+	}
+	var c checkoutInfo
+	if err := json.Unmarshal(data, &c); err != nil {
+		return "", err
+	}
+	return c.Repo, nil
+}
+
+// locateStore names the store of cwd's checkout, as openStore does,
+// without creating or writing anything.
+func locateStore(cwd string) (*store, error) {
 	if r := os.Getenv("PEER_REPO"); r != "" {
 		cwd = r
 	}
@@ -204,15 +255,12 @@ func openStore(cwd string) (*store, error) {
 	if err != nil {
 		return nil, err
 	}
-	repos, err := reposDir()
+	home, err := peerHome()
 	if err != nil {
 		return nil, err
 	}
 	key := sha256.Sum256([]byte(repo))
-	dir := filepath.Join(repos, repoSlug(repo)+"-"+hex.EncodeToString(key[:8]))
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return nil, err
-	}
+	dir := filepath.Join(home, "repos", repoSlug(repo)+"-"+hex.EncodeToString(key[:8]))
 	return &store{dir: dir, repo: repo}, nil
 }
 
@@ -226,16 +274,24 @@ func repoRoot(cwd string) (string, error) {
 
 // reposDir holds one store per checkout under PEER_HOME, by default ~/.peer.
 func reposDir() (string, error) {
-	home := os.Getenv("PEER_HOME")
-	if home == "" {
-		userHome, err := os.UserHomeDir()
-		if err != nil {
-			return "", err
-		}
-		home = filepath.Join(userHome, ".peer")
+	home, err := peerHome()
+	if err != nil {
+		return "", err
 	}
 	repos := filepath.Join(home, "repos")
 	return repos, os.MkdirAll(repos, 0700)
+}
+
+// peerHome is PEER_HOME, by default ~/.peer.
+func peerHome() (string, error) {
+	if home := os.Getenv("PEER_HOME"); home != "" {
+		return home, nil
+	}
+	userHome, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(userHome, ".peer"), nil
 }
 
 // repoSlug turns the checkout's directory name into a readable,
@@ -937,6 +993,21 @@ func (s *store) kick(id, role, by string) (string, error) {
 		return "", fmt.Errorf("%s, but its process %d is not confirmed stopped: %w; run peer kick again to retry", note, m.PID, err)
 	}
 	return note + " and its process stopped", nil
+}
+
+// linkBoard adds a board path to room id once, under the store lock.
+func (s *store) linkBoard(id, path string) error {
+	return s.locked(func() error {
+		v, err := s.session(id)
+		if err != nil {
+			return err
+		}
+		if slices.Contains(v.Boards, path) {
+			return nil
+		}
+		v.Boards = append(v.Boards, path)
+		return writeJSON(s.sessionPath(id), v)
+	})
 }
 
 // close ends room id without a participant, as x in the picker does.

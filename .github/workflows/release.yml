@@ -23,6 +23,15 @@ jobs:
         with:
           go-version-file: go.mod
           cache: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      # Builds the SPA into web/dist before the Go tests and goreleaser embed it.
+      - name: Install web dependencies
+        run: npm ci
+      - name: Verify web
+        run: npm run verify
       - name: Lint
         uses: golangci/golangci-lint-action@v9
         with:
