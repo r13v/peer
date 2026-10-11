@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"sort"
 	"strings"
@@ -139,6 +141,31 @@ func boardLine(r board.Ref, width int) string {
 	name = ansi.Truncate(name, max(width-6, 1), "…")
 
 	return dim.Render("    ▦ ") + "\x1b]8;;" + r.URL + "\x1b\\" + blue.Render(name) + ansiLinkEnd
+}
+
+// boardOpenedMsg tells whether the browser got a board page.
+type boardOpenedMsg struct{ err error }
+
+// boardsPage is the page b opens: the room's only board, or else the home
+// page, which lists the boards by room.
+func boardsPage(boards []board.Ref, home string) string {
+	if len(boards) == 1 && boards[0].Error == nil {
+		return boards[0].URL
+	}
+
+	return home
+}
+
+// openBrowser opens url in the system browser.
+func openBrowser(url string) tea.Cmd {
+	return func() tea.Msg {
+		name := "xdg-open"
+		if runtime.GOOS == "darwin" {
+			name = "open"
+		}
+
+		return boardOpenedMsg{exec.Command(name, url).Run()}
+	}
 }
 
 // boardsDue says whether a poll should read the room's boards again: when

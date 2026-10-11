@@ -1038,3 +1038,25 @@ func TestRoomCardLinksItsBoards(t *testing.T) {
 		t.Fatalf("the room card does not report a removed board:\n%s", ansi.Strip(list))
 	}
 }
+
+// b goes straight to a room's only board; with none, several or a broken
+// one it opens the home page, which lists every board and says what broke.
+func TestBoardsKeyOpensOnlyHealthyBoard(t *testing.T) {
+	const home = "http://localhost:4747/"
+	ok := board.Ref{URL: home + "b/plan"}
+	broken := board.Ref{URL: home + "b/gone", Error: &board.Error{Kind: board.KindNotFound}}
+	for _, tc := range []struct {
+		name   string
+		boards []board.Ref
+		want   string
+	}{
+		{"none", nil, home},
+		{"one", []board.Ref{ok}, ok.URL},
+		{"broken", []board.Ref{broken}, home},
+		{"several", []board.Ref{ok, ok}, home},
+	} {
+		if got := boardsPage(tc.boards, home); got != tc.want {
+			t.Errorf("%s: opens %s, want %s", tc.name, got, tc.want)
+		}
+	}
+}

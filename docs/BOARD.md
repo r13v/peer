@@ -149,14 +149,14 @@ Only the browser has undo, and the history is in the memory of the tab.
 
 ## CLI for agents
 
-Agents work with boards through `peer board`. Every command writes JSON to stdout. On an error, a JSON object `{"error": "...", ...}` goes to stderr and the command exits with a non-zero code.
+Agents work with boards through `peer board`. Every command writes JSON to stdout, except `inspect --format mermaid`. On an error, a JSON object `{"error": "...", ...}` goes to stderr and the command exits with a non-zero code.
 
 `BOARD` is the name of a board in the store of the current checkout, or the path of a `*.board` directory.
 
 ```
 peer board create NAME [--title T] [--path DIR] --as ROLE [--room ID]
 peer board list
-peer board inspect BOARD [--overview | --frame ID | --ids ID,...] [--as ROLE --room ID]
+peer board inspect BOARD [--overview | --frame ID | --ids ID,... | --format mermaid] [--as ROLE --room ID]
 peer board apply BOARD --as ROLE [--room ID]        < ops.json
 peer board import-image BOARD FILE [--frame ID] [--caption T] --as ROLE [--room ID]
 peer board schema
@@ -169,6 +169,7 @@ peer board schema
   - `--frame ID` gives all of a frame: its nodes, their edges and threads.
   - `--ids` gives the listed entities.
   - Without a flag, it gives the whole board.
+  - `--format mermaid` gives the whole board as a Mermaid flowchart for a person or an agent to read, and to paste where Mermaid renders. It is a view: the keys are the real ids, and an edge's id is in a comment before it, but colors, frame order, image paths and thread messages are only in the JSON. A part of a board has no Mermaid form, because the outside ends of its edges would show as cards.
   - Each result has the board's `id`, `title`, path and `url`, and `revision`, which is the `base` of the next `apply`.
   - An image has an absolute path instead of the relative one, computed from where the board is now. The agent reads the image at this path itself.
 - **`apply`** reads a pack from stdin. The result has the new `revision`, the map from `ref` to `id`, and the changed, created and deleted ids, implicit changes included.
@@ -225,7 +226,7 @@ A board shows in the card of each room that links it. The "In store" and "Found"
 
 **Open by path.** A field on the home page takes an absolute path and goes to the link of that board. Nothing remembers the board: its link works after a restart. If a room used the board, the board shows under that room.
 
-**TUI.** The room card in the TUI shows the room's boards and their links.
+**TUI.** The room card in the TUI shows the room's boards and their links. The `b` key opens the selected room's board in the browser. If the room has no board, several boards or a broken one, `b` opens the home page.
 
 ### Placement and sizes
 
@@ -253,9 +254,12 @@ A change is saved when the action ends: the drag is released, the text editor cl
 
 ## Claude Code plugin
 
-The plugin's pane has a **boards** tab for the room it shows. It gives a simple preview and a link to each board. It takes the path and `url` of the room's boards from `peer board list` and reads `board.json` itself, with the geometry.
+The plugin's pane has a **boards** tab for the room it shows. It gives a simple preview and a link to each board. It takes the path and `url` of the room's boards from `peer board list` and reads `board.json` itself.
 
-- On the desktop, in VS Code and on mobile, the preview is an `Svg` element: rectangles for frames and nodes with their labels, and straight lines for edges between node centers. A list under the diagram shows the unplaced nodes. If the diagram does not fit the `Svg` size limit, the plugin draws only the frames.
+- On the desktop, in VS Code and on mobile, the preview is an `Svg` element: a schematic that the plugin lays out itself and that ignores the stored geometry. Thus a board that nobody opened in the browser has a preview too.
+  - Each frame holds its children in layers along the edges between them; a layer wraps when it is wider than the drawing. The frames at the top go by `order`.
+  - A card or an image is a box of fixed width with its text wrapped, cut to four lines and clipped to the box. An edge is an arrow between the borders of its two boxes, with its label; a loop is an arc on its box.
+  - If the schematic does not fit the `Svg` size limit, the plugin draws only the frames.
 - In the terminal, the preview is a list of frames with their node counts and open threads.
 - A `Link` opens the board in the browser. A hint next to it says: if the link does not open, start `peer`.
 
