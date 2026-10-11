@@ -217,7 +217,7 @@ const (
 
 type keyMap struct {
 	Up, Down, Tab, Open, Log, LogNext, Rooms, Markdown, Theme, NextMsg, PrevMsg, Top, Bottom,
-	Page, Sideways, Search, Next, Prev, Close, Compose, Add, Kick, Esc, Help, Quit key.Binding
+	Page, Sideways, Search, Next, Prev, Close, Compose, Add, Kick, Boards, Esc, Help, Quit key.Binding
 }
 
 func newKeyMap() keyMap {
@@ -247,6 +247,7 @@ func newKeyMap() keyMap {
 		Compose:  b([]string{"i"}, "i", "message the room (Tab: recipient)"),
 		Add:      b([]string{"a"}, "a", "ask main to add a member"),
 		Kick:     b([]string{"d"}, "d", "kick a member"),
+		Boards:   b([]string{"b"}, "b", "open the room's boards in the browser"),
 		Esc:      b([]string{"esc"}, "Esc", "clear search / back"),
 		Help:     b([]string{"?"}, "?", "help"),
 		Quit:     b([]string{"q", "ctrl+c"}, "q", "quit"),
@@ -257,7 +258,7 @@ func (k keyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
 		{k.Up, k.Down, k.Page, k.Sideways, k.Top, k.Bottom, k.NextMsg, k.PrevMsg},
 		{k.Tab, k.Open, k.Log, k.LogNext, k.Rooms, k.Markdown, k.Theme},
-		{k.Search, k.Next, k.Prev, k.Esc, k.Close, k.Compose, k.Add, k.Kick, k.Help, k.Quit},
+		{k.Search, k.Next, k.Prev, k.Esc, k.Close, k.Compose, k.Add, k.Kick, k.Boards, k.Help, k.Quit},
 	}
 }
 
@@ -455,6 +456,7 @@ type model struct {
 	kickRole string
 	kickErr  error // the last kick's failure, shown until the next key
 	boards   boardhttp.Status
+	openErr  error // why b could not open the boards, shown until the next key
 }
 
 type kickStep int
@@ -706,6 +708,8 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.err, m.lastRooms = msg.err, time.Time{}
 	case boardStatusMsg:
 		m.boards = boardhttp.Status(msg)
+	case boardOpenedMsg:
+		m.openErr = msg.err
 	case sentMsg:
 		m.sending = false
 		if m.sendErr = msg.err; msg.err == nil {
@@ -1229,7 +1233,7 @@ func (m *model) pressKick(msg tea.KeyPressMsg) tea.Cmd {
 func (m *model) press(msg tea.KeyPressMsg) tea.Cmd {
 	armed, nav := m.closeArmed(), latin(msg)
 	m.closeAt = time.Time{}
-	m.added, m.kickErr = "", nil
+	m.added, m.kickErr, m.openErr = "", nil, nil
 	if m.composing && nav.String() != "ctrl+c" {
 		return m.pressCompose(msg)
 	}
@@ -1317,6 +1321,15 @@ func (m *model) press(msg tea.KeyPressMsg) tea.Cmd {
 		return m.startAdd()
 	case key.Matches(msg, k.Kick):
 		return m.startKick()
+	case key.Matches(msg, k.Boards):
+		switch {
+		case m.boards.Err != nil:
+			m.openErr = m.boards.Err
+		case m.boards.URL == "":
+			m.openErr = errors.New("the board server is not up yet")
+		default:
+			return openBrowser(boardsPage(m.room.boards, m.boards.URL))
+		}
 	case key.Matches(msg, k.Next):
 		m.active().jump(1)
 	case key.Matches(msg, k.Prev):
@@ -1820,6 +1833,8 @@ func (m *model) statusLine() string {
 		notes = append(notes, failedMark.Render("not sent: "+m.sendErr.Error()))
 	case m.kickErr != nil:
 		notes = append(notes, failedMark.Render(m.kickErr.Error()))
+	case m.openErr != nil:
+		notes = append(notes, failedMark.Render("boards: "+m.openErr.Error()))
 	case m.added != "":
 		notes = append(notes, activeMark.Render(m.added))
 	}
@@ -1854,7 +1869,7 @@ func (m *model) statusLine() string {
 func (m *model) hints() string {
 	var pairs []string
 	if m.focus == focusRooms {
-		pairs = []string{"↑/↓", "navigate", "enter", "open", "x x", "close", "i", "message", "a", "add"}
+		pairs = []string{"↑/↓", "navigate", "enter", "open", "x x", "close", "i", "message", "a", "add", "b", "boards"}
 	} else {
 		pairs = []string{"↑/↓", "scroll", "/", "search"}
 		if m.active().query != "" {

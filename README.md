@@ -323,6 +323,7 @@ Press `a` to ask main to add a member: pick `claude`, `codex` or `pi` and descri
 | `Tab` | Move focus to the next pane |
 | `Enter` | Open the selected room's transcript |
 | `L` | Show the log of the next background member |
+| `b` | Open the selected room's board in the browser; with no board or several, the boards home page |
 | `/` then `n/N` | Search the focused pane |
 | `?` | Show all keys |
 | `q` | Quit |
@@ -340,7 +341,7 @@ Press `a` to ask main to add a member: pick `claude`, `codex` or `pi` and descri
 
 A board is a shared diagram for you and the agents: cards, images, edges, frames and comment threads. You work on it in the browser; agents work on it with `peer board` and never move or resize anything.
 
-Run `peer` (the TUI) to start the web UI at http://localhost:4747/. Set `PEER_PORT` to use another port. The home page lists the boards of each checkout by room. Board links from the CLI open only while a `peer` TUI runs.
+Run `peer` (the TUI) to start the web UI at http://localhost:4747/. Set `PEER_PORT` to use another port. The home page lists the boards of each checkout by room; in the TUI, `b` opens the selected room's board. Board links from the CLI open only while a `peer` TUI runs.
 
 | Command | Action |
 |---------|--------|

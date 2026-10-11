@@ -225,7 +225,7 @@ A board shows in the card of each room that links it. The "In store" and "Found"
 
 **Open by path.** A field on the home page takes an absolute path and goes to the link of that board. Nothing remembers the board: its link works after a restart. If a room used the board, the board shows under that room.
 
-**TUI.** The room card in the TUI shows the room's boards and their links.
+**TUI.** The room card in the TUI shows the room's boards and their links. The `b` key opens the selected room's board in the browser. If the room has no board, several boards or a broken one, `b` opens the home page.
 
 ### Placement and sizes
 
