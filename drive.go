@@ -30,9 +30,9 @@ func (s *store) turnLockPath(id, role string) string {
 	return filepath.Join(s.dir, "sessions", id, "turn-"+role+".lock")
 }
 
-// drive runs invited member role of room id: its first turn with its
-// prompt, then a turn for each batch of messages for it, resuming the
-// agent's session. Between turns the member costs nothing. It holds the
+// drive runs invited member role of room id: a turn for each batch of
+// messages for it. The first batch starts the agent's session with the
+// member's prompt, and each later one resumes the session. Between turns the member costs nothing. It holds the
 // role's delivery for as long as it runs, so the role has one reader:
 // wait refuses it. A batch is marked read once its turn succeeds; a turn
 // that fails ends drive, and the member exits with the agent's error in its
@@ -71,23 +71,7 @@ func (s *store) drive(ctx context.Context, id, role, brief string, out io.Writer
 	if m.Agent == "claude" {
 		session = newUUID()
 	}
-	argv, err := memberArgs(s, m, dir, memberPrompt(v, m, brief, true), session, false)
-	if err != nil {
-		return err
-	}
-	thread, err := s.turn(ctx, v.ID, role, argv, dir, "", out)
-	if errors.Is(err, errRoomEnded) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	if m.Agent == "codex" {
-		if thread == "" {
-			return errors.New("codex did not report its thread, so peer cannot resume it")
-		}
-		session = thread
-	}
+	isStarted := false
 	for {
 		b, from, next, err := s.readBatch(v.ID, role)
 		if err != nil {
@@ -106,17 +90,31 @@ func (s *store) drive(ctx context.Context, id, role, brief string, out io.Writer
 			}
 			continue
 		}
+		// The first batch starts the session together with the member's
+		// prompt, so the member has no turn without messages to answer.
+		text := forwardText(v.ID, role, "peer", b)
 		argv, err := memberArgs(s, m, dir, "", session, true)
+		if !isStarted {
+			argv, err = memberArgs(s, m, dir, memberPrompt(v, m, brief, true)+"\n\n"+text, session, false)
+			text = ""
+		}
 		if err != nil {
 			return err
 		}
-		_, err = s.turn(ctx, v.ID, role, argv, dir, forwardText(v.ID, role, "peer", b), out)
+		thread, err := s.turn(ctx, v.ID, role, argv, dir, text, out)
 		if errors.Is(err, errRoomEnded) {
 			return nil
 		}
 		if err != nil {
 			return err
 		}
+		if !isStarted && m.Agent == "codex" {
+			if thread == "" {
+				return errors.New("codex did not report its thread, so peer cannot resume it")
+			}
+			session = thread
+		}
+		isStarted = true
 		if _, err := s.commitBatch(v.ID, role, from, next, false); err != nil {
 			return err
 		}

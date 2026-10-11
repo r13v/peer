@@ -16,7 +16,8 @@ import (
 const driveThread = "01a12f00-0000-7000-8000-000000000001"
 
 // fakeTurns puts a codex on PATH that records each turn in dir/turn-N:
-// its arguments on the first line, then its stdin. Each turn reports
+// its arguments on the first line, their line breaks made spaces, then its
+// stdin. Each turn reports
 // driveThread and completes, unless dir/fail exists: then it fails like a
 // model at capacity. With dir/cut it exits 0 without completing the turn.
 func fakeTurns(t *testing.T) string {
@@ -26,7 +27,8 @@ func fakeTurns(t *testing.T) string {
 d="` + dir + `"
 n=$(ls "$d" | grep -c '^turn-')
 f="$d/turn-$((n + 1))"
-echo "$*" > "$f.tmp"
+printf '%s\n' "$*" | tr '\n' ' ' > "$f.tmp"
+echo >> "$f.tmp"
 cat >> "$f.tmp"
 mv "$f.tmp" "$f"
 echo '{"type":"thread.started","thread_id":"` + driveThread + `"}'
@@ -52,7 +54,7 @@ func turnRecord(t *testing.T, dir string, n int) (string, string) {
 	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
 		if b, err := os.ReadFile(path); err == nil {
 			args, stdin, _ := strings.Cut(string(b), "\n")
-			return args, stdin
+			return strings.TrimSpace(args), stdin
 		}
 	}
 	t.Fatalf("turn %d did not run", n)
@@ -90,22 +92,31 @@ func TestDriveWakesMemberWithEachBatch(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- s.drive(context.Background(), v.ID, "critic", "edge cases", new(syncBuffer)) }()
 
-	args, _ := turnRecord(t, dir, 1)
-	if strings.Contains(args, "resume") || !strings.Contains(args, "edge cases") || !strings.Contains(args, "Do not run peer wait") {
-		t.Fatalf("first turn is not the member's prompt: %s", args)
-	}
 	if _, err := invoke(repo, "", "wait", v.ID, "--as", "critic", "--timeout", "0"); err == nil || !strings.Contains(err.Error(), "peer delivers room") {
 		t.Fatalf("a second reader of the role was allowed: %v", err)
 	}
 	if err := s.drive(context.Background(), v.ID, "critic", "", new(syncBuffer)); err == nil || !strings.Contains(err.Error(), "already delivers") {
 		t.Fatalf("a second drive of the role was allowed: %v", err)
 	}
+	// Without messages the member has nothing to answer, so no turn runs.
+	time.Sleep(100 * time.Millisecond)
+	if files, _ := filepath.Glob(filepath.Join(dir, "turn-*")); len(files) != 0 {
+		t.Fatalf("a turn ran without messages: %q", files)
+	}
 
+	// The first batch starts the session together with the prompt.
 	if _, err := invoke(repo, "check the parser", "send", v.ID, "--as", "main", "--to", "critic"); err != nil {
 		t.Fatal(err)
 	}
+	args, _ := turnRecord(t, dir, 1)
+	if strings.Contains(args, "resume") || !strings.Contains(args, "edge cases") || !strings.Contains(args, "Do not run peer wait") || !strings.Contains(args, "check the parser") {
+		t.Fatalf("first turn is not the member's prompt with the batch: %s", args)
+	}
+	if _, err := invoke(repo, "and the tokens", "send", v.ID, "--as", "main", "--to", "critic"); err != nil {
+		t.Fatal(err)
+	}
 	args, stdin := turnRecord(t, dir, 2)
-	if !strings.Contains(args, " resume ") || !strings.HasSuffix(args, driveThread+" -") || !strings.Contains(stdin, "check the parser") {
+	if !strings.Contains(args, " resume ") || !strings.HasSuffix(args, driveThread+" -") || !strings.Contains(stdin, "and the tokens") {
 		t.Fatalf("the batch did not resume the session: %s / %s", args, stdin)
 	}
 	for deadline := time.Now().Add(5 * time.Second); unread(t, repo, v.ID, "critic") != 0; time.Sleep(10 * time.Millisecond) {
@@ -150,6 +161,9 @@ func TestDriveNeedsCompletedTurn(t *testing.T) {
 	}
 	done := make(chan error, 1)
 	go func() { done <- s.drive(context.Background(), v.ID, "critic", "", new(syncBuffer)) }()
+	if _, err := invoke(repo, "start", "send", v.ID, "--as", "main", "--to", "critic"); err != nil {
+		t.Fatal(err)
+	}
 	turnRecord(t, dir, 1)
 	if err := os.WriteFile(filepath.Join(dir, "cut"), nil, 0600); err != nil {
 		t.Fatal(err)
@@ -195,7 +209,6 @@ func TestDriveStopsWhenRoomEnds(t *testing.T) {
 	}
 	done := make(chan error, 1)
 	go func() { done <- s.drive(context.Background(), v.ID, "critic", "", new(syncBuffer)) }()
-	turnRecord(t, dir, 1)
 	if _, err := invoke(repo, "", "end", v.ID, "--as", "main"); err != nil {
 		t.Fatal(err)
 	}
@@ -207,7 +220,7 @@ func TestDriveStopsWhenRoomEnds(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("drive outlived the room")
 	}
-	if files, _ := filepath.Glob(filepath.Join(dir, "turn-*")); len(files) != 1 {
+	if files, _ := filepath.Glob(filepath.Join(dir, "turn-*")); len(files) != 0 {
 		t.Fatalf("the room's end ran a turn: %q", files)
 	}
 }
