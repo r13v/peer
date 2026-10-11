@@ -387,7 +387,7 @@ func (s *store) session(id string) (session, error) {
 		return v, err
 	}
 	if len(v.Members) == 0 || v.Members[0].Role != mainRole {
-		return v, fmt.Errorf("session %s was made by an older peer", id)
+		return v, fmt.Errorf("session %s was made by an older peer; start a new room for the task", id)
 	}
 	return v, nil
 }
@@ -420,7 +420,11 @@ func (s *store) load(id string) (session, error) {
 		if err := writeJSON(s.sessionPath(id), v); err != nil {
 			return v, err
 		}
-		if _, err := s.appendMessage(v, system, mainRole, fmt.Sprintf("%s exited with status %d", m.Role, status)); err != nil {
+		note := fmt.Sprintf("%s exited with status %d", m.Role, status)
+		if reason := exitReason(s.logPath(id, m.Role)); status != 0 && reason != "" {
+			note += ": " + reason
+		}
+		if _, err := s.appendMessage(v, system, mainRole, note); err != nil {
 			return v, err
 		}
 	}
@@ -796,7 +800,7 @@ func (s *store) deliverBatch(sid, as string, write func(batch) error) (bool, err
 		if isForwarded, err := s.forwarding(v.ID, as); err != nil {
 			return err
 		} else if isForwarded {
-			return fmt.Errorf("peer forward delivers room %s for %s; do not run peer wait for this room", v.ID, as)
+			return fmt.Errorf("peer delivers room %s for %s into its session; do not run peer wait for this room", v.ID, as)
 		}
 		offset, err := s.cursor(v.ID, as)
 		if err != nil {
@@ -925,23 +929,48 @@ func writeFull(w io.Writer, data []byte) error {
 	return err
 }
 
+// endGrace bounds how long end lets members finish the turns they run, so
+// their last answers reach the room; tests shorten it.
+var endGrace = 2 * time.Minute
+
+// end ends room sid for main or the user. While a member that peer drive
+// runs is in a turn, end waits for the turn, up to endGrace, so that its
+// answer is not refused. It does not wait for messages that no turn has
+// taken yet.
 func (s *store) end(sid, as string, out io.Writer) error {
-	return s.locked(func() error {
-		v, err := s.load(sid)
-		if err != nil {
+	deadline := time.Now().Add(endGrace)
+	isWaiting := false
+	for {
+		var busy []string
+		err := s.locked(func() error {
+			v, err := s.load(sid)
+			if err != nil {
+				return err
+			}
+			if as != mainRole && as != human {
+				return errors.New("only main or user can end this session")
+			}
+			if v.EndedAt != "" {
+				return errors.New("session has already ended")
+			}
+			if busy = s.busyRoles(v); len(busy) > 0 && time.Now().Before(deadline) {
+				return nil
+			}
+			busy = nil
+			if err := s.finish(&v, ""); err != nil {
+				return err
+			}
+			return json.NewEncoder(out).Encode(v)
+		})
+		if err != nil || len(busy) == 0 {
 			return err
 		}
-		if as != mainRole && as != human {
-			return errors.New("only main or user can end this session")
+		if !isWaiting {
+			fmt.Fprintf(os.Stderr, "peer: waiting up to %s for %s to finish the turn\n", endGrace, strings.Join(busy, ", "))
+			isWaiting = true
 		}
-		if v.EndedAt != "" {
-			return errors.New("session has already ended")
-		}
-		if err := s.finish(&v, ""); err != nil {
-			return err
-		}
-		return json.NewEncoder(out).Encode(v)
-	})
+		time.Sleep(drivePoll)
+	}
 }
 
 // kick removes role from active room id for by, main or the user,

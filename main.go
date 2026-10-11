@@ -43,6 +43,34 @@ var boardInstructions []byte
 
 const usage = "usage: peer, peer --version, peer update, peer skills flow|main|member|worker|board, peer start NAME, peer join|invite|kick ID ROLE, peer send|wait|end ID --as ROLE, peer send ID --as ROLE --text TEXT, peer wait ID --as ROLE --timeout DURATION, peer ack ID --as ROLE --upto MESSAGE_ID, peer forward ID --as main --codex-thread UUID, peer status [ID], peer history, peer watch [ID], peer log ID [--json], peer memberlog ID ROLE [--follow], or peer board create|list|inspect|apply|import-image|schema"
 
+// sendTextHint names the ways send takes a message, for agents that
+// guess --message or a positional text.
+const sendTextHint = "peer send takes the message with --text TEXT or on stdin"
+
+// valueFlags take the next argument as their value, which can be any text.
+var valueFlags = []string{"as", "to", "agent", "brief", "model", "upto", "codex-thread", "text", "timeout", "title", "path", "room", "frame", "ids", "format", "caption"}
+
+// asksHelp reports whether args ask for the usage: peer help, or --help or
+// -h in any command, but not as the value of a flag such as --text.
+func asksHelp(args []string) bool {
+	if args[0] == "help" {
+		return true
+	}
+	for i, arg := range args {
+		if arg != "--help" && arg != "-h" {
+			continue
+		}
+		prev := ""
+		if i > 0 {
+			prev = strings.TrimLeft(args[i-1], "-")
+		}
+		if i == 0 || !strings.HasPrefix(args[i-1], "-") || !slices.Contains(valueFlags, prev) {
+			return true
+		}
+	}
+	return false
+}
+
 // version is set at release build time.
 var version = "dev"
 
@@ -69,6 +97,10 @@ func main() {
 func run(args []string, in io.Reader, out io.Writer, cwd string) error {
 	if len(args) == 0 {
 		return picker(in, out, cwd)
+	}
+	if asksHelp(args) {
+		_, err := fmt.Fprintln(out, usage)
+		return err
 	}
 	if args[0] == "--version" || args[0] == "version" {
 		if len(args) != 1 {
@@ -138,11 +170,18 @@ func run(args []string, in io.Reader, out io.Writer, cwd string) error {
 	if len(rest) > 0 && !strings.HasPrefix(rest[0], "-") {
 		id, rest = rest[0], rest[1:]
 	}
-	if (args[0] == "join" || args[0] == "invite" || args[0] == "kick" || args[0] == "memberlog") && len(rest) > 0 && !strings.HasPrefix(rest[0], "-") {
+	if (args[0] == "join" || args[0] == "invite" || args[0] == "kick" || args[0] == "memberlog" || args[0] == "drive") && len(rest) > 0 && !strings.HasPrefix(rest[0], "-") {
 		role, rest = rest[0], rest[1:]
 	}
-	if err := fs.Parse(rest); err != nil {
+	err = fs.Parse(rest)
+	if err != nil && args[0] == "send" && strings.Contains(err.Error(), "-message") {
+		return fmt.Errorf("%w; %s", err, sendTextHint)
+	}
+	if err != nil {
 		return err
+	}
+	if fs.NArg() != 0 && args[0] == "send" {
+		return fmt.Errorf("unexpected arguments: %s; %s", strings.Join(fs.Args(), " "), sendTextHint)
 	}
 	if fs.NArg() != 0 {
 		return fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " "))
@@ -278,6 +317,13 @@ func run(args []string, in io.Reader, out io.Writer, cwd string) error {
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
 		return s.forward(ctx, id, *actor, *thread, out)
+	case "drive": // hidden: invite runs it for a codex or claude member
+		if err := needRole("drive ID ROLE [--brief TEXT]"); err != nil {
+			return err
+		}
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		return s.drive(ctx, id, role, *brief, out)
 	case "end":
 		if err := needID("end"); err != nil {
 			return err

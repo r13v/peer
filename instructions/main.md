@@ -35,4 +35,4 @@ Review a shared-checkout worker's files in the tree. For a worktree worker, `pee
 
 ## End
 
-After review closes, send the result and unresolved points to the members, then run `peer end ID --as main`.
+After review closes, send the result and unresolved points to the members, then run `peer end ID --as main`. While a member that `peer` runs is in a turn, `end` waits for it, up to 2 minutes, so its last answer reaches the room.

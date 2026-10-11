@@ -19,22 +19,40 @@ import (
 	"time"
 )
 
-// memberPrompt starts an invited member's chat. Nobody reads it, so the
-// member is told to keep waiting on its own.
-func memberPrompt(v session, m member, brief string) string {
-	prompt := fmt.Sprintf("Use the peer skill. You are the %s in peer room %s in this checkout; you have already joined, so do not run peer join.", m.Role, v.ID)
+// memberPrompt starts an invited member's chat with its instructions, so
+// it does not load them with peer skills. Nobody reads the chat. A driven
+// member gets each batch of messages from peer drive as a new turn;
+// another one keeps waiting on its own.
+func memberPrompt(v session, m member, brief string, isDriven bool) string {
+	prompt := fmt.Sprintf("You are the %s in peer room %s in this checkout; you have already joined, so do not run peer join.", m.Role, v.ID)
 	switch {
 	case m.Worktree != "":
-		prompt += fmt.Sprintf(" You are a worker in your own worktree %s, your working directory, which started from commit %s. Follow peer skills worker.", m.Worktree, m.Base)
+		prompt += fmt.Sprintf(" You are a worker in your own worktree %s, your working directory, which started from commit %s.", m.Worktree, m.Base)
 	case m.Worker:
-		prompt += " You are a worker in the shared checkout. Follow peer skills worker."
-	default:
-		prompt += " Follow peer skills member."
+		prompt += " You are a worker in the shared checkout."
 	}
 	if brief != "" {
 		prompt += " Your focus: " + brief
 	}
-	return prompt + " Nobody reads this chat: do not ask the user anything, run peer and git directly rather than through wrapper commands, and keep calling peer wait until main ends the session. Once peer reports that the session has ended, stop."
+	prompt += " Nobody reads this chat: do not ask the user anything, and run peer and git directly rather than through wrapper commands."
+	if isDriven {
+		prompt += " peer delivers your messages: each batch of new messages comes as a new turn of this chat. Do not run peer wait; answer with peer send, then end your turn. When the room ends or you are kicked, peer stops you."
+	} else {
+		prompt += " Keep calling peer wait until main ends the session. Once peer reports that the session has ended, stop."
+	}
+	instructions := memberInstructions
+	if m.Worker {
+		instructions = workerInstructions
+	}
+
+	return prompt + " Follow these instructions:\n\n" + string(instructions)
+}
+
+// isDriven reports whether peer drive delivers m's messages: the agent can
+// resume a session, so each batch becomes a turn of it. Pi runs without a
+// session and waits on its own.
+func isDriven(m member) bool {
+	return m.Agent == "codex" || m.Agent == "claude"
 }
 
 // inviteAgents are the agents peer invite launches.
@@ -78,21 +96,36 @@ func withDefaults(m member) member {
 // and skips the checkout's settings, which could widen the sandbox. Pi has
 // no sandbox: a member skips the checkout's settings, but its shell keeps
 // the user's permissions.
-func memberArgs(s *store, m member, dir, prompt string) ([]string, error) {
+//
+// A session resumes the agent's earlier session, and the turn reads its
+// prompt from stdin. Neither CLI keeps a session's working directory,
+// sandbox, tools or model, so every turn repeats all of them. For Claude,
+// session also names the first turn's new session, with prompt given.
+func memberArgs(s *store, m member, dir, prompt, session string, isResume bool) ([]string, error) {
 	var argv []string
 	switch m.Agent {
 	case "codex":
+		// codex exec takes -C, -s and --add-dir only before resume.
 		argv = []string{"codex", "exec", "--json", "-C", dir}
+		if !m.Worker {
+			argv = append(argv, "-s", "workspace-write", "--add-dir", s.dir)
+		}
+		if isResume {
+			argv = append(argv, "resume")
+		}
 		if m.Worker {
 			argv = append(argv, "--dangerously-bypass-approvals-and-sandbox")
 		} else {
-			argv = append(argv, "-s", "workspace-write", "-c", "sandbox_workspace_write.network_access=true", "--add-dir", s.dir, "-c", "approval_policy=never")
+			argv = append(argv, "-c", "sandbox_workspace_write.network_access=true", "-c", "approval_policy=never")
 		}
 		if m.Model != "" {
 			argv = append(argv, "-m", m.Model)
 		}
 		if m.Effort != "" {
 			argv = append(argv, "-c", "model_reasoning_effort="+m.Effort)
+		}
+		if isResume {
+			return append(argv, session, "-"), nil
 		}
 		return append(argv, prompt), nil
 	case "claude":
@@ -123,6 +156,12 @@ func memberArgs(s *store, m member, dir, prompt string) ([]string, error) {
 			argv = append(argv, "--allowedTools")
 			argv = append(argv, claudeTools...)
 		}
+		if isResume {
+			return append(argv, "--resume", session), nil
+		}
+		if session != "" {
+			argv = append(argv, "--session-id", session)
+		}
 		return append(argv, "--", prompt), nil
 	case "pi":
 		argv = []string{"pi", "-p", "--mode", "json", "--no-session"}
@@ -137,6 +176,17 @@ func memberArgs(s *store, m member, dir, prompt string) ([]string, error) {
 		return append(argv, "--", prompt), nil
 	}
 	return nil, fmt.Errorf("peer cannot launch %s", m.Agent)
+}
+
+// driveArgs runs peer drive for m. A missing agent CLI shows in m's exit
+// notice.
+func driveArgs(id string, m member, brief string) ([]string, error) {
+	self, err := os.Executable()
+	if err != nil {
+		return nil, err
+	}
+
+	return []string{self, "drive", id, m.Role, "--brief", brief}, nil
 }
 
 // latestCodexModel is the listed Codex model whose name ends in suffix and
@@ -194,7 +244,9 @@ var startMember = func(argv []string, dir string, env []string, logPath, exitPat
 	}
 	defer log.Close()
 	// The status is taken inside the group: after the pipe, $? is stamp's.
-	script := `exit_file=$1; self=$2; shift 2; { "$@"; status=$?; echo "[peer] exited with status $status"; echo "$status" > "$exit_file"; } 2>&1 | "$self" stamp`
+	// It goes to exitPath only once stamp has written the whole log, so
+	// the exit notice can quote the member's last error.
+	script := `exit_file=$1; self=$2; shift 2; { "$@"; status=$?; echo "[peer] exited with status $status"; echo "$status" > "$exit_file.tmp"; } 2>&1 | "$self" stamp; mv "$exit_file.tmp" "$exit_file"`
 	cmd := exec.Command("sh", append([]string{"-c", script, "sh", exitPath, self}, argv...)...)
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), env...)
@@ -361,8 +413,12 @@ func (s *store) invite(id, as string, m member, brief string, isolated bool, out
 		err = s.worktree(m)
 	}
 	var argv []string
-	if err == nil {
-		argv, err = memberArgs(s, m, dir, memberPrompt(v, m, brief))
+	switch {
+	case err != nil:
+	case isDriven(m):
+		argv, err = driveArgs(v.ID, m, brief)
+	default:
+		argv, err = memberArgs(s, m, dir, memberPrompt(v, m, brief, false), "", false)
 	}
 	pid := 0
 	if err == nil {
@@ -387,7 +443,7 @@ func (s *store) invite(id, as string, m member, brief string, isolated bool, out
 	if err := s.launched(v.ID, m.Role, pid); err != nil {
 		return err
 	}
-	fmt.Fprintf(os.Stderr, "peer: %s runs headless; watch it in peer, or read %s\n", m.Role, logPath)
+	fmt.Fprintf(os.Stderr, "peer: %s runs headless; watch it in peer, or run peer memberlog %s %s\n", m.Role, v.ID, m.Role)
 	if m.Worktree != "" {
 		fmt.Fprintf(os.Stderr, "peer: %s works in %s on branch %s; peer end keeps it\n", m.Role, m.Worktree, m.Branch)
 	}
