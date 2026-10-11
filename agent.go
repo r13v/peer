@@ -36,7 +36,7 @@ func memberPrompt(v session, m member, brief string, isDriven bool) string {
 	}
 	prompt += " Nobody reads this chat: do not ask the user anything, and run peer and git directly rather than through wrapper commands."
 	if isDriven {
-		prompt += " peer delivers your messages: each batch of new messages comes as a new turn of this chat. Do not run peer wait; answer with peer send, then end your turn. When the room ends or you are kicked, peer stops you."
+		prompt += " peer delivers your messages: the first batch comes after these instructions, and each later batch comes as a new turn of this chat. Do not run peer wait; answer with peer send, then end your turn. Send only what moves the task on, not a message that you are ready or have read something. When the room ends or you are kicked, peer stops you."
 	} else {
 		prompt += " Keep calling peer wait until main ends the session. Once peer reports that the session has ended, stop."
 	}
