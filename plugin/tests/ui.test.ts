@@ -1,5 +1,5 @@
 import { expect, mock, type TestBody, test } from "claude-code/testing"
-import { boardSvg } from "../hooks/board-preview.ts"
+import { boardStats, boardSvg } from "../hooks/board-preview.ts"
 import type { PeerBoard } from "../types"
 
 const PANE = {
@@ -606,8 +606,12 @@ async function mountBoards(
 test("the boards tab links the room's boards only", async ($, on) => {
 	const { drawn, read } = await mountBoards($, on, "terminal")
 	expect(drawn).toContain("boards 1")
-	expect(drawn).toContain('"href":"http://localhost:4747/b/a1"')
-	expect(drawn).toContain("If the link does not open, start `peer`.")
+	// The title is the link, and the hint shows once under the boards.
+	expect(drawn).toContain(
+		'"href":"http://localhost:4747/b/a1","label":"Architecture ↗"',
+	)
+	expect(drawn).toContain("2 frames · 3 nodes · 1 open thread")
+	expect(drawn.split("If a link does not open").length).toBe(2)
 	expect(drawn).not.toContain("/b/b2")
 	expect(read).toEqual(["/repo/docs/arch.board/board.json"])
 	// The terminal lists the frames by order, with nodes and open threads.
@@ -699,6 +703,155 @@ test("every edge is drawn, and an edge between frames orders the frames", () => 
 	expect(Number(line?.[4])).toBe(n6.y)
 })
 
+test("edges keep clear of the boxes they do not join", () => {
+	const board = {
+		title: "Clear",
+		nodes: [
+			{ id: "f1", type: "frame", title: "Plan", order: 1 },
+			{ id: "n1", type: "card", text: "check", parentId: "f1" },
+			{ id: "n2", type: "card", text: "write", parentId: "f1" },
+			{ id: "f2", type: "frame", title: "Risks", order: 2 },
+			{ id: "n3", type: "card", text: "retry", parentId: "f2" },
+		],
+		edges: [
+			{ id: "e1", from: "n1", to: "n2", label: "then" },
+			{ id: "e2", from: "n2", to: "n1", label: "fix" },
+			{ id: "e3", from: "n1", to: "n3" },
+		],
+		threads: [],
+	} as PeerBoard
+	const svg = boardSvg(board) ?? ""
+	const [, , n1, n2] = rects(svg) as [Rect, Rect, Rect, Rect, Rect]
+	// The labeled edges leave a gap that holds their labels.
+	expect(n2.y - (n1.y + n1.h)).toBeGreaterThanOrEqual(30)
+	// An edge and its reverse do not share a line.
+	const lines = [
+		...svg.matchAll(/<line x1="([\d.-]+)" y1="[\d.-]+" x2="([\d.-]+)"/g),
+	].map((m) => m[1])
+	expect(new Set(lines).size).toBe(lines.length)
+	// n1 -> n3 would cross n2, so it goes around on the right of the frame.
+	const around = svg.match(/<polyline points="([^"]+)"/)?.[1] ?? ""
+	const xs = around.split(" ").map((p) => Number(p.split(",")[0]))
+	expect(Math.max(...xs)).toBeGreaterThan(n2.x + n2.w + 12)
+})
+
+// labels gives each edge label's horizontal extent, about 6 units a glyph.
+const labels = (svg: string) =>
+	[
+		...svg.matchAll(
+			/<text x="([\d.-]+)" y="([\d.-]+)" text-anchor="(\w+)" font-size="10" fill="#888">([^<]+)</g,
+		),
+	].map((m) => {
+		const x = Number(m[1])
+		const w = Array.from(m[4] ?? "").length * 6
+		const left =
+			{ start: x, end: x - w, middle: x - w / 2 }[m[3] ?? "middle"] ?? x
+		return { left, right: left + w, y: Number(m[2]), text: m[4] ?? "" }
+	})
+test("the edges of one pair share a label and never one path", () => {
+	const nodes = [
+		{ id: "f1", type: "frame", title: "W".repeat(30), order: 1 },
+		{ id: "n1", type: "card", text: "a", parentId: "f1" },
+		{ id: "n2", type: "card", text: "b", parentId: "f1" },
+		{ id: "n3", type: "card", text: "c", parentId: "f1" },
+	]
+	const cases = [
+		// An edge and its reverse.
+		[
+			["n1", "n2", "forward"],
+			["n2", "n1", "backward"],
+		],
+		// Three edges one way.
+		[
+			["n1", "n2", "first"],
+			["n1", "n2", "second"],
+			["n1", "n2", "third"],
+		],
+		// A pair that goes around n2.
+		[
+			["n1", "n2", ""],
+			["n2", "n3", ""],
+			["n1", "n3", "forward"],
+			["n3", "n1", "backward"],
+		],
+		// A frame and its own card.
+		[
+			["f1", "n1", "forward"],
+			["n1", "f1", "backward"],
+		],
+	]
+	for (const edges of cases) {
+		const svg =
+			boardSvg({
+				title: "Pairs",
+				nodes,
+				edges: edges.map(([from, to, label], i) => ({
+					id: `e${i}`,
+					from,
+					to,
+					...(label ? { label } : {}),
+				})),
+				threads: [],
+			} as PeerBoard) ?? ""
+		const named = edges.map(([, , label]) => label ?? "").filter(Boolean)
+		const tags = labels(svg).filter((l) =>
+			named.some((n) => l.text.includes(n)),
+		)
+		// At most one label shows for the pair, cut to the room it has;
+		// every edge keeps its full label in its <title>.
+		expect(tags.length).toBeLessThanOrEqual(1)
+		for (const name of named) expect(svg).toContain(`<title>${name}</title>`)
+		const paths = [
+			...svg.matchAll(
+				/<line x1="([^"]+)" y1="([^"]+)" x2="([^"]+)" y2="([^"]+)"|<polyline points="([^"]+)"/g,
+			),
+		].map((m) => m.slice(1).join(" "))
+		expect(new Set(paths).size).toBe(paths.length)
+		// A shown label sits under the frame's title bar.
+		expect(tags.every((tag) => tag.y > 22)).toBe(true)
+	}
+})
+
+test("a frame's thread badge has its own slot after a wide title", () => {
+	const svg =
+		boardSvg({
+			title: "Wide",
+			nodes: [{ id: "f1", type: "frame", title: "W".repeat(30), order: 1 }],
+			edges: [],
+			threads: [{ target: { kind: "frame", id: "f1" }, resolved: false }],
+		}) ?? ""
+	const clip = svg.match(
+		/<clipPath id="f0"><rect x="([\d.-]+)" y="[\d.-]+" width="([\d.]+)"/,
+	)
+	const badge = labels(svg).find((l) => l.text.startsWith("💬"))
+	expect(Number(clip?.[1]) + Number(clip?.[2])).toBeLessThanOrEqual(
+		(badge?.left ?? 0) - 4,
+	)
+})
+
+test("a box tells its full text and its open threads", () => {
+	const text = "a long card text ".repeat(10)
+	const board = {
+		title: "Notes",
+		nodes: [
+			{ id: "f1", type: "frame", title: "Plan", order: 1 },
+			{ id: "n1", type: "card", text, parentId: "f1" },
+		],
+		edges: [],
+		threads: [
+			{ target: { kind: "node", id: "n1" }, resolved: false },
+			{ target: { kind: "node", id: "n1" }, resolved: false },
+			{ target: { kind: "frame", id: "f1" }, resolved: true },
+		],
+	} as PeerBoard
+	const svg = boardSvg(board) ?? ""
+	expect(svg).toContain(`<title>${text}</title>`)
+	expect(svg).toContain(">💬 2</text>")
+	// A resolved thread has no badge.
+	expect(svg.match(/💬/g)?.length).toBe(1)
+	expect(boardStats(board)).toBe("1 frame · 1 node · 2 open threads")
+})
+
 test("a long card text is wrapped and cut inside its card", () => {
 	const text = "word ".repeat(80) + "x".repeat(60)
 	const svg =
@@ -728,13 +881,10 @@ test("a loop on the top card keeps its label inside the drawing", () => {
 	const [left, top, width] = (svg.match(/viewBox="([^"]+)"/)?.[1] ?? "")
 		.split(" ")
 		.map(Number) as [number, number, number]
-	const tag = svg.match(
-		/<text x="([\d.-]+)" y="([\d.-]+)" text-anchor="end"[^>]*>repeat</,
-	)
-	// The label ends at x and its glyphs rise about 8 units over y.
-	expect(Number(tag?.[1])).toBeLessThanOrEqual(left + width)
-	expect(Number(tag?.[2]) - 8).toBeGreaterThanOrEqual(top)
-	expect(Number(tag?.[1]) - "repeat".length * 6).toBeGreaterThanOrEqual(left)
+	const tag = labels(svg).find((l) => l.text === "repeat")
+	// The label's glyphs rise about 8 units over its baseline.
+	expect(tag && tag.left >= left && tag.right <= left + width).toBe(true)
+	expect((tag?.y ?? 0) - 8).toBeGreaterThanOrEqual(top)
 })
 
 test("an emoji text is cut between characters, not inside one", () => {

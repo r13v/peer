@@ -10,7 +10,7 @@ import type {
 	PeerRoom,
 	PeerState,
 } from "../types"
-import { boardSvg, frameLines } from "./board-preview.ts"
+import { boardStats, boardSvg, frameLines } from "./board-preview.ts"
 
 const PANE = "peer"
 const EVERYONE = "*"
@@ -926,6 +926,9 @@ export const register: Register = (on) => {
 						</Text>
 					)}
 					{boardList?.boards.map((view) => boardCard(view))}
+					{(boardList?.boards.length ?? 0) > 0 && (
+						<Text dimColor>If a link does not open, start `peer`.</Text>
+					)}
 				</Box>
 			)
 		} else {
@@ -997,16 +1000,19 @@ export const register: Register = (on) => {
 			const lines = board && !isDrawn ? frameLines(board) : []
 			return (
 				<Box key={`board-${ref.key}`} flexDirection="column">
-					<Text bold>{board?.title ?? ref.title ?? ref.path}</Text>
-					<Text>
-						<els.Link href={ref.url} label={ref.url} />
+					<Text bold>
+						<els.Link
+							href={ref.url}
+							label={`${board?.title ?? ref.title ?? ref.path} ↗`}
+						/>
 					</Text>
-					<Text dimColor>If the link does not open, start `peer`.</Text>
+					{board && <Text dimColor>{boardStats(board)}</Text>}
 					{error && <Text color="red">{error}</Text>}
 					{svg && "Svg" in els && (
 						<els.Svg
 							source={svg}
 							alt={`Schematic of board ${ref.title ?? ""}`}
+							isInteractive
 						/>
 					)}
 					{lines.map((line) => (

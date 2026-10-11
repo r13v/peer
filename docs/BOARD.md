@@ -257,11 +257,14 @@ A change is saved when the action ends: the drag is released, the text editor cl
 The plugin's pane has a **boards** tab for the room it shows. It gives a simple preview and a link to each board. It takes the path and `url` of the room's boards from `peer board list` and reads `board.json` itself.
 
 - On the desktop, in VS Code and on mobile, the preview is an `Svg` element: a schematic that the plugin lays out itself and that ignores the stored geometry. Thus a board that nobody opened in the browser has a preview too.
-  - Each frame holds its children in layers along the edges between them; a layer wraps when it is wider than the drawing. The frames at the top go by `order`.
-  - A card or an image is a box of fixed width with its text wrapped, cut to four lines and clipped to the box. An edge is an arrow between the borders of its two boxes, with its label; a loop is an arc on its box.
+  - Each frame holds its children in layers along the edges between them; a layer wraps when it is wider than the drawing. Two layers that a labeled edge joins have more space between them for the label. The frames at the top go by `order`.
+  - A card or an image is a box of fixed width with its text wrapped, cut to four lines and clipped to the box. An edge is an arrow between the borders of its two boxes; a loop is an arc on the right side of its box.
+  - The edges between one pair of boxes are drawn side by side and share one label: each edge's label with an arrow for its way, such as `↓ next · ↑ fix`. An edge that would cross another card goes around on the right, if that way is clear; otherwise it stays straight.
+  - A label is cut to the free room inside its frame. A label with no free room shows only on hover.
+  - A box or an edge shows its full text on hover. A frame or a node with open threads on it has a badge with their count.
   - If the schematic does not fit the `Svg` size limit, the plugin draws only the frames.
 - In the terminal, the preview is a list of frames with their node counts and open threads.
-- A `Link` opens the board in the browser. A hint next to it says: if the link does not open, start `peer`.
+- The board's title is a `Link` that opens the board in the browser. A line under it counts the frames, the nodes and the open threads. One hint under the boards says: if a link does not open, start `peer`.
 
 The preview helps you see quickly what is on a board. Only the browser shows the exact board.
 
