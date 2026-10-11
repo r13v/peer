@@ -1,7 +1,8 @@
-import { Handle, type NodeProps, NodeResizer, Position } from "@xyflow/react"
+import { type NodeProps, NodeResizer } from "@xyflow/react"
 import { useBoardActions } from "../lib/board-context.ts"
 import type { FlowNode } from "../lib/flow.ts"
 import { InlineText } from "./inline-text.tsx"
+import { NodeHandles } from "./node-handles.tsx"
 import { ThreadBadge } from "./thread-badge.tsx"
 
 export function FrameNodeView({ id, data, selected }: NodeProps<FlowNode>) {
@@ -12,16 +13,14 @@ export function FrameNodeView({ id, data, selected }: NodeProps<FlowNode>) {
 	}
 
 	return (
-		<div className={node.preset === "slide" ? "frame slide" : "frame"}>
+		<div className="frame">
 			<NodeResizer
 				isVisible={selected}
 				minWidth={160}
 				minHeight={90}
-				keepAspectRatio={node.preset === "slide"}
 				onResizeStart={actions.startResize}
 				onResizeEnd={(_, params) => actions.endResize(id, params)}
 			/>
-			<Handle type="target" position={Position.Top} />
 			<div className="frame-title">
 				<span className="frame-order">{node.order}</span>
 				<InlineText
@@ -33,7 +32,7 @@ export function FrameNodeView({ id, data, selected }: NodeProps<FlowNode>) {
 				/>
 				<ThreadBadge id={id} />
 			</div>
-			<Handle type="source" position={Position.Bottom} />
+			<NodeHandles />
 		</div>
 	)
 }

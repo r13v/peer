@@ -205,7 +205,6 @@ func TestPackRejectsIncompleteOrNull(t *testing.T) {
 		`{"base":0,"ops":[{"op":"comment","target":{"id":"n1"},"body":"x"}]}`,
 		`{"expect":{"n1":null},"ops":[{"op":"delete","id":"n1"}]}`,
 		`{"base":0,"ops":[{"op":"add","node":{"type":"card","text":"a","caption":""}}]}`,
-		`{"base":0,"ops":[{"op":"restore","node":{"id":"n1","type":"card","rev":1,"text":"a","preset":""}}]}`,
 	} {
 		if _, err := ParsePack([]byte(src)); err == nil || AsError(err).Kind != KindInvalid {
 			t.Fatalf("%s: want invalid, got %v", src, err)
@@ -217,7 +216,6 @@ func TestCLIForbidsNullGeometryKeys(t *testing.T) {
 	dir := newBoard(t)
 	apply(t, dir, CLI, `{"base":0,"ops":[{"op":"add","node":{"type":"card","text":"a"}}]}`)
 	for _, src := range []string{
-		`{"base":1,"ops":[{"op":"add","node":{"type":"frame","title":"F","order":1,"preset":""}}]}`,
 		`{"base":1,"ops":[{"op":"update","id":"n1","set":{"x":null}}]}`,
 	} {
 		if be := applyErr(t, dir, CLI, src); be.Kind != KindForbidden {
@@ -332,7 +330,6 @@ func TestCLIGeometryAndRestoreForbidden(t *testing.T) {
 	apply(t, dir, CLI, `{"base":1,"ops":[{"op":"delete","id":"f1"}]}`)
 	for _, src := range []string{
 		`{"base":2,"ops":[{"op":"add","node":{"type":"card","text":"a","x":1,"y":2}}]}`,
-		`{"base":2,"ops":[{"op":"add","node":{"type":"frame","title":"S","order":2,"preset":"slide"}}]}`,
 		`{"base":2,"ops":[{"op":"restore","node":{"id":"f1","type":"frame","rev":1,"title":"F","order":1}}]}`,
 	} {
 		if be := applyErr(t, dir, CLI, src); be.Kind != KindForbidden {
@@ -342,10 +339,10 @@ func TestCLIGeometryAndRestoreForbidden(t *testing.T) {
 			t.Fatalf("browser %s: %v", src, err)
 		}
 	}
-	if be := applyErr(t, dir, CLI, `{"base":5,"ops":[{"op":"update","id":"n2","set":{"w":5}}]}`); be.Kind != KindForbidden {
+	if be := applyErr(t, dir, CLI, `{"base":4,"ops":[{"op":"update","id":"n2","set":{"w":5}}]}`); be.Kind != KindForbidden {
 		t.Fatalf("CLI update w: %v", be)
 	}
-	apply(t, dir, Browser, `{"base":5,"ops":[{"op":"update","id":"n2","set":{"w":5}}]}`)
+	apply(t, dir, Browser, `{"base":4,"ops":[{"op":"update","id":"n2","set":{"w":5}}]}`)
 }
 
 func TestCLIReparentResetsPosition(t *testing.T) {
@@ -361,7 +358,7 @@ func TestCLIReparentResetsPosition(t *testing.T) {
 func TestInspectHasNoGeometry(t *testing.T) {
 	dir := newBoard(t)
 	apply(t, dir, Browser, `{"base":0,"ops":[
-		{"op":"add","node":{"type":"frame","title":"F","order":1,"preset":"slide","x":0,"y":0,"w":1600,"h":900,"z":0}},
+		{"op":"add","node":{"type":"frame","title":"F","order":1,"x":0,"y":0,"w":1600,"h":900,"z":0}},
 		{"op":"add","node":{"type":"card","text":"a","parentId":"f1","x":1,"y":2,"w":3,"h":4,"z":5}},
 		{"op":"comment","target":{"kind":"frame","id":"f1"},"body":"hi"}]}`)
 	if _, err := ImportImage(dir, pngBytes(t, 3, 2), "f1", "chart", agent, CLI); err != nil {
@@ -651,5 +648,31 @@ func TestSchemasAreJSON(t *testing.T) {
 	}
 	if bytes.Contains(s.CLIPack, []byte(`"restore"`)) || !bytes.Contains(s.BrowserPack, []byte(`"restore"`)) {
 		t.Fatal("restore must be browser only")
+	}
+}
+
+func TestRemovedFramePresetStillOpens(t *testing.T) {
+	dir := newBoard(t)
+	apply(t, dir, Browser, `{"base":0,"ops":[{"op":"add","node":{"type":"frame","title":"F","order":1,"x":0,"y":0,"w":960,"h":540}},{"op":"add","node":{"type":"card","text":"a"}}]}`)
+	_, data := read(t, dir)
+	old := strings.Replace(string(data), `"order": 1,`, `"order": 1,`+"\n\t\t\t"+`"preset": "slide",`, 1)
+	if old == string(data) {
+		t.Fatal("no frame to add a preset to")
+	}
+	b, err := Parse([]byte(old), dir)
+	if err != nil {
+		t.Fatalf("a board with a frame preset does not open: %v", err)
+	}
+	out, err := Marshal(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(out, data) {
+		t.Fatalf("the next write keeps the preset:\n%s", out)
+	}
+	// Only frames had a preset; on a card it stays an error.
+	card := strings.Replace(string(data), `"text": "a"`, `"text": "a", "preset": "slide"`, 1)
+	if _, err := Parse([]byte(card), dir); err == nil {
+		t.Fatal("a card with a preset opens")
 	}
 }

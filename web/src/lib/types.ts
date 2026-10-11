@@ -29,7 +29,6 @@ export type FrameNode = Geometry & {
 	type: "frame"
 	title: string
 	order: number
-	preset?: "slide"
 }
 
 export type BoardNode = CardNode | ImageNode | FrameNode

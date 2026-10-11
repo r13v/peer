@@ -70,14 +70,23 @@ export function targetFor(board: Board, id: string): Target | undefined {
 	return undefined
 }
 
-export function openThreadCounts(board: Board): Map<string, number> {
-	const counts = new Map<string, number>()
+export type ThreadCount = { open: number; resolved: number }
+
+// Threads per node and edge. Board threads and orphaned threads belong to no node or edge.
+export function threadCounts(board: Board): Map<string, ThreadCount> {
+	const counts = new Map<string, ThreadCount>()
 	for (const thread of board.threads) {
 		const { target } = thread
-		if (thread.resolved || target.kind === "board") {
+		if (thread.orphaned || target.kind === "board") {
 			continue
 		}
-		counts.set(target.id, (counts.get(target.id) ?? 0) + 1)
+		const count = counts.get(target.id) ?? { open: 0, resolved: 0 }
+		if (thread.resolved) {
+			count.resolved++
+		} else {
+			count.open++
+		}
+		counts.set(target.id, count)
 	}
 
 	return counts

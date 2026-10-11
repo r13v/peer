@@ -1,6 +1,7 @@
 import { useState } from "react"
 import { nodeLabel, nodeText } from "../lib/board.ts"
 import type { Board } from "../lib/types.ts"
+import { Icon } from "./icon.tsx"
 
 const resultLimit = 20
 
@@ -26,20 +27,26 @@ export function SearchBox({
 
 	return (
 		<div className="search">
-			<input
-				type="search"
-				placeholder="Search board"
-				value={query}
-				onChange={(e) => setQuery(e.target.value)}
-				onKeyDown={(e) => {
-					if (e.key === "Enter" && results[0]) {
-						pick(results[0].id)
-					}
-				}}
-			/>
+			<label className="field search-field">
+				<Icon name="search" />
+				<input
+					type="search"
+					placeholder="Search board"
+					aria-label="Search board"
+					value={query}
+					onChange={(e) => setQuery(e.target.value)}
+					onKeyDown={(e) => {
+						if (e.key === "Enter" && results[0]) {
+							pick(results[0].id)
+						} else if (e.key === "Escape") {
+							setQuery("")
+						}
+					}}
+				/>
+			</label>
 			{needle && (
 				<ul className="search-results">
-					{results.length === 0 && <li className="empty">No matches</li>}
+					{results.length === 0 && <li className="empty muted">No matches</li>}
 					{results.map((n) => (
 						<li key={n.id}>
 							<button type="button" onClick={() => pick(n.id)}>

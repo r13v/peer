@@ -1,6 +1,12 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { blockOrigin, fitFrame, placementOps, planPlacement } from "./layout.ts"
+import {
+	blockOrigin,
+	placementOps,
+	planPlacement,
+	settleContainer,
+	settleOps,
+} from "./layout.ts"
 import type { Board, BoardNode, FrameNode } from "./types.ts"
 
 function board(nodes: BoardNode[]): Board {
@@ -103,22 +109,6 @@ test("an unplaced frame is sized around its unplaced children and placed itself"
 	assert.ok(child && child.y >= 44, "children start below the frame title")
 })
 
-test("a slide frame keeps 16:9 when it grows", () => {
-	const slide: FrameNode = {
-		id: "f1",
-		rev: 1,
-		type: "frame",
-		title: "S",
-		order: 1,
-		preset: "slide",
-	}
-
-	const size = fitFrame(slide, { w: 320, h: 180 }, { w: 300, h: 400 })
-
-	assert.equal(Math.round((size.w / size.h) * 9), 16)
-	assert.ok(size.h >= 400)
-})
-
 test("measured sizes drive the layout and are written with the positions", () => {
 	const b = board([
 		{ id: "n1", rev: 1, type: "card", text: "40 lines" },
@@ -156,4 +146,113 @@ test("a new node goes below a placed card that grew since its size was stored", 
 	const n1 = planPlacement(b, measured).positions.get("n1")
 
 	assert.ok(n1 && n1.y >= 700, "the new card is not inside the grown one")
+})
+
+test("a card that grew pushes the column below it, its frame grows and pushes the next frame", () => {
+	const nodes: BoardNode[] = [
+		{
+			id: "f1",
+			type: "frame",
+			rev: 1,
+			title: "A",
+			order: 1,
+			x: 608,
+			y: 0,
+			w: 480,
+			h: 673,
+		},
+		{
+			id: "n2",
+			type: "card",
+			rev: 1,
+			text: "",
+			parentId: "f1",
+			x: 24,
+			y: 377,
+			w: 240,
+			h: 120,
+		},
+		{
+			id: "n3",
+			type: "card",
+			rev: 1,
+			text: "",
+			parentId: "f1",
+			x: 24,
+			y: 553,
+			w: 240,
+			h: 194,
+		},
+		{
+			id: "f4",
+			type: "frame",
+			rev: 1,
+			title: "B",
+			order: 2,
+			x: 0,
+			y: 713,
+			w: 848,
+			h: 575,
+		},
+		{
+			id: "f5",
+			type: "frame",
+			rev: 1,
+			title: "C",
+			order: 3,
+			x: 0,
+			y: 177,
+			w: 568,
+			h: 320,
+		},
+	]
+	// n2 rendered taller than stored: its bottom (611) now covers the top of n3 (553).
+	const ops = settleOps(board(nodes), new Map([["n2", { w: 240, h: 234 }]]))
+	const set = new Map(
+		ops.map((op) => [
+			op.op === "update" ? op.id : "",
+			op.op === "update" ? op.set : {},
+		]),
+	)
+
+	assert.deepEqual(set.get("n3"), { y: 377 + 234 + 24 })
+	const frameH = (set.get("f1")?.h as number) ?? 0
+	assert.ok(frameH >= 635 + 194, "the frame holds the pushed card")
+	assert.ok(
+		(set.get("f4")?.y as number) >= frameH,
+		"the next frame starts below the grown one",
+	)
+	assert.equal(set.has("f5"), false, "a frame in another column stays")
+	assert.equal(set.has("n2"), false)
+})
+
+test("settling leaves nodes on one row and nodes without overlap in place", () => {
+	const moved = settleContainer([
+		{ id: "a", x: 0, y: 0, w: 100, h: 100 },
+		{ id: "b", x: 50, y: 0, w: 100, h: 100 }, // same row: overlap is the person's choice
+		{ id: "c", x: 300, y: 50, w: 100, h: 100 }, // another column
+		{ id: "d", x: 0, y: 110, w: 100, h: 50 }, // below with a small gap
+	])
+
+	assert.equal(moved.size, 0)
+})
+
+test("a push carries on down the column", () => {
+	const rects = [
+		{ id: "a", x: 0, y: 0, w: 100, h: 200 },
+		{ id: "b", x: 0, y: 100, w: 100, h: 100 },
+		{ id: "c", x: 0, y: 220, w: 100, h: 100 },
+	]
+	const moved = settleContainer(rects)
+	const placed = rects.map((r) => ({ ...r, ...moved.get(r.id) }))
+
+	for (const [i, upper] of placed.entries()) {
+		for (const lower of placed.slice(i + 1)) {
+			assert.equal(
+				overlaps(upper, lower),
+				false,
+				`${upper.id} covers ${lower.id}`,
+			)
+		}
+	}
 })

@@ -54,11 +54,11 @@ Node fields are semantic or geometric.
 
 Every node also has `id`, `type`, `rev` and an optional `parentId`: the frame that holds the node. A frame can be inside another frame.
 
-The geometric fields are `x`, `y`, `w`, `h`, `z`, and `preset` for a frame.
+The geometric fields are `x`, `y`, `w`, `h` and `z`.
 
 - Coordinates are in board units. For a node with `parentId`, they count from the top-left corner of its frame.
 - `z` sets the drawing order; the array order has no effect. A frame is always drawn below its children.
-- `preset: "slide"` keeps a frame at 16:9.
+- An older board can hold `preset: "slide"` on a frame. The field is gone: a read drops it, and the next write leaves it out.
 - A node without `x` and `y` is not placed yet; a node that an agent adds looks like this. It is complete in all other ways: you can read it, connect it and comment on it. The browser places it.
 
 `rev` is the board revision at which the node last changed. Edges and threads have `rev` too.
@@ -233,17 +233,19 @@ A board shows in the card of each room that links it. The "In store" and "Found"
 - An open tab places unplaced nodes itself: in layers along the edges, inside their frame, with ELK or dagre in the browser. It does not move placed nodes and goes around them. If a frame itself is unplaced, the frames are placed first, then their content. The tab saves the positions in one pack of its own, with the `base` of the snapshot it computed the layout from. The pack places all unplaced nodes at once; the tab never sends a partial placement.
 - If two tabs place the same nodes, the second gets a conflict. It reads the board again and places only what is still unplaced; it does not send its old positions again.
 - The tab measures nodes after it draws them and writes the sizes only when they differ from the stored ones. All tabs measure by the same rules: in board units, at any zoom, with the fonts of the SPA build and a fixed rounding. Thus different tabs get the same sizes and do not overwrite each other.
+- A node that grew, for example after an agent changed its text, does not cover the nodes below it. In the same pack as the sizes, the tab moves each node that starts below another node in the same column, and whose top that node covers, to below it. A frame grows to hold its moved content and then moves the nodes below it in the same way. Nodes that start on one row may overlap.
 - A manual move saves the new coordinates. The "Arrange" button lays out the selected frame again. It is a user action, so it is in the undo history.
 
 ### What the SPA does
 
 - create cards and frames, delete any object;
 - move and resize nodes and frames;
-- create an edge by dragging a line from one node to another;
+- create an edge by dragging a line from any side of a node and releasing it on another node; the line attaches to the sides of the two nodes that face each other;
 - edit the text on a card;
 - drop images onto the board;
 - color cards;
 - see the threads of objects and of the whole board, start threads and reply;
+- open the threads of a node or an edge from the badge on it;
 - mark threads resolved;
 - search the board text;
 - use a minimap and undo;

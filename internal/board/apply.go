@@ -66,7 +66,7 @@ type Warning struct {
 
 var (
 	refName  = regexp.MustCompile(`^\$[A-Za-z0-9_-]{1,64}$`)
-	geometry = []string{"x", "y", "w", "h", "z", "preset"}
+	geometry = []string{"x", "y", "w", "h", "z"}
 	settable = map[string][]string{
 		TypeCard:  {"text", "color", "parentId"},
 		TypeImage: {"caption", "parentId"},
@@ -287,8 +287,8 @@ func checkMode(pack Pack, mode Mode) error {
 			return forbidden("ops[%d]: restore is only for the browser", i)
 		case op.Op == "add" && op.Node != nil:
 			n := op.Node
-			if len(op.geometry) > 0 || n.X != nil || n.Y != nil || n.W != nil || n.H != nil || n.Z != nil || n.Preset != "" {
-				return forbidden("ops[%d]: the CLI does not set geometry (x, y, w, h, z, preset); the browser places nodes", i)
+			if len(op.geometry) > 0 || n.X != nil || n.Y != nil || n.W != nil || n.H != nil || n.Z != nil {
+				return forbidden("ops[%d]: the CLI does not set geometry (x, y, w, h, z); the browser places nodes", i)
 			}
 		case op.Op == "update":
 			for _, k := range sortedKeys(op.Set) {
@@ -603,9 +603,6 @@ func (a *applier) fields(kind string) []string {
 	fields := settable[kind]
 	if a.mode == Browser && kind != "edge" {
 		fields = append(slices.Clone(fields), "x", "y", "w", "h", "z")
-		if kind == TypeFrame {
-			fields = append(fields, "preset")
-		}
 	}
 	return fields
 }
@@ -643,10 +640,10 @@ func (a *applier) updateNode(path string, n *Node, set map[string]json.RawMessag
 					n.Title = &s
 				}
 			}
-		case "color", "caption", "preset":
+		case "color", "caption":
 			var s string
 			if _, err = a.setField(p, n.Type, k, set[k], &s); err == nil {
-				*map[string]*string{"color": &n.Color, "caption": &n.Caption, "preset": &n.Preset}[k] = s
+				*map[string]*string{"color": &n.Color, "caption": &n.Caption}[k] = s
 			}
 		case "order", "x", "y", "w", "h", "z":
 			var f float64

@@ -145,7 +145,7 @@ func validate(b *Board, dir string) []Problem {
 func validateNode(c *checker, p string, n *Node, dir string) {
 	has := map[string]bool{
 		"text": n.Text != nil, "color": n.Color != "", "asset": n.Asset != nil, "caption": n.Caption != "",
-		"title": n.Title != nil, "order": n.Order != nil, "preset": n.Preset != "",
+		"title": n.Title != nil, "order": n.Order != nil,
 	}
 	var required, allowed []string
 	switch n.Type {
@@ -154,7 +154,7 @@ func validateNode(c *checker, p string, n *Node, dir string) {
 	case TypeImage:
 		required, allowed = []string{"asset"}, []string{"asset", "caption"}
 	case TypeFrame:
-		required, allowed = []string{"title", "order"}, []string{"title", "order", "preset"}
+		required, allowed = []string{"title", "order"}, []string{"title", "order"}
 	default:
 		c.add(p+".type", "must be card, image or frame")
 		return
@@ -171,9 +171,6 @@ func validateNode(c *checker, p string, n *Node, dir string) {
 	}
 	if n.Color != "" && !slices.Contains(cardColors, n.Color) {
 		c.add(p+".color", "must be one of %s", strings.Join(cardColors, ", "))
-	}
-	if n.Preset != "" && n.Preset != "slide" {
-		c.add(p+".preset", `must be "slide"`)
 	}
 	if n.Text != nil && !utf8.ValidString(*n.Text) {
 		c.add(p+".text", "must be UTF-8")
@@ -265,7 +262,7 @@ type shape struct {
 var nodeTypeKeys = map[string][]string{
 	TypeCard:  {"text", "color"},
 	TypeImage: {"asset", "caption"},
-	TypeFrame: {"title", "order", "preset"},
+	TypeFrame: {"title", "order"},
 }
 
 var nodeCommonKeys = []string{"id", "type", "rev", "parentId", "x", "y", "w", "h", "z"}

@@ -1,13 +1,20 @@
-import type { CatalogGroup as Group } from "../lib/types.ts"
+import { timeRange } from "../lib/time.ts"
+import type { BoardRef, CatalogGroup as Group } from "../lib/types.ts"
 import { BoardList } from "./board-list.tsx"
 
-function roomTime(room: Group["rooms"][number]): string {
-	const started = new Date(room.startedAt).toLocaleString()
-	if (!room.endedAt) {
-		return `since ${started}`
+function Section({ title, boards }: { title: string; boards: BoardRef[] }) {
+	if (boards.length === 0) {
+		return null
 	}
 
-	return `${started} – ${new Date(room.endedAt).toLocaleString()}`
+	return (
+		<div className="room">
+			<div className="room-head">
+				<h3>{title}</h3>
+			</div>
+			<BoardList boards={boards} />
+		</div>
+	)
 }
 
 export function CatalogGroup({ group }: { group: Group }) {
@@ -15,29 +22,29 @@ export function CatalogGroup({ group }: { group: Group }) {
 
 	return (
 		<section className="group">
-			<h2 title={checkout.path}>
-				{checkout.name} <span className="muted path">{checkout.path}</span>
-			</h2>
-			<h3>Rooms</h3>
-			{rooms.length === 0 && (
-				<p className="muted empty">No rooms with boards</p>
-			)}
+			<header className="group-head">
+				<h2>{checkout.name}</h2>
+				<span className="path" dir="rtl" title={checkout.path}>
+					<bdi>{checkout.path}</bdi>
+				</span>
+			</header>
 			{rooms.map((room) => (
 				<div key={room.id} className="room">
 					<div className="room-head">
-						<strong>{room.id}</strong>
-						<span className={room.active ? "pill active" : "pill"}>
-							{room.active ? "active" : "ended"}
+						<span
+							className={room.active ? "status active" : "status"}
+							title={room.active ? "Active room" : "Ended room"}
+						/>
+						<h3>{room.id}</h3>
+						<span className="muted">
+							{timeRange(room.startedAt, room.endedAt)}
 						</span>
-						<span className="muted">{roomTime(room)}</span>
 					</div>
 					<BoardList boards={room.boards} />
 				</div>
 			))}
-			<h3>In store</h3>
-			<BoardList boards={store} />
-			<h3>Found in workspace</h3>
-			<BoardList boards={found} />
+			<Section title="In store" boards={store} />
+			<Section title="Found in workspace" boards={found} />
 		</section>
 	)
 }

@@ -1,10 +1,11 @@
 import { type FormEvent, useEffect, useState } from "react"
 import { errorText, getCatalog, rescan } from "../lib/api.ts"
 import { base64url } from "../lib/base64url.ts"
-import { filterCatalog } from "../lib/catalog.ts"
+import { boardCount, filterCatalog } from "../lib/catalog.ts"
 import type { Catalog } from "../lib/types.ts"
 import { BoardList } from "./board-list.tsx"
 import { CatalogGroup } from "./catalog-group.tsx"
+import { Icon } from "./icon.tsx"
 import { PeerHint } from "./peer-hint.tsx"
 
 export function HomePage() {
@@ -47,54 +48,73 @@ export function HomePage() {
 	return (
 		<main className="home">
 			<header className="home-header">
-				<h1>Boards</h1>
-				<input
-					type="search"
-					placeholder="Search title, directory or path"
-					value={query}
-					onChange={(e) => setQuery(e.target.value)}
-				/>
+				<div className="home-title">
+					<span className="logo">peer</span>
+					<h1>Boards</h1>
+					{shown && <span className="chip">{boardCount(shown)}</span>}
+				</div>
+				<label className="field search-field">
+					<Icon name="search" />
+					<input
+						type="search"
+						placeholder="Search title, directory or path"
+						aria-label="Search boards"
+						value={query}
+						onChange={(e) => setQuery(e.target.value)}
+					/>
+				</label>
 				<button
 					type="button"
 					onClick={() => void refresh()}
 					disabled={scanning}
+					title="Scan the workspace again"
 				>
+					<Icon name="refresh" />
 					{scanning ? "Scanning…" : "Refresh"}
 				</button>
 			</header>
 			<form className="open-path" onSubmit={openPath}>
-				<label htmlFor="board-path">Open by path</label>
-				<input
-					id="board-path"
-					placeholder="/abs/path/to/name.board"
-					value={path}
-					onChange={(e) => {
-						setPath(e.target.value)
-						setPathError(undefined)
-					}}
-				/>
-				<button type="submit">Open</button>
+				<label className="field">
+					<span className="field-label">Open by path</span>
+					<input
+						placeholder="/abs/path/to/name.board"
+						value={path}
+						onChange={(e) => {
+							setPath(e.target.value)
+							setPathError(undefined)
+						}}
+					/>
+				</label>
+				<button type="submit" disabled={!path.trim()}>
+					Open
+				</button>
 			</form>
 			{pathError && <p className="error">{pathError}</p>}
-			<p className="hint">
-				The workspace scan follows git-tracked files; outside git it goes 4
-				levels deep and skips hidden directories, node_modules and vendor.
-			</p>
-			<PeerHint />
 			{error && <p className="error">Cannot load boards: {error}</p>}
-			{!shown && !error && <p className="muted">Loading…</p>}
+			{!shown && !error && <p className="muted empty-state">Loading…</p>}
 			{shown?.groups.map((group) => (
 				<CatalogGroup key={group.checkout.path} group={group} />
 			))}
 			{shown && shown.outside.length > 0 && (
 				<section className="group">
-					<h2>Outside known checkouts</h2>
+					<header className="group-head">
+						<h2>Outside known checkouts</h2>
+					</header>
 					<BoardList boards={shown.outside} />
 				</section>
 			)}
 			{shown && shown.groups.length === 0 && shown.outside.length === 0 && (
-				<p className="muted">No boards found.</p>
+				<p className="muted empty-state">
+					{query.trim() ? "No boards match the search." : "No boards found."}
+				</p>
 			)}
+			<footer className="home-footer">
+				<p className="hint">
+					The workspace scan follows git-tracked files; outside git it goes 4
+					levels deep and skips hidden directories, node_modules and vendor.
+				</p>
+				<PeerHint />
+			</footer>
 		</main>
 	)
 }
