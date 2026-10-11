@@ -154,10 +154,10 @@ async function start(
 		ran.push([...e.argv])
 		if (typeof watch !== "string") {
 			yield { stream: "stderr", text: watch.stderr }
-			return { code: 1, signal: null } as never
+			return { value: { code: 1, signal: null } } as never
 		}
 		yield { stream: "stdout", text: watch }
-		return { code: 0, signal: null } as never
+		return { value: { code: 0, signal: null } } as never
 	})
 	on("process.run", (_, e) => {
 		ran.push([...e.argv])
