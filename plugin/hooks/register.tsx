@@ -10,7 +10,7 @@ import type {
 	PeerRoom,
 	PeerState,
 } from "../types"
-import { boardSvg, frameLines, unplaced } from "./board-preview.ts"
+import { boardSvg, frameLines } from "./board-preview.ts"
 
 const PANE = "peer"
 const EVERYONE = "*"
@@ -994,7 +994,6 @@ export const register: Register = (on) => {
 		function boardCard({ ref, board, error }: BoardView) {
 			const isDrawn = e.surface !== "terminal" && "Svg" in els
 			const svg = board && isDrawn ? boardSvg(board) : null
-			const loose = board && isDrawn ? unplaced(board) : []
 			const lines = board && !isDrawn ? frameLines(board) : []
 			return (
 				<Box key={`board-${ref.key}`} flexDirection="column">
@@ -1009,9 +1008,6 @@ export const register: Register = (on) => {
 							source={svg}
 							alt={`Schematic of board ${ref.title ?? ""}`}
 						/>
-					)}
-					{loose.length > 0 && (
-						<Text dimColor>{clip(`Unplaced: ${loose.join(" · ")}`, 2000)}</Text>
 					)}
 					{lines.map((line) => (
 						<Text key={`${ref.key}-${line}`}>{line}</Text>

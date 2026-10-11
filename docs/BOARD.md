@@ -254,9 +254,12 @@ A change is saved when the action ends: the drag is released, the text editor cl
 
 ## Claude Code plugin
 
-The plugin's pane has a **boards** tab for the room it shows. It gives a simple preview and a link to each board. It takes the path and `url` of the room's boards from `peer board list` and reads `board.json` itself, with the geometry.
+The plugin's pane has a **boards** tab for the room it shows. It gives a simple preview and a link to each board. It takes the path and `url` of the room's boards from `peer board list` and reads `board.json` itself.
 
-- On the desktop, in VS Code and on mobile, the preview is an `Svg` element: rectangles for frames and nodes with their labels, and straight lines for edges between node centers. A list under the diagram shows the unplaced nodes. If the diagram does not fit the `Svg` size limit, the plugin draws only the frames.
+- On the desktop, in VS Code and on mobile, the preview is an `Svg` element: a schematic that the plugin lays out itself and that ignores the stored geometry. Thus a board that nobody opened in the browser has a preview too.
+  - Each frame holds its children in layers along the edges between them; a layer wraps when it is wider than the drawing. The frames at the top go by `order`.
+  - A card or an image is a box of fixed width with its text wrapped, cut to four lines and clipped to the box. An edge is an arrow between the borders of its two boxes, with its label; a loop is an arc on its box.
+  - If the schematic does not fit the `Svg` size limit, the plugin draws only the frames.
 - In the terminal, the preview is a list of frames with their node counts and open threads.
 - A `Link` opens the board in the browser. A hint next to it says: if the link does not open, start `peer`.
 

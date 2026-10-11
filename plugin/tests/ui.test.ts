@@ -1,4 +1,6 @@
 import { expect, mock, type TestBody, test } from "claude-code/testing"
+import { boardSvg } from "../hooks/board-preview.ts"
+import type { PeerBoard } from "../types"
 
 const PANE = {
 	title: "peer",
@@ -613,18 +615,165 @@ test("the boards tab links the room's boards only", async ($, on) => {
 	expect(drawn).toContain("Locks · 1 node · 0 open threads")
 })
 
-test("the board schematic adds frame offsets and lists unplaced nodes", async ($, on) => {
+test("the board schematic draws every node, placed or not", async ($, on) => {
 	const { drawn } = await mountBoards($, on, "desktop")
-	// drawn is JSON, so the markup's quotes are escaped in it.
-	const svg = (markup: string) => JSON.stringify(markup).slice(1, -1)
-	// n1 sits at f1 + (10, 20); n2 at f1 + f2 + (30, 40).
-	expect(drawn).toContain(svg('<rect x="110" y="70" width="200" height="60"'))
-	expect(drawn).toContain(svg('<rect x="430" y="290" width="200" height="60"'))
-	expect(drawn).toContain(">board.json</text>")
-	// The edge joins the two cards' centers.
-	expect(drawn).toContain(svg('<line x1="210" y1="100" x2="530" y2="320"'))
-	expect(drawn).not.toContain(svg("Cold start</text>"))
-	expect(drawn).toContain("Unplaced: Cold start")
+	// n3 has no position yet; the schematic still draws it.
+	expect(drawn).toContain(">Cold start</tspan>")
+	expect(drawn).not.toContain("Unplaced")
+	expect(drawn).toContain('marker-end=\\"url(#arrow)\\"')
+})
+
+type Rect = { x: number; y: number; w: number; h: number }
+
+// rects gives the boxes of an Svg in drawing order: frames, then cards.
+const rects = (svg: string): Rect[] =>
+	[
+		...svg.matchAll(
+			/<rect x="([\d.-]+)" y="([\d.-]+)" width="([\d.]+)" height="([\d.]+)" rx/g,
+		),
+	].map((m) => ({
+		x: Number(m[1]),
+		y: Number(m[2]),
+		w: Number(m[3]),
+		h: Number(m[4]),
+	}))
+const within = (inner: Rect, outer: Rect) =>
+	inner.x >= outer.x &&
+	inner.y >= outer.y &&
+	inner.x + inner.w <= outer.x + outer.w &&
+	inner.y + inner.h <= outer.y + outer.h
+
+test("the schematic ignores stored geometry and nests nodes in their frames", () => {
+	const svg = boardSvg(BOARD as PeerBoard) ?? ""
+	const unplaced = {
+		...BOARD,
+		nodes: BOARD.nodes.map(({ x, y, w, h, ...node }) => node),
+	}
+	// A board nobody opened in the browser looks the same.
+	expect(boardSvg(unplaced as PeerBoard)).toBe(svg)
+	const boxes = rects(svg)
+	expect(boxes.length).toBe(5)
+	const [store, locks, n1, n2, n3] = boxes as [Rect, Rect, Rect, Rect, Rect]
+	for (const box of [locks, n1, n3]) expect(within(box, store)).toBe(true)
+	expect(within(n2, locks)).toBe(true)
+	// Nothing in a frame overlaps.
+	const overlap = (a: Rect, b: Rect) =>
+		a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h
+	expect(overlap(locks, n1) || overlap(locks, n3) || overlap(n1, n3)).toBe(
+		false,
+	)
+})
+
+test("every edge is drawn, and an edge between frames orders the frames", () => {
+	const svg =
+		boardSvg({
+			title: "Edges",
+			nodes: [
+				{ id: "f5", type: "frame", title: "Later", order: 1 },
+				{ id: "f1", type: "frame", title: "First", order: 2 },
+				{ id: "n3", type: "card", text: "a", parentId: "f1" },
+				{ id: "n6", type: "card", text: "b", parentId: "f5" },
+				{ id: "n7", type: "card", text: "c", parentId: "f5" },
+			],
+			edges: [
+				{ id: "e1", from: "n3", to: "n6" },
+				{ id: "e2", from: "n6", to: "n7" },
+				{ id: "e3", from: "n7", to: "n6" },
+				{ id: "e4", from: "n7", to: "n7" },
+				{ id: "e5", from: "f1", to: "n3" },
+			],
+			threads: [],
+		}) ?? ""
+	// A cycle ends; both its edges, the loop and the frame's edge to its
+	// own child are drawn, each with its arrow.
+	expect(svg.match(/marker-end="url\(#arrow\)"/g)?.length).toBe(5)
+	// n3 -> n6 puts f1 above f5, against their order.
+	const [later, first] = rects(svg) as [Rect, Rect]
+	expect(first.y + first.h).toBeLessThan(later.y)
+	// The edge joins the cards themselves, not their frames.
+	const [n3, n6] = rects(svg).slice(2) as [Rect, Rect]
+	const line = svg.match(
+		/<line x1="([\d.-]+)" y1="([\d.-]+)" x2="([\d.-]+)" y2="([\d.-]+)"/,
+	)
+	expect(Number(line?.[2])).toBe(n3.y + n3.h)
+	expect(Number(line?.[4])).toBe(n6.y)
+})
+
+test("a long card text is wrapped and cut inside its card", () => {
+	const text = "word ".repeat(80) + "x".repeat(60)
+	const svg =
+		boardSvg({
+			title: "Long",
+			nodes: [{ id: "n1", type: "card", text }],
+			edges: [],
+			threads: [],
+		}) ?? ""
+	const spans = [...svg.matchAll(/<tspan[^>]*>([^<]*)<\/tspan>/g)].map(
+		(m) => m[1] ?? "",
+	)
+	expect(spans.length).toBe(4)
+	expect(spans.every((line) => line.length <= 21)).toBe(true)
+	expect(spans[3]?.endsWith("…")).toBe(true)
+	expect(svg).toContain('clip-path="url(#c0)"')
+})
+
+test("a loop on the top card keeps its label inside the drawing", () => {
+	const svg =
+		boardSvg({
+			title: "Loop",
+			nodes: [{ id: "n1", type: "card", text: "a" }],
+			edges: [{ id: "e1", from: "n1", to: "n1", label: "repeat" }],
+			threads: [],
+		}) ?? ""
+	const [left, top, width] = (svg.match(/viewBox="([^"]+)"/)?.[1] ?? "")
+		.split(" ")
+		.map(Number) as [number, number, number]
+	const tag = svg.match(
+		/<text x="([\d.-]+)" y="([\d.-]+)" text-anchor="end"[^>]*>repeat</,
+	)
+	// The label ends at x and its glyphs rise about 8 units over y.
+	expect(Number(tag?.[1])).toBeLessThanOrEqual(left + width)
+	expect(Number(tag?.[2]) - 8).toBeGreaterThanOrEqual(top)
+	expect(Number(tag?.[1]) - "repeat".length * 6).toBeGreaterThanOrEqual(left)
+})
+
+test("an emoji text is cut between characters, not inside one", () => {
+	const svg =
+		boardSvg({
+			title: "Emoji",
+			nodes: [
+				{ id: "f1", type: "frame", title: "😀".repeat(40), order: 1 },
+				{ id: "n1", type: "card", text: "😀".repeat(200), parentId: "f1" },
+			],
+			edges: [],
+			threads: [],
+		}) ?? ""
+	const lone =
+		/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/
+	expect(lone.test(svg)).toBe(false)
+	expect(svg).toContain("😀😀…</text>")
+	expect(svg).toContain("😀😀…</tspan>")
+})
+
+test("a deeply nested card is still drawn", () => {
+	const frames = Array.from({ length: 40 }, (_, i) => ({
+		id: `f${i}`,
+		type: "frame" as const,
+		title: `level ${i}`,
+		order: i,
+		parentId: i > 0 ? `f${i - 1}` : undefined,
+	}))
+	const svg =
+		boardSvg({
+			title: "Deep",
+			nodes: [
+				...frames,
+				{ id: "n1", type: "card", text: "leaf", parentId: "f39" },
+			],
+			edges: [],
+			threads: [],
+		}) ?? ""
+	expect(svg).toContain(">leaf</tspan>")
 })
 
 test("a board over the Svg limit draws its frames only", async ($, on) => {
