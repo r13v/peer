@@ -348,7 +348,8 @@ const inside = (a: Box, b: Box) =>
 // between the boxes' borders. Edges between one pair of boxes are drawn
 // side by side; an edge that would cross another card goes around it on
 // the right; a loop is an arc on its box. Each box and edge has a <title>
-// with its full text, and an open thread a "💬 N" badge. The stored
+// with its full text for a reader of the markup, and an open thread a
+// "💬 N" badge. The stored
 // positions are not used. A drawing over the Svg limit keeps the frames
 // only; null for an empty board or when even the frames do not fit.
 export function boardSvg(board: PeerBoard): string | null {
@@ -411,8 +412,8 @@ export function boardSvg(board: PeerBoard): string | null {
 	// put draws a label at the first of the spots where it touches no card,
 	// no frame's title bar and no frame's border, cut to fit inside the
 	// frame around the spot; a label with no free spot, or room for less
-	// than six glyphs, stays only in its edge's <title>. A label with a home
-	// box stays inside it.
+	// than six glyphs, is left out, and its edge's <title> keeps it. A
+	// label with a home box stays inside it.
 	const put = (spots: Spot[], text: string, home?: Box) => {
 		for (const spot of spots) {
 			const around = frameBoxes
