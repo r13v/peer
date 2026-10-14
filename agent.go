@@ -52,11 +52,11 @@ func memberPrompt(v session, m member, brief string, isDriven bool) string {
 // resume a session, so each batch becomes a turn of it. Pi runs without a
 // session and waits on its own.
 func isDriven(m member) bool {
-	return m.Agent == "codex" || m.Agent == "claude"
+	return m.Agent == "codex" || m.Agent == "claude" || m.Agent == "copilot"
 }
 
 // inviteAgents are the agents peer invite launches.
-var inviteAgents = []string{"claude", "codex", "pi"}
+var inviteAgents = []string{"claude", "codex", "copilot", "pi"}
 
 // claudeTools are a Claude member's tools: everything but the edit tools.
 // Its subagents get no more. A worker gets all tools.
@@ -69,7 +69,8 @@ var piTools = "read,grep,find,ls,bash"
 // withDefaults gives a member invited without a model the latest model of
 // its CLI at medium effort, since the user's settings may pin an older one:
 // for Claude the latest Opus, which the alias names, and for Codex the
-// latest Sol model it lists. Pi keeps its own default.
+// latest Sol model it lists. Copilot picks its model itself, and pi keeps
+// its own default.
 func withDefaults(m member) member {
 	if m.Model != "" {
 		return m
@@ -95,12 +96,17 @@ func withDefaults(m member) member {
 // sandbox covers only Bash, so a Claude member also gets no MCP servers
 // and skips the checkout's settings, which could widen the sandbox. Pi has
 // no sandbox: a member skips the checkout's settings, but its shell keeps
-// the user's permissions.
+// the user's permissions. Copilot runs a member's shell commands in its
+// sandbox, which writes dir, $TMPDIR but not /tmp, and, through --add-dir,
+// the peer store, with the network but not the local one; the member gets no
+// create or edit tools and no built-in MCP servers, but keeps the user's
+// own MCP servers and plugins.
 //
 // A session resumes the agent's earlier session, and the turn reads its
-// prompt from stdin. Neither CLI keeps a session's working directory,
-// sandbox, tools or model, so every turn repeats all of them. For Claude,
-// session also names the first turn's new session, with prompt given.
+// prompt from stdin. No CLI keeps a session's working directory, sandbox,
+// tools or model, so every turn repeats all of them. For Claude and
+// Copilot, session also names the first turn's new session, with prompt
+// given.
 func memberArgs(s *store, m member, dir, prompt, session string, isResume bool) ([]string, error) {
 	var argv []string
 	switch m.Agent {
@@ -163,6 +169,24 @@ func memberArgs(s *store, m member, dir, prompt, session string, isResume bool) 
 			argv = append(argv, "--session-id", session)
 		}
 		return append(argv, "--", prompt), nil
+	case "copilot":
+		argv = []string{"copilot", "-C", dir, "--output-format", "json", "--no-ask-user", "--session-id", session}
+		if m.Worker {
+			argv = append(argv, "--yolo")
+		} else {
+			// Deny write covers the write tools of subagents too.
+			argv = append(argv, "--allow-all-tools", "--sandbox", "--add-dir", s.dir, "--disable-builtin-mcps", "--excluded-tools", "create", "edit", "--deny-tool", "write")
+		}
+		if m.Model != "" {
+			argv = append(argv, "--model", m.Model)
+		}
+		if m.Effort != "" {
+			argv = append(argv, "--reasoning-effort", m.Effort)
+		}
+		if isResume {
+			return argv, nil
+		}
+		return append(argv, "-p", prompt), nil
 	case "pi":
 		argv = []string{"pi", "-p", "--mode", "json", "--no-session"}
 		if m.Worker {

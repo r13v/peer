@@ -188,8 +188,9 @@ func TestUpdateSkipsHomebrew(t *testing.T) {
 
 func TestMemberLogLine(t *testing.T) {
 	for line, want := range map[string][]logEntry{
-		"codex plain progress\n":             {{Kind: logRaw, Text: "codex plain progress"}},
-		`{"type":"system","subtype":"init"}`: nil,
+		"codex plain progress\n":                               {{Kind: logRaw, Text: "codex plain progress"}},
+		`Error: Model "x" from --model flag is not available.`: {{Kind: logRaw, Text: `Error: Model "x" from --model flag is not available.`, Failed: true}},
+		`{"type":"system","subtype":"init"}`:                   nil,
 		`{"type":"assistant","message":{"content":[{"type":"text","text":"Reviewing"},{"type":"tool_use","name":"Bash","input":{"command":"peer wait --as claude"}}]}}`: {{Kind: logText, Text: "Reviewing"}, {Kind: logTool, Text: "Bash peer wait --as claude"}},
 		`{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"main.go"}}]}}`:                                                {{Kind: logTool, Text: `Read {"file_path":"main.go"}`}},
 		`{"type":"user","message":{"content":[{"type":"tool_result","content":[{"type":"text","text":"no such file"}],"is_error":true}]}}`:                              {{Kind: logOutput, Text: "no such file", Failed: true}},
@@ -210,8 +211,17 @@ func TestMemberLogLine(t *testing.T) {
 		`{"type":"message_end","message":{"role":"assistant","content":[{"type":"toolCall","name":"read","arguments":{"path":"main.go"}}]}}`:                                                                {{Kind: logTool, Text: `read {"path":"main.go"}`}},
 		`{"type":"message_end","message":{"role":"toolResult","toolName":"bash","content":[{"type":"text","text":"hi\n\nCommand exited with code 1"}],"isError":true}}`:                                     {{Kind: logOutput, Text: "hi\n\nCommand exited with code 1", Failed: true}},
 		`{"type":"message_end","message":{"role":"assistant","content":[],"stopReason":"error","errorMessage":"429 rate limited"}}`:                                                                         {{Kind: logRaw, Text: "429 rate limited", Failed: true}},
-		`{"type":"result","is_error":true,"result":"boom"}`: {{Kind: logRaw, Text: "result: boom", Failed: true}},
-		`{"type":"new_event","x":1}`:                        {{Kind: logRaw, Text: `{"type":"new_event","x":1}`}},
+		`{"type":"result","is_error":true,"result":"boom"}`:                                {{Kind: logRaw, Text: "result: boom", Failed: true}},
+		`{"type":"new_event","x":1}`:                                                       {{Kind: logRaw, Text: `{"type":"new_event","x":1}`}},
+		`{"type":"assistant.message_delta","data":{"deltaContent":"Hi"},"ephemeral":true}`: nil,
+		`{"type":"assistant.message","data":{"content":"","toolRequests":[{"name":"bash","arguments":{"command":"peer wait","mode":"sync"}}]}}`: {{Kind: logTool, Text: "bash peer wait"}},
+		`{"type":"assistant.message","data":{"content":"Reviewing","toolRequests":[{"name":"view","arguments":{"path":"main.go"}}]}}`:           {{Kind: logText, Text: "Reviewing"}, {Kind: logTool, Text: `view {"path":"main.go"}`}},
+		`{"type":"tool.execution_complete","data":{"success":true,"result":{"content":"hi\n"}}}`:                                                {{Kind: logOutput, Text: "hi"}},
+		`{"type":"tool.execution_complete","data":{"success":false,"error":{"message":"Permission denied","code":"denied"}}}`:                   {{Kind: logOutput, Text: "Permission denied", Failed: true}},
+		`{"type":"assistant.turn_end","data":{"turnId":"0"}}`:                                                                                   nil,
+		`{"type":"result","sessionId":"s","exitCode":0,"usage":{}}`:                                                                             nil,
+		`{"type":"result","sessionId":"s","exitCode":1,"usage":{}}`:                                                                             {{Kind: logRaw, Text: "result: exit code 1", Failed: true}},
+		`{"type":"result","sessionId":"s","usage":{}}`:                                                                                          {{Kind: logRaw, Text: "result: exit code none", Failed: true}},
 	} {
 		if got := memberLogLine([]byte(line)); !slices.Equal(got, want) {
 			t.Fatalf("memberLogLine(%q) = %+v, want %+v", line, got, want)
@@ -607,7 +617,7 @@ func TestInvite(t *testing.T) {
 	v := startRoom(t, repo, "rules")
 	for _, args := range [][]string{
 		{"invite", v.ID, "docs", "--as", "reader", "--agent", "codex"},
-		{"invite", v.ID, "docs", "--as", "main", "--agent", "copilot"},
+		{"invite", v.ID, "docs", "--as", "main", "--agent", "cursor"},
 		{"invite", v.ID, "reader", "--as", "main", "--agent", "codex"},
 		{"invite", v.ID, "--as", "main", "--agent", "codex"},
 		{"invite", v.ID, "docs", "--as", "main", "--agent", "codex", "--headed"},
@@ -1062,6 +1072,22 @@ func TestCodexMemberHasNetwork(t *testing.T) {
 	}
 }
 
+// TestCopilotMemberIsSandboxedWithoutEditTools checks that a Copilot member
+// cannot edit through its tools, runs its shell in the sandbox, and can
+// still write the peer store, which peer send needs.
+func TestCopilotMemberIsSandboxedWithoutEditTools(t *testing.T) {
+	argv, err := memberArgs(&store{dir: "/store/room"}, member{Agent: "copilot"}, "/repo", "p", "S", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(argv, " ")
+	for _, want := range []string{"-C /repo", "--output-format json", "--no-ask-user", "--session-id S", "--allow-all-tools", "--sandbox", "--add-dir /store/room", "--disable-builtin-mcps", "--excluded-tools create edit --deny-tool write", "-p p"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("argv lacks %s: %s", want, joined)
+		}
+	}
+}
+
 func TestPiMemberHasNoEditTools(t *testing.T) {
 	argv, err := memberArgs(&store{dir: "/store/room"}, member{Agent: "pi"}, "/repo", "p", "", false)
 	if err != nil {
@@ -1076,16 +1102,17 @@ func TestPiMemberHasNoEditTools(t *testing.T) {
 }
 
 func TestUnknownAgentHasNoLaunch(t *testing.T) {
-	if _, err := memberArgs(&store{}, member{Agent: "copilot"}, "/repo", "p", "", false); err == nil {
-		t.Fatal("memberArgs accepted copilot")
+	if _, err := memberArgs(&store{}, member{Agent: "cursor"}, "/repo", "p", "", false); err == nil {
+		t.Fatal("memberArgs accepted cursor")
 	}
 }
 
 func TestWorkerHasNoLimits(t *testing.T) {
 	for agent, c := range map[string]struct{ want, banned []string }{
-		"claude": {[]string{"--permission-mode bypassPermissions"}, []string{"dontAsk", "--settings", "--tools", "--allowedTools", "--strict-mcp-config", "--setting-sources"}},
-		"codex":  {[]string{"--dangerously-bypass-approvals-and-sandbox"}, []string{"workspace-write", "--add-dir"}},
-		"pi":     {[]string{"--approve"}, []string{"--no-approve", "--tools"}},
+		"claude":  {[]string{"--permission-mode bypassPermissions"}, []string{"dontAsk", "--settings", "--tools", "--allowedTools", "--strict-mcp-config", "--setting-sources"}},
+		"codex":   {[]string{"--dangerously-bypass-approvals-and-sandbox"}, []string{"workspace-write", "--add-dir"}},
+		"copilot": {[]string{"--yolo"}, []string{"--sandbox", "--excluded-tools", "--deny-tool", "--allow-all-tools"}},
+		"pi":      {[]string{"--approve"}, []string{"--no-approve", "--tools"}},
 	} {
 		argv, err := memberArgs(&store{dir: "/store/room"}, member{Agent: agent, Worker: true}, "/repo", "p", "", false)
 		if err != nil {

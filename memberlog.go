@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -46,18 +47,23 @@ func stamped(line []byte) (time.Time, []byte) {
 }
 
 // memberLogLine turns one log line into entries. The apps write JSON
-// events: codex exec --json, claude stream-json and pi --mode json.
+// events: codex exec --json, claude stream-json, copilot --output-format
+// json and pi --mode json.
 // Anything else, such as stderr, older plain codex logs or an event it
 // does not know, is shown as it is.
 func memberLogLine(line []byte) []logEntry {
 	var ev struct {
-		Type    string          `json:"type"`
-		Message json.RawMessage `json:"message"` // claude's or pi's message, or codex's error text
-		Subtype string          `json:"subtype"`
-		Result  json.RawMessage `json:"result"` // claude's text, or a pi tool's result
-		Errors  []string        `json:"errors"`
-		IsError bool            `json:"is_error"`
-		Error   struct {
+		Type      string          `json:"type"`
+		Message   json.RawMessage `json:"message"` // claude's or pi's message, or codex's error text
+		Subtype   string          `json:"subtype"`
+		Result    json.RawMessage `json:"result"` // claude's text, or a pi tool's result
+		Errors    []string        `json:"errors"`
+		IsError   bool            `json:"is_error"`
+		SessionID string          `json:"sessionId"` // only copilot's result
+		ExitCode  *int            `json:"exitCode"`
+		Ephemeral bool            `json:"ephemeral"` // copilot's deltas and progress
+		Data      json.RawMessage `json:"data"`      // copilot's event
+		Error     struct {
 			Message string `json:"message"`
 		} `json:"error"`
 		Item struct {
@@ -81,7 +87,12 @@ func memberLogLine(line []byte) []logEntry {
 		if raw == "" {
 			return nil
 		}
-		return []logEntry{{Kind: logRaw, Text: raw}}
+		// Copilot reports an error that stops it before its events, such
+		// as an unknown model, as such a line on stderr.
+		return []logEntry{{Kind: logRaw, Text: raw, Failed: strings.HasPrefix(raw, "Error: ")}}
+	}
+	if ev.Ephemeral {
+		return nil
 	}
 	switch ev.Type {
 	case "item.completed": // codex; item.started would repeat each command
@@ -155,7 +166,16 @@ func memberLogLine(line []byte) []logEntry {
 			}
 		}
 		return out
-	case "result": // claude; its text repeats the last message
+	case "assistant.message", "tool.execution_complete": // copilot
+		return copilotEvent(ev.Type, ev.Data)
+	case "result": // claude's text repeats the last message; copilot's has none
+		if ev.SessionID != "" && (ev.ExitCode == nil || *ev.ExitCode != 0) {
+			code := "none"
+			if ev.ExitCode != nil {
+				code = strconv.Itoa(*ev.ExitCode)
+			}
+			return []logEntry{{Kind: logRaw, Text: "result: exit code " + code, Failed: true}}
+		}
 		if ev.IsError {
 			var result string
 			_ = json.Unmarshal(ev.Result, &result)
@@ -168,10 +188,56 @@ func memberLogLine(line []byte) []logEntry {
 	case "system", // claude
 		"thread.started", "turn.started", "turn.completed", "item.started", "item.updated", // codex
 		"session", "agent_start", "agent_end", "agent_settled", "turn_start", "turn_end", "message_start", "message_update", // pi
-		"tool_execution_start", "tool_execution_update", "tool_execution_end", "queue_update":
+		"tool_execution_start", "tool_execution_update", "tool_execution_end", "queue_update",
+		"user.message", "assistant.turn_start", "assistant.turn_end", "tool.execution_start", "session.auto_mode_resolved", "session.usage_checkpoint": // copilot
 		return nil
 	}
 	return []logEntry{{Kind: logRaw, Text: raw}}
+}
+
+// copilotEvent turns a copilot assistant message into the assistant's words
+// and tool calls, and a finished tool call into what it returned or its
+// error.
+func copilotEvent(typ string, data json.RawMessage) []logEntry {
+	var d struct {
+		Content      string `json:"content"`
+		ToolRequests []struct {
+			Name      string          `json:"name"`
+			Arguments json.RawMessage `json:"arguments"`
+		} `json:"toolRequests"`
+		Success bool `json:"success"`
+		Result  struct {
+			Content string `json:"content"`
+		} `json:"result"`
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(data, &d) != nil {
+		return nil
+	}
+	var out []logEntry
+	if typ == "tool.execution_complete" {
+		text := strings.TrimRight(cmp.Or(d.Result.Content, d.Error.Message), "\n")
+		if text != "" || !d.Success {
+			out = append(out, logEntry{Kind: logOutput, Text: text, Failed: !d.Success})
+		}
+		return out
+	}
+	if d.Content != "" {
+		out = append(out, logEntry{Kind: logText, Text: d.Content})
+	}
+	for _, r := range d.ToolRequests {
+		var in struct {
+			Command string `json:"command"`
+		}
+		arg := string(r.Arguments)
+		if json.Unmarshal(r.Arguments, &in) == nil && in.Command != "" {
+			arg = in.Command
+		}
+		out = append(out, logEntry{Kind: logTool, Text: r.Name + " " + ansi.Truncate(arg, 200, "…")})
+	}
+	return out
 }
 
 // piMessage turns a finished pi message into entries: the assistant's

@@ -66,9 +66,10 @@ func (s *store) drive(ctx context.Context, id, role, brief string, out io.Writer
 	if m.Worktree != "" {
 		dir = m.Worktree
 	}
-	// Claude takes the new session's ID; Codex names its thread itself.
+	// Claude and Copilot take the new session's ID; Codex names its thread
+	// itself.
 	session := ""
-	if m.Agent == "claude" {
+	if m.Agent == "claude" || m.Agent == "copilot" {
 		session = newUUID()
 	}
 	isStarted := false
@@ -156,6 +157,12 @@ func (s *store) turn(ctx context.Context, id, role string, argv []string, dir, p
 	}
 	defer lock.Close()
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	// A kick sends TERM to drive and the agent at once. The agent gets TERM
+	// again and time to stop what it started outside the group: Copilot
+	// runs each shell command in a session of its own, which only Copilot
+	// stops. KILL follows before stopMember's.
+	cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
+	cmd.WaitDelay = stopGrace / 2
 	cmd.Dir = dir
 	if prompt != "" {
 		cmd.Stdin = strings.NewReader(prompt)
@@ -181,8 +188,10 @@ func (s *store) turn(ctx context.Context, id, role string, argv []string, dir, p
 
 // copyEvents copies the agent's JSON events from in to out line by line.
 // It returns the thread that codex exec --json names in thread.started, and
-// whether the turn completed: Codex's turn.completed, or Claude's result
-// that is not an error. An exit status of 0 alone does not show it.
+// whether the turn completed: Codex's turn.completed, or a result that is
+// not an error: Claude's without is_error, or Copilot's, told by its
+// sessionId, with exitCode 0. An
+// exit status of 0 alone does not show it.
 func copyEvents(in io.Reader, out io.Writer) (string, bool) {
 	thread, isCompleted := "", false
 	r := bufio.NewReader(in)
@@ -191,9 +200,11 @@ func copyEvents(in io.Reader, out io.Writer) (string, bool) {
 		if len(line) > 0 {
 			_, _ = out.Write(line)
 			var ev struct {
-				Type    string `json:"type"`
-				Thread  string `json:"thread_id"`
-				IsError bool   `json:"is_error"`
+				Type      string `json:"type"`
+				Thread    string `json:"thread_id"`
+				IsError   bool   `json:"is_error"`
+				SessionID string `json:"sessionId"` // only copilot's result
+				ExitCode  *int   `json:"exitCode"`
 			}
 			if json.Unmarshal(line, &ev) == nil {
 				switch ev.Type {
@@ -205,6 +216,9 @@ func copyEvents(in io.Reader, out io.Writer) (string, bool) {
 					isCompleted = false
 				case "result":
 					isCompleted = !ev.IsError
+					if ev.SessionID != "" {
+						isCompleted = ev.ExitCode != nil && *ev.ExitCode == 0
+					}
 				}
 			}
 		}
