@@ -27,10 +27,9 @@ const log = (...args) => console.error("peer:", ...args)
 // checkouts can share an ID.
 const keyOf = (b) =>
 	`${createHash("sha256").update(b.repo).digest("hex").slice(0, 16)}-${b.room}`
-// forwards maps a binding's key to its running forward child.
+// forwards maps a binding's key to its forward child, and ready to the
+// binding once that forward holds main's delivery.
 const forwards = new Map()
-// ready maps the keys whose forward holds main's delivery for this session
-// to their bindings.
 const ready = new Map()
 
 /** Runs `peer ARGS` with input on stdin and returns its stdout. */

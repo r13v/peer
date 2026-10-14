@@ -190,8 +190,7 @@ func (s *store) turn(ctx context.Context, id, role string, argv []string, dir, p
 // It returns the thread that codex exec --json names in thread.started, and
 // whether the turn completed: Codex's turn.completed, or a result that is
 // not an error: Claude's without is_error, or Copilot's, told by its
-// sessionId, with exitCode 0. An
-// exit status of 0 alone does not show it.
+// sessionId, with exitCode 0. An exit status of 0 alone does not show it.
 func copyEvents(in io.Reader, out io.Writer) (string, bool) {
 	thread, isCompleted := "", false
 	r := bufio.NewReader(in)
