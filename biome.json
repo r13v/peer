@@ -17,6 +17,7 @@
 			"!.claude-plugin/marketplace.json",
 			"!plugin/.claude-plugin/plugin.json",
 			"!codex-plugin/.codex-plugin/plugin.json",
+			"!copilot-plugin/plugin.json",
 			"!plugin/hooks/hooks.json",
 			"!codex-plugin/hooks/hooks.json",
 			"!plugin/tsconfig.json"

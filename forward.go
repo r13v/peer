@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -110,13 +111,15 @@ func (s *store) claimDelivery(id, role, thread string) (lock *os.File, isHeld bo
 }
 
 // forward reads room sid for as and queues each batch as a turn of the
-// Codex session thread, until the room ends or ctx is done.
+// Codex session thread, until the room ends or ctx is done. With in, it
+// hands each batch over stdio instead, as stdioDeliver describes, to the
+// Copilot extension of session thread.
 // It prints {"status":"ready"} once it holds the role's delivery, or
 // {"status":"done"} when an earlier forward delivered the room's end.
 // A batch is read under the store lock, queued without it, and marked read
 // only if the cursor did not move meanwhile: a crash between a queued batch
 // and its mark brings the batch again, so delivery is at least once.
-func (s *store) forward(ctx context.Context, sid, as, thread string, out io.Writer) error {
+func (s *store) forward(ctx context.Context, sid, as, thread string, in io.Reader, out io.Writer) error {
 	var lock *os.File
 	isDone := false
 	err := s.locked(func() error {
@@ -150,6 +153,23 @@ func (s *store) forward(ctx context.Context, sid, as, thread string, out io.Writ
 	if err := emitJSON(out, map[string]string{"status": "ready"}); err != nil {
 		return err
 	}
+	deliver := func(ctx context.Context, _ string, text string) error { return codexQueue(ctx, thread, text) }
+	if in != nil {
+		// A closed stdin ends forward between batches too, so an idle
+		// forward does not hold main's delivery for a gone extension.
+		var closed <-chan struct{}
+		deliver, closed = stdioDeliver(in, out)
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithCancel(ctx)
+		defer cancel()
+		go func() {
+			select {
+			case <-closed:
+				cancel()
+			case <-ctx.Done():
+			}
+		}()
+	}
 	retry := forwardRetry
 	for {
 		b, from, next, err := s.readBatch(sid, as)
@@ -157,9 +177,13 @@ func (s *store) forward(ctx context.Context, sid, as, thread string, out io.Writ
 			return err
 		}
 		if b.Status != "" {
-			if err := codexQueue(ctx, thread, forwardText(sid, as, "peer forward", b)); err != nil {
-				if ctx.Err() != nil {
+			if err := deliver(ctx, batchID(sid, b), forwardText(sid, as, "peer forward", b)); err != nil {
+				if ctx.Err() != nil || errors.Is(err, errStdinClosed) {
 					return nil
+				}
+				var stop stopError
+				if errors.As(err, &stop) {
+					return err
 				}
 				_ = emitJSON(out, map[string]string{"status": "retry", "error": err.Error()})
 				if !sleepCtx(ctx, retry) {
@@ -231,6 +255,70 @@ func (s *store) commitBatch(sid, as string, from, next int64, isEnd bool) (bool,
 		return nil
 	})
 	return isMoved, err
+}
+
+// errStdinClosed ends a stdio forward: its reader is gone, so the batch it
+// held stays unread for the next reader.
+var errStdinClosed = errors.New("stdin closed")
+
+// stopError ends a forward rather than retrying its batch.
+type stopError struct{ error }
+
+// batchID names a batch in its turn and in the stdio protocol: the room's
+// end, or else its last message.
+func batchID(id string, b batch) string {
+	if b.Status == "ended" {
+		return id + "-end"
+	}
+	return b.Messages[len(b.Messages)-1].ID
+}
+
+// stdioDeliver hands each batch over stdio: it prints
+// {"status":"batch","batch":ID,"text":TEXT} and waits up to queueTimeout
+// for the line {"ack":ID}, after which forward marks the batch read, or
+// {"nack":ID,"error":TEXT}, after which forward retries it. A closed stdin
+// ends forward quietly; no answer in time, an answer for another batch or
+// a line that is not one ends it with an error. The batch stays unread in
+// each case but ack. The returned channel closes with stdin.
+func stdioDeliver(in io.Reader, out io.Writer) (func(ctx context.Context, id, text string) error, <-chan struct{}) {
+	lines := make(chan []byte)
+	closed := make(chan struct{})
+	go func() {
+		defer close(closed)
+		defer close(lines)
+		sc := bufio.NewScanner(in)
+		for sc.Scan() {
+			lines <- bytes.Clone(sc.Bytes())
+		}
+	}()
+	deliver := func(ctx context.Context, id, text string) error {
+		if err := emitJSON(out, map[string]string{"status": "batch", "batch": id, "text": text}); err != nil {
+			return stopError{err}
+		}
+		timer := time.NewTimer(queueTimeout)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-timer.C:
+			return stopError{fmt.Errorf("no ack for batch %s in %s", id, queueTimeout)}
+		case line, ok := <-lines:
+			if !ok {
+				return errStdinClosed
+			}
+			var a struct{ Ack, Nack, Error string }
+			switch {
+			case json.Unmarshal(line, &a) != nil:
+				return stopError{fmt.Errorf("not an ack: %q", line)}
+			case a.Ack == id:
+				return nil
+			case a.Nack == id:
+				return fmt.Errorf("batch %s refused: %s", id, a.Error)
+			}
+			return stopError{fmt.Errorf("answer for another batch than %s: %q", id, line)}
+		}
+	}
+	return deliver, closed
 }
 
 // forwardText is the turn a batch becomes in the agent's session, delivered

@@ -107,6 +107,20 @@ func forwardNote(rooms []string) string {
 		" into this Codex session through codex queue: each batch comes as a turn of its own. Do not run peer wait for these rooms; peer refuses it while forward runs."
 }
 
+// copilotStart reads a finished shell call of a Copilot session from in, as
+// {"tool_input":ARGS,"tool_response":TEXT}, and prints the room it started
+// as startedRoom finds it, or nothing when it started none.
+func copilotStart(in io.Reader, out io.Writer) error {
+	var e codexEvent
+	if err := json.NewDecoder(in).Decode(&e); err != nil {
+		return err
+	}
+	if v, ok := startedRoom(e); ok {
+		return emitJSON(out, v)
+	}
+	return nil
+}
+
 // startedRoom returns the room that a peer start printed in a Bash tool
 // call, if this call was one: the whole command is a plain peer start NAME,
 // and the room it printed exists in its checkout's store, active, with the
