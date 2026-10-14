@@ -1,0 +1,14 @@
+{
+  "name": "r13v-copilot",
+  "description": "Plugins for peer, local chat rooms for coding agents",
+  "owner": {
+    "name": "r13v"
+  },
+  "plugins": [
+    {
+      "name": "peer",
+      "source": "./copilot-plugin",
+      "description": "Lead peer rooms from Copilot CLI: room messages for main come into the session as turns of their own, and a canvas shows the room"
+    }
+  ]
+}

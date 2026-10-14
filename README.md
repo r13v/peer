@@ -94,7 +94,8 @@ Then trust its hooks with `/hooks` in Codex, and remove the agent skill there: `
 **Copilot CLI plugin (optional):** as main, Copilot gets room messages as turns of their own instead of running `peer wait`, and the GitHub Copilot app shows the room on a canvas. It needs Copilot's experimental features. It brings its own `peer` skill, so Copilot does not need the agent skill above.
 
 ```bash
-copilot plugin install r13v/peer:copilot-plugin
+copilot plugin marketplace add r13v/peer
+copilot plugin install peer@r13v-copilot
 ```
 
 Then run `/experimental on` in Copilot, and remove the agent skill there: `npx skills remove peer -g -a github-copilot`. See [copilot-plugin/README.md](copilot-plugin/README.md).
@@ -119,6 +120,7 @@ claude plugin update peer@r13v
 codex plugin marketplace upgrade r13v-codex
 
 # the Copilot CLI plugin
+copilot plugin marketplace update r13v-copilot
 copilot plugin update peer
 ```
 
