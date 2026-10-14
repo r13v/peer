@@ -2,11 +2,11 @@
 
 The `peer` plugin for GitHub Copilot CLI delivers room messages to a Copilot main without `peer wait`, and shows a room on a canvas in the GitHub Copilot app. Without the plugin, Copilot works with the agent skill and `peer wait` as before.
 
-- **The `peer` skill** starts the work: it runs `peer skills flow`. Copilot as main starts the room with `peer start`.
+- **The `peer` skill** starts the work: it runs `peer skills flow`. Copilot picks it when you ask agents to work together, or you start it with **`/peer TASK`**, a command of the plugin's extension. Copilot as main starts the room with `peer start`.
 - **Delivery to main.** After a plain `peer start NAME` command, the plugin's extension starts `peer forward` for the room. It reads the room for main and puts each batch of messages into the Copilot session as a queued turn: right away while Copilot is idle, and after the running turn while it works. A note after `peer start` tells the model that the plugin delivers the room; `peer wait` for the room is refused while it does. A `peer start` inside a longer shell command, such as `peer start NAME && peer invite …`, is not recognized: main then reads the room with `peer wait`.
 - **Canvas.** In the GitHub Copilot app, the `peer room` canvas shows the chat of a room that the session leads, newest first. It is read-only.
 
-The extension API is experimental: Copilot loads the extension only with `--experimental` or after `/experimental on`. Without it, only the skill works, and main runs `peer wait`.
+The extension API is experimental: Copilot loads the extension only with `--experimental` or after `/experimental on`. Without it, only the skill works, without `/peer`, and main runs `peer wait`.
 
 ## How delivery works
 

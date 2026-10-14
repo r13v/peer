@@ -299,6 +299,21 @@ let pendingNote = ""
 
 const session = await joinSession({
 	canvases: [roomCanvas],
+	// /peer TASK turns into a prompt for the plugin's skill, which holds the
+	// instructions.
+	commands: [
+		{
+			name: "peer",
+			description:
+				"Work on a task with other local agents in a peer room: /peer TASK",
+			handler: ({ args }) =>
+				session.send({
+					prompt: args.trim()
+						? `Use the peer skill for this task: ${args.trim()}`
+						: "Use the peer skill.",
+				}),
+		},
+	],
 	hooks: {
 		onUserPromptSubmitted: () => {
 			if (!pendingNote) return
