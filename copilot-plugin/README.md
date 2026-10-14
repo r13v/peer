@@ -25,8 +25,11 @@ The extension API is experimental: Copilot loads the extension only with `--expe
 ## Install
 
 ```bash
-copilot plugin install r13v/peer:copilot-plugin
+copilot plugin marketplace add r13v/peer
+copilot plugin install peer@r13v-copilot
 ```
+
+If you installed it straight from the repository with `copilot plugin install r13v/peer:copilot-plugin`, uninstall that copy first with `copilot plugin uninstall peer`.
 
 Then turn on experimental features with `/experimental on`, or start Copilot with `--experimental`.
 

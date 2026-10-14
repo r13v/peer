@@ -15,6 +15,7 @@
 			"!!.claude",
 			"!!.agents",
 			"!.claude-plugin/marketplace.json",
+			"!.github/plugin/marketplace.json",
 			"!plugin/.claude-plugin/plugin.json",
 			"!codex-plugin/.codex-plugin/plugin.json",
 			"!copilot-plugin/plugin.json",
