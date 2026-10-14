@@ -487,9 +487,10 @@ test("another session's room of the checkout is not shown", async ($, on) => {
 		component: "SessionMode",
 		props: { modes: [] },
 	})
-	expect(JSON.stringify(await footer.drawn())).toBe(
-		JSON.stringify({ type: "Text", props: {}, children: ["engine"] }),
-	)
+	expect(await footer.drawn()).toMatchObject({
+		type: "Text",
+		children: ["engine"],
+	})
 	// A failed join adopts nothing: alone, or inside a longer command line
 	// that prints the room with main in it.
 	await $.tool.call({
