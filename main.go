@@ -41,14 +41,14 @@ var workerInstructions []byte
 //go:embed instructions/board.md
 var boardInstructions []byte
 
-const usage = "usage: peer, peer --version, peer update, peer skills flow|main|member|worker|board, peer start NAME, peer join|invite|kick ID ROLE, peer send|wait|end ID --as ROLE, peer send ID --as ROLE --text TEXT, peer wait ID --as ROLE --timeout DURATION, peer ack ID --as ROLE --upto MESSAGE_ID, peer forward ID --as main --codex-thread UUID, peer status [ID], peer history, peer watch [ID], peer log ID [--json], peer memberlog ID ROLE [--follow], or peer board create|list|inspect|apply|import-image|schema"
+const usage = "usage: peer, peer --version, peer update, peer skills flow|main|member|worker|board, peer start NAME, peer join|invite|kick ID ROLE, peer send|wait|end ID --as ROLE, peer send ID --as ROLE --text TEXT, peer wait ID --as ROLE --timeout DURATION, peer ack ID --as ROLE --upto MESSAGE_ID, peer forward ID --as main --codex-thread UUID|--copilot-session UUID, peer status [ID], peer history, peer watch [ID], peer log ID [--json], peer memberlog ID ROLE [--follow], or peer board create|list|inspect|apply|import-image|schema"
 
 // sendTextHint names the ways send takes a message, for agents that
 // guess --message or a positional text.
 const sendTextHint = "peer send takes the message with --text TEXT or on stdin"
 
 // valueFlags take the next argument as their value, which can be any text.
-var valueFlags = []string{"as", "to", "agent", "brief", "model", "upto", "codex-thread", "text", "timeout", "title", "path", "room", "frame", "ids", "format", "caption"}
+var valueFlags = []string{"as", "to", "agent", "brief", "model", "upto", "codex-thread", "copilot-session", "text", "timeout", "title", "path", "room", "frame", "ids", "format", "caption"}
 
 // asksHelp reports whether args ask for the usage: peer help, or --help or
 // -h in any command, but not as the value of a flag such as --text.
@@ -121,6 +121,9 @@ func run(args []string, in io.Reader, out io.Writer, cwd string) error {
 	if args[0] == "codex-hook" { // hidden: the Codex plugin's hooks run it
 		return codexHook(in, out)
 	}
+	if args[0] == "copilot-start" { // hidden: the Copilot plugin's extension runs it
+		return copilotStart(in, out)
+	}
 	if args[0] == "skills" {
 		docs := map[string][]byte{"flow": flowInstructions, "main": mainInstructions, "member": memberInstructions, "worker": workerInstructions, "board": boardInstructions}
 		if len(args) != 2 || docs[args[1]] == nil {
@@ -149,6 +152,7 @@ func run(args []string, in io.Reader, out io.Writer, cwd string) error {
 	model := fs.String("model", "", "model for the invited member's CLI")
 	upto := fs.String("upto", "", "message ID that ack marks read up to")
 	thread := fs.String("codex-thread", "", "Codex session UUID that forward queues messages to")
+	copilotSession := fs.String("copilot-session", "", "Copilot session UUID whose extension forward hands messages to over stdio")
 	var text *string // send reads stdin unless --text is given
 	fs.Func("text", "message text for send instead of stdin", func(v string) error {
 		text = &v
@@ -238,11 +242,11 @@ func run(args []string, in io.Reader, out io.Writer, cwd string) error {
 		}
 		return s.join(id, member{Role: role, Agent: *agent}, out)
 	case "invite":
-		if err := needRole("invite ID ROLE --as main --agent codex|claude|pi [--worker [--worktree]] [--model MODEL] [--brief TEXT]"); err != nil {
+		if err := needRole("invite ID ROLE --as main --agent codex|claude|copilot|pi [--worker [--worktree]] [--model MODEL] [--brief TEXT]"); err != nil {
 			return err
 		}
 		if !slices.Contains(inviteAgents, *agent) {
-			return errors.New("invite launches codex, claude or pi; to add another agent, give it a join prompt")
+			return errors.New("invite launches codex, claude, copilot or pi; to add another agent, give it a join prompt")
 		}
 		if *worktree && !*worker {
 			return errors.New("--worktree is for a worker; add --worker")
@@ -311,13 +315,16 @@ func run(args []string, in io.Reader, out io.Writer, cwd string) error {
 		if err := needID("forward"); err != nil {
 			return err
 		}
-		if *actor != mainRole || !codexThread.MatchString(*thread) {
-			return errors.New("usage: peer forward ID --as main --codex-thread UUID; it delivers main's messages to the Codex session with that UUID")
-		}
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
-		return s.forward(ctx, id, *actor, *thread, out)
-	case "drive": // hidden: invite runs it for a codex or claude member
+		switch {
+		case *actor == mainRole && codexThread.MatchString(*thread) && *copilotSession == "":
+			return s.forward(ctx, id, *actor, *thread, nil, out)
+		case *actor == mainRole && codexThread.MatchString(*copilotSession) && *thread == "":
+			return s.forward(ctx, id, *actor, *copilotSession, in, out)
+		}
+		return errors.New("usage: peer forward ID --as main --codex-thread UUID|--copilot-session UUID; it delivers main's messages to the Codex session with that UUID, or over stdio to the Copilot extension of that session")
+	case "drive": // hidden: invite runs it for a codex, claude or copilot member
 		if err := needRole("drive ID ROLE [--brief TEXT]"); err != nil {
 			return err
 		}

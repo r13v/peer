@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -98,7 +99,7 @@ func runForward(t *testing.T, s *store, id string) (out *syncBuffer, stop func()
 	ctx, cancel := context.WithCancel(context.Background())
 	out = &syncBuffer{}
 	done := make(chan error, 1)
-	go func() { done <- s.forward(ctx, id, mainRole, testThread, out) }()
+	go func() { done <- s.forward(ctx, id, mainRole, testThread, nil, out) }()
 	eventually(t, "forward to be ready", func() bool { return strings.Contains(out.String(), `"ready"`) })
 	stopped := false
 	var err error
@@ -259,14 +260,14 @@ func TestForwardAgainDeliversEndOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out bytes.Buffer
-	if err := s.forward(context.Background(), v.ID, mainRole, testThread, &out); err != nil {
+	if err := s.forward(context.Background(), v.ID, mainRole, testThread, nil, &out); err != nil {
 		t.Fatal(err)
 	}
 	log := queued(codex)
 	if strings.Count(log, "last word") != 1 || strings.Count(log, "has ended") != 1 || strings.Count(log, "---") != 1 {
 		t.Fatalf("want the last message and the end in one turn:\n%s", log)
 	}
-	if err := s.forward(context.Background(), v.ID, mainRole, testThread, &out); err != nil || !strings.HasSuffix(out.String(), `{"status":"done"}`+"\n") {
+	if err := s.forward(context.Background(), v.ID, mainRole, testThread, nil, &out); err != nil || !strings.HasSuffix(out.String(), `{"status":"done"}`+"\n") {
 		t.Fatalf("third forward = %q, %v", out.String(), err)
 	}
 }
@@ -505,5 +506,152 @@ func TestCodexHookKeepsBindingsOfParallelStarts(t *testing.T) {
 	bindings, err := readBindings(filepath.Join(data, "sessions", testThread))
 	if err != nil || len(bindings) != 2 {
 		t.Fatalf("bindings after two parallel starts = %+v, %v", bindings, err)
+	}
+}
+
+// stdioForward runs forward over stdio for main of room id, as the Copilot
+// extension does, and returns the pipe the test answers on.
+func stdioForward(t *testing.T, s *store, id string) (in *io.PipeWriter, out *syncBuffer, done chan error) {
+	t.Helper()
+	r, w := io.Pipe()
+	out, done = &syncBuffer{}, make(chan error, 1)
+	go func() { done <- s.forward(context.Background(), id, mainRole, testThread, r, out) }()
+	t.Cleanup(func() { _ = w.Close() })
+	eventually(t, "forward to be ready", func() bool { return strings.Contains(out.String(), `"ready"`) })
+	return w, out, done
+}
+
+// handedBatch waits for the nth batch forward hands over and returns its ID.
+func handedBatch(t *testing.T, out *syncBuffer, n int) string {
+	t.Helper()
+	var id string
+	eventually(t, "batch "+strconv.Itoa(n), func() bool {
+		seen := 0
+		for line := range strings.Lines(out.String()) {
+			var ev struct{ Status, Batch string }
+			if json.Unmarshal([]byte(line), &ev) == nil && ev.Status == "batch" {
+				if seen++; seen == n {
+					id = ev.Batch
+					return true
+				}
+			}
+		}
+		return false
+	})
+	return id
+}
+
+// TestStdioForwardMarksOnlyAckedBatches checks that a batch handed to the
+// Copilot extension is marked read only once the extension acks it, so a
+// refused, unanswered or misanswered batch reaches main later.
+func TestStdioForwardMarksOnlyAckedBatches(t *testing.T) {
+	old := forwardRetry
+	forwardRetry = 10 * time.Millisecond
+	t.Cleanup(func() { forwardRetry = old })
+	repo := testRepo(t)
+	v := startRoom(t, repo, "stdio")
+	s, err := openStore(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := invoke(repo, "one", "send", v.ID, "--as", "reader"); err != nil {
+		t.Fatal(err)
+	}
+	in, out, done := stdioForward(t, s, v.ID)
+	first := handedBatch(t, out, 1)
+	fmt.Fprintf(in, `{"nack":%q,"error":"session busy"}`+"\n", first)
+	if again := handedBatch(t, out, 2); again != first {
+		t.Fatalf("a refused batch came back as %s, want %s", again, first)
+	}
+	if n := unread(t, repo, v.ID, mainRole); n != 1 {
+		t.Fatalf("after nack: unread %d, want 1", n)
+	}
+	fmt.Fprintf(in, `{"ack":%q}`+"\n", first)
+	eventually(t, "ack to mark the batch", func() bool { return unread(t, repo, v.ID, mainRole) == 0 })
+
+	if _, err := invoke(repo, "two", "send", v.ID, "--as", "reader"); err != nil {
+		t.Fatal(err)
+	}
+	handedBatch(t, out, 3)
+	fmt.Fprintln(in, `{"ack":"some-other-batch"}`)
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "another batch") {
+			t.Fatalf("forward = %v; want the wrong ack refused", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("forward went on after an ack for another batch")
+	}
+	if n := unread(t, repo, v.ID, mainRole); n != 1 {
+		t.Fatalf("after a wrong ack: unread %d, want 1", n)
+	}
+
+	// A closed stdin, as when the extension exits, leaves the batch unread
+	// and frees main's delivery for the next reader; while idle too.
+	in, out, done = stdioForward(t, s, v.ID)
+	fmt.Fprintf(in, `{"ack":%q}`+"\n", handedBatch(t, out, 1))
+	eventually(t, "ack to mark the batch", func() bool { return unread(t, repo, v.ID, mainRole) == 0 })
+	_ = in.Close()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("idle forward after stdin closed = %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("an idle forward outlived its closed stdin")
+	}
+	if isHeld, err := s.forwarding(v.ID, mainRole); err != nil || isHeld {
+		t.Fatalf("delivery still held after an idle stdin closed: %v, %v", isHeld, err)
+	}
+	if _, err := invoke(repo, "three", "send", v.ID, "--as", "reader"); err != nil {
+		t.Fatal(err)
+	}
+	in, out, done = stdioForward(t, s, v.ID)
+	handedBatch(t, out, 1)
+	_ = in.Close()
+	if err := <-done; err != nil {
+		t.Fatalf("forward after stdin closed = %v", err)
+	}
+	if n := unread(t, repo, v.ID, mainRole); n != 1 {
+		t.Fatalf("after stdin closed: unread %d, want 1", n)
+	}
+	if isHeld, err := s.forwarding(v.ID, mainRole); err != nil || isHeld {
+		t.Fatalf("delivery still held after stdin closed: %v, %v", isHeld, err)
+	}
+}
+
+// TestStdioForwardDeliversEndOnce checks that the room's end, with its last
+// messages, reaches main once: after its ack, forward exits, and another
+// forward reports done instead of handing it over again.
+func TestStdioForwardDeliversEndOnce(t *testing.T) {
+	repo := testRepo(t)
+	v := startRoom(t, repo, "stdio-end")
+	s, err := openStore(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := invoke(repo, "last words", "send", v.ID, "--as", "reader"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := invoke(repo, "", "end", v.ID, "--as", "user"); err != nil {
+		t.Fatal(err)
+	}
+	r, in := io.Pipe()
+	t.Cleanup(func() { _ = in.Close() })
+	out, done := &syncBuffer{}, make(chan error, 1)
+	go func() { done <- s.forward(context.Background(), v.ID, mainRole, testThread, r, out) }()
+	if id := handedBatch(t, out, 1); id != v.ID+"-end" {
+		t.Fatalf("the end came as batch %s", id)
+	}
+	if !strings.Contains(out.String(), "last words") {
+		t.Fatalf("the end lacks the last messages: %s", out.String())
+	}
+	fmt.Fprintf(in, `{"ack":%q}`+"\n", v.ID+"-end")
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	var again bytes.Buffer
+	if err := s.forward(context.Background(), v.ID, mainRole, testThread, strings.NewReader(""), &again); err != nil || strings.TrimSpace(again.String()) != `{"status":"done"}` {
+		t.Fatalf("second forward = %q, %v; want done", again.String(), err)
 	}
 }

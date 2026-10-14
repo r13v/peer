@@ -1,0 +1,72 @@
+:root {
+	color-scheme: light dark;
+	--fg: #1f2328;
+	--muted: #656d76;
+	--line: #d0d7de;
+	--card: #f6f8fa;
+	--bg: #ffffff;
+}
+@media (prefers-color-scheme: dark) {
+	:root {
+		--fg: #e6edf3;
+		--muted: #8d96a0;
+		--line: #30363d;
+		--card: #161b22;
+		--bg: #0d1117;
+	}
+}
+body {
+	margin: 0;
+	background: var(--bg);
+	color: var(--fg);
+	font:
+		14px / 1.45 system-ui,
+		sans-serif;
+}
+header {
+	position: sticky;
+	top: 0;
+	display: flex;
+	gap: 8px;
+	align-items: baseline;
+	padding: 10px 16px;
+	background: var(--bg);
+	border-bottom: 1px solid var(--line);
+}
+h1 {
+	margin: 0;
+	font-size: 15px;
+}
+#state {
+	color: var(--muted);
+	font-size: 12px;
+}
+main {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	padding: 12px 16px;
+}
+.msg {
+	padding: 8px 10px;
+	border: 1px solid var(--line);
+	border-left: 4px solid var(--who);
+	border-radius: 6px;
+	background: var(--card);
+}
+.msg.peer {
+	padding: 2px 10px;
+	border: 0;
+	background: none;
+	color: var(--muted);
+	font-size: 12px;
+}
+.meta {
+	color: var(--muted);
+	font-size: 12px;
+	margin-bottom: 4px;
+}
+.text {
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+}

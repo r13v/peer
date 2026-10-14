@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -184,11 +185,17 @@ func TestDriveNeedsCompletedTurn(t *testing.T) {
 	}
 }
 
-func TestClaudeResultEndsTurn(t *testing.T) {
+// TestResultEndsTurn checks that only a successful result completes a turn,
+// so a failed Claude or Copilot turn leaves its batch unread.
+func TestResultEndsTurn(t *testing.T) {
 	for events, want := range map[string]bool{
 		`{"type":"result","subtype":"success","is_error":false}`: true,
 		`{"type":"result","subtype":"success","is_error":true}`:  false,
 		`{"type":"assistant","message":{}}`:                      false,
+		`{"type":"result","sessionId":"s","exitCode":0}`:         true,
+		`{"type":"result","sessionId":"s","exitCode":1}`:         false,
+		`{"type":"result","sessionId":"s","usage":{}}`:           false,
+		`{"type":"assistant.turn_end","data":{"turnId":"0"}}`:    false,
 	} {
 		if _, got := copyEvents(strings.NewReader(events+"\n"), new(syncBuffer)); got != want {
 			t.Errorf("%s: completed = %v, want %v", events, got, want)
@@ -313,6 +320,22 @@ func TestMemberResumeRepeatsLimits(t *testing.T) {
 	if joined = strings.Join(argv, " "); !strings.HasSuffix(joined, "--session-id S -- p") {
 		t.Errorf("claude's first turn does not name its session: %s", joined)
 	}
+
+	// Copilot resumes with the same --session-id and reads the batch from
+	// stdin, so a resumed turn has no -p.
+	argv, err = memberArgs(s, member{Agent: "copilot", Model: "m1", Effort: "low"}, "/repo", "", "S", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined = strings.Join(argv, " ")
+	for _, want := range []string{"-C /repo", "--session-id S", "--sandbox", "--add-dir /store/room", "--excluded-tools create edit", "--deny-tool write", "--model m1", "--reasoning-effort low"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("copilot resume lacks %s: %s", want, joined)
+		}
+	}
+	if slices.Contains(argv, "-p") {
+		t.Errorf("copilot resume takes a prompt argument: %s", joined)
+	}
 }
 
 func TestExitReasonIsFromLatestRun(t *testing.T) {
@@ -349,5 +372,52 @@ func TestHelpAndSendHints(t *testing.T) {
 		if _, err := invoke(repo, "", args...); err == nil || !strings.Contains(err.Error(), "--text TEXT or on stdin") {
 			t.Fatalf("%q: %v; want a hint", args, err)
 		}
+	}
+}
+
+// TestStoppedDriveLetsAgentCleanUp checks that a stopped drive sends the
+// agent TERM rather than KILL, so the agent can stop the commands it ran
+// outside the member's process group, as Copilot does.
+func TestStoppedDriveLetsAgentCleanUp(t *testing.T) {
+	dir := fakeTurns(t)
+	// The agent's child stands for a command it runs outside the member's
+	// group; the agent stops it only on TERM.
+	script := "#!/bin/sh\nsleep 30 >/dev/null 2>&1 &\nchild=$!\necho $child > \"" + dir + "/child\"\ntrap 'kill $child; wait $child; exit 0' TERM\necho > \"" + dir + "/turn-1\"\nwait\n"
+	if err := os.WriteFile(filepath.Join(dir, "codex"), []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	repo := testRepo(t)
+	v := startRoom(t, repo, "stop")
+	if _, err := invoke(repo, "", "invite", v.ID, "critic", "--as", "main", "--agent", "codex"); err != nil {
+		t.Fatal(err)
+	}
+	s, err := openStore(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- s.drive(ctx, v.ID, "critic", "", new(syncBuffer)) }()
+	if _, err := invoke(repo, "start", "send", v.ID, "--as", "main", "--to", "critic"); err != nil {
+		t.Fatal(err)
+	}
+	turnRecord(t, dir, 1)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("drive outlived its stop")
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "child"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = syscall.Kill(child, syscall.SIGKILL) })
+	if err := syscall.Kill(child, 0); !errors.Is(err, syscall.ESRCH) {
+		t.Fatal("the agent's child outlived the stop: the agent got no TERM to clean up with")
 	}
 }

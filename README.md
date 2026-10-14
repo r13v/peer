@@ -11,11 +11,11 @@ Built for a specific use case: a second (or third) opinion on a change without l
 ## Features
 
 - One room per task, shared by all agents in the same Git checkout
-- Main starts background members on `claude`, `codex` or `pi`, each with a free-form role and an optional model
-- Any other agent, for example Copilot, joins with a prompt that main gives you, and first reads the earlier messages
+- Main starts background members on `claude`, `codex`, `copilot` or `pi`, each with a free-form role and an optional model
+- Any other agent, for example Cursor, joins with a prompt that main gives you, and first reads the earlier messages
 - Workers edit their own zone of the task, in the shared checkout or in an isolated Git worktree
 - Messages go to all participants or to one with `--to ROLE`
-- Members cannot edit files by default: Codex and Claude Code run them in their sandbox
+- Members cannot edit files by default: Codex, Claude Code and Copilot run them in their sandbox
 - Main or you can kick a member and stop its agent
 - Several active rooms in one checkout at the same time
 - TUI (`peer` with no arguments): all rooms from all checkouts, transcripts, background member logs, search
@@ -34,7 +34,7 @@ Built for a specific use case: a second (or third) opinion on a change without l
 - macOS or Linux (amd64 or arm64)
 - Git
 - At least two agents that can run shell commands, for example Claude Code and Codex
-- For a background member, its CLI on your `PATH`: `claude`, `codex` or [`pi`](https://github.com/earendil-works/pi)
+- For a background member, its CLI on your `PATH`: `claude`, `codex`, `copilot` ([Copilot CLI](https://github.com/github/copilot-cli) 1.0.97 or later) or [`pi`](https://github.com/earendil-works/pi)
 - Node.js, to install the agent skill
 
 ## Installation
@@ -91,6 +91,14 @@ codex plugin add peer@r13v-codex
 
 Then trust its hooks with `/hooks` in Codex, and remove the agent skill there: `npx skills remove peer -g -a codex`. See [codex-plugin/README.md](codex-plugin/README.md).
 
+**Copilot CLI plugin (optional):** as main, Copilot gets room messages as turns of their own instead of running `peer wait`, and the GitHub Copilot app shows the room on a canvas. It needs Copilot's experimental features. It brings its own `peer` skill, so Copilot does not need the agent skill above.
+
+```bash
+copilot plugin install r13v/peer:copilot-plugin
+```
+
+Then run `/experimental on` in Copilot, and remove the agent skill there: `npx skills remove peer -g -a github-copilot`. See [copilot-plugin/README.md](copilot-plugin/README.md).
+
 **Updating:**
 
 ```bash
@@ -109,6 +117,9 @@ claude plugin update peer@r13v
 
 # the Codex plugin
 codex plugin marketplace upgrade r13v-codex
+
+# the Copilot CLI plugin
+copilot plugin update peer
 ```
 
 Each release of `peer` sets the plugins' version, so update them with the CLI. Then restart the agent apps. In Codex, trust the updated hooks again with `/hooks`.
@@ -147,7 +158,7 @@ Pick a member's model. Main passes it to the agent's CLI with `--model`:
 /peer add CSV export; invite a reader on codex with gpt-5
 ```
 
-A member without a model runs at medium effort on the latest Opus for Claude, or on the latest Sol model in Codex's cached model list for Codex, whatever model your settings name.
+A member without a model runs at medium effort on the latest Opus for Claude, or on the latest Sol model in Codex's cached model list for Codex, whatever model your settings name. A Copilot member uses the model that Copilot picks.
 
 Split the work between workers. Main leads, gives each worker its part and integrates the result:
 
@@ -178,14 +189,14 @@ Add any agent yourself, for example Copilot: paste main's join prompt into that 
 ## How It Works
 
 1. **Start.** Main runs `peer start ROOM`. This creates a room for the task.
-2. **Add members.** Main runs `peer invite ROOM ROLE --as main --agent codex` to start `codex`, `claude` or `pi` in the background in the same checkout. Any other agent runs `peer join ROOM ROLE`. Main gets a notice from `peer` for each member that joins.
+2. **Add members.** Main runs `peer invite ROOM ROLE --as main --agent codex` to start `codex`, `claude`, `copilot` or `pi` in the background in the same checkout. Any other agent runs `peer join ROOM ROLE`. Main gets a notice from `peer` for each member that joins.
 3. **Discuss.** The agents send messages with `peer send` and receive them with `peer wait`. A message goes to all participants, or to one with `--to ROLE`. `wait` blocks until a message comes, the room ends or the agent is kicked. Then it returns all the messages that came, up to 16 at a time. `--timeout 5m` limits the wait, for an agent whose shell tool stops long commands. `--timeout 0` checks once and returns immediately, for an agent that is busy. When main runs on an agent that can run a background command and wake when the command exits, such as Claude Code, main keeps a `wait` running between turns. Thus main reads what you send from `peer`.
-   A background Codex or Claude Code member does not run `wait`. `peer` reads the room for it and starts the member's session with the first batch of messages and resumes it with each later batch as a new turn; between turns the member is idle and costs no tokens. The member answers with `peer send` and ends its turn. Its role refuses `wait`, so the role keeps one reader. A batch is marked read once its turn succeeds; a failed turn stops the member, and main's notice gives the agent's last error. Pi has no session to resume, so a pi member keeps calling `wait`.
+   A background Codex, Claude Code or Copilot member does not run `wait`. `peer` reads the room for it and starts the member's session with the first batch of messages and resumes it with each later batch as a new turn; between turns the member is idle and costs no tokens. The member answers with `peer send` and ends its turn. Its role refuses `wait`, so the role keeps one reader. A batch is marked read once its turn succeeds; a failed turn stops the member, and main's notice gives the agent's last error. Pi has no session to resume, so a pi member keeps calling `wait`.
 4. **Implement.** Main edits files, and so do the workers that it invited.
 5. **Review.** The members inspect the diff and report findings. Main fixes them and asks for another review.
 6. **End.** Main runs `peer end`. After this, nobody can send messages to the room. Start a new room for the next task.
 
-`peer` does not type into idle chats, except the background Codex and Claude Code members that it resumes. Every other agent calls `wait` when it needs a reply.
+`peer` does not type into idle chats, except the background Codex, Claude Code and Copilot members that it resumes. Every other agent calls `wait` when it needs a reply.
 
 ### Room Lifecycle
 
@@ -231,12 +242,14 @@ A worker runs without limits: no sandbox, no approvals, all tools, and the check
 |-------|--------------|
 | Codex | `--dangerously-bypass-approvals-and-sandbox` |
 | Claude Code | `--permission-mode bypassPermissions` |
+| Copilot | `--yolo` |
 | pi | `--approve`, with its default and extension tools |
 
-A background member gets an instruction not to edit files and the limits below. It can run any shell command, such as tests or scripts. Codex and Claude Code run its commands in their sandbox. By default, the sandbox lets commands write only the checkout, temp directories and the checkout's `peer` store. Commands can use the network, including `localhost`, so a member can send what it reads anywhere. The agent's user settings can widen these limits. Neither agent asks for approval.
+A background member gets an instruction not to edit files and the limits below. It can run any shell command, such as tests or scripts. Codex, Claude Code and Copilot run its commands in their sandbox. By default, the sandbox lets commands write only the checkout, temp directories and the checkout's `peer` store; Copilot's limits differ a little, see below. Commands can use the network, including `localhost`, so a member can send what it reads anywhere. The agent's user settings can widen these limits. No agent asks for approval.
 
 - **Codex** runs in its `workspace-write` sandbox.
 - **Claude Code** runs Bash in its sandbox and stops if the sandbox is not available. Bash is allowed outright, so commands that the sandbox does not auto-allow, such as heredocs, still run in the sandbox instead of being denied; commands in your `sandbox.excludedCommands` run outside it without approval. It gets all tools but Edit, Write and NotebookEdit, including WebFetch, WebSearch, subagents, tasks and LSP. It loads no MCP servers and ignores the checkout's `.claude` settings.
+- **Copilot** runs shell commands in its sandbox (`--sandbox`). It writes the checkout, `$TMPDIR` and the `peer` store, which `--add-dir` adds, but not `/tmp` or the rest of your home directory; the network is open, but not `localhost`. It gets all tools but `create` and `edit`, and `--deny-tool write` keeps its subagents from writing files too. It runs without the built-in GitHub MCP servers, but loads your own MCP servers, plugins and the checkout's instructions.
 - **Pi** runs without a sandbox, because pi has none. It gets the `read`, `grep`, `find`, `ls` and `bash` tools. It loads your global extensions and skills, uses your default model unless main passes `--model` and ignores the checkout's `.pi` settings. Its shell commands and extensions keep the permissions of your account and can change any file that you can access.
 
 > **Note:** Shell commands can still change files in the checkout, so the "do not edit" rule is only an instruction. So are a worker's zone and the ban on commits: a worker in a worktree can still change the checkout or another worktree through its tools or the shared Git history. If you need a guarantee, use the agent's read-only or Plan mode.
@@ -254,7 +267,7 @@ Run `peer` with no arguments to open the TUI. Run the commands below inside the 
 | Command | Action |
 |---------|--------|
 | `peer start ROOM [--agent NAME]` | Start a room with you as main and print it as JSON |
-| `peer invite ROOM ROLE --as main --agent codex\|claude\|pi [--worker [--worktree]] [--model MODEL] [--brief TEXT]` | Add a member or a worker and start its agent |
+| `peer invite ROOM ROLE --as main --agent codex\|claude\|copilot\|pi [--worker [--worktree]] [--model MODEL] [--brief TEXT]` | Add a member or a worker and start its agent |
 | `peer join ROOM ROLE [--agent NAME]` | Join a room as a member |
 | `peer kick ROOM ROLE --as main\|user` | Remove a member from the room and stop its agent if `peer` started it; run it again to retry the stop |
 | `peer send ROOM --as ROLE [--to ROLE] [--text TEXT]` | Send a message from `--text` or stdin to all participants or to one; prints its `id` and how many messages are `unread` for you |

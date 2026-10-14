@@ -31,6 +31,7 @@ These rules apply to the whole checkout. Work from the repository root.
 - [docs/BOARD.md](docs/BOARD.md) — before you change boards: `internal/board`, `internal/boardhttp`, `web/`, `peer board` or the plugin's board preview. The board HTTP and CLI contract: [docs/BOARD_API.md](docs/BOARD_API.md).
 - [plugin/README.md](plugin/README.md) — before you change the Claude Code plugin.
 - [codex-plugin/README.md](codex-plugin/README.md) — before you change the Codex plugin.
+- [copilot-plugin/README.md](copilot-plugin/README.md) — before you change the Copilot CLI plugin.
 - [instructions/](instructions/) — the texts that agents get from `peer skills`. Read them before you change a command that they describe.
 
 ## Code review rules
