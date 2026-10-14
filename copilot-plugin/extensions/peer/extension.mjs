@@ -6,7 +6,13 @@
 // JSON-RPC channel.
 import { execFile, spawn } from "node:child_process"
 import { createHash, randomBytes } from "node:crypto"
-import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs"
+import {
+	mkdirSync,
+	readdirSync,
+	readFileSync,
+	renameSync,
+	writeFileSync,
+} from "node:fs"
 import { createServer } from "node:http"
 import { homedir } from "node:os"
 import { dirname, join } from "node:path"
@@ -56,19 +62,33 @@ function bind(sessionId, room) {
 	const dir = bindingsDir(sessionId)
 	mkdirSync(dir, { recursive: true })
 	const b = { repo: room.repo, room: room.id }
-	writeFileSync(join(dir, `${keyOf(b)}.json`), JSON.stringify(b))
+	// Written aside and renamed, so a crash never leaves half a binding.
+	const path = join(dir, `${keyOf(b)}.json`)
+	writeFileSync(`${path}.tmp`, JSON.stringify(b))
+	renameSync(`${path}.tmp`, path)
 }
 
+// bindings skips a file it cannot read, so the session's other rooms still
+// come back.
 function bindings(sessionId) {
+	const dir = bindingsDir(sessionId)
+	let files
 	try {
-		return readdirSync(bindingsDir(sessionId))
-			.filter((f) => f.endsWith(".json"))
-			.map((f) =>
-				JSON.parse(readFileSync(join(bindingsDir(sessionId), f), "utf8")),
-			)
+		files = readdirSync(dir).filter((f) => f.endsWith(".json"))
 	} catch {
 		return []
 	}
+	return files.flatMap((f) => {
+		try {
+			const b = JSON.parse(readFileSync(join(dir, f), "utf8"))
+			return typeof b?.repo === "string" && typeof b?.room === "string"
+				? [b]
+				: []
+		} catch (err) {
+			log(`binding ${f}: ${err.message}`)
+			return []
+		}
+	})
 }
 
 /**
