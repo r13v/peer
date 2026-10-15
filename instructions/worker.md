@@ -30,7 +30,19 @@ Your prompt says where you work:
 - **In the shared checkout**, other workers and main edit the same tree. A build or test can fail because of their unfinished work; report such a failure to main instead of fixing it.
 - **In your own worktree**, only you edit the tree, but the Git history, databases, services, ports and credentials are still shared with the checkout. Files that Git ignores, such as `.env` or installed dependencies, are not in the worktree; ask main how to run the project rather than copying them.
 
-When you finish, or stop because you are blocked, send main one message that starts with `done:` and lists the files you changed, what you did, the checks you actually ran and their result, and open questions. Then keep waiting, or end your turn when `peer` delivers your messages: main may send review findings or the next task. Fix findings in your zone and report again.
+Before you edit, read the code that the task names and confirm its premises. If a premise is false, or the task cannot work the way main decided it, stop and report `STATUS: BLOCKED` with the evidence, a path and a symbol. Do not design around a settled decision. Decide other judgment calls from the task's goal, then the project's rules, then the surrounding code. When a call is still 50/50, take the smaller option that is easier to revert, and record it.
+
+When you finish, or stop because you are blocked, send main one message that starts with `done:` and has these lines:
+
+- `STATUS: DONE` or `STATUS: BLOCKED`.
+- `APPROACH:` the design you built, in two to five points.
+- `CHANGED:` one line per file, with what changed.
+- `VALIDATION:` each check you actually ran and its result.
+- `DECISIONS:` the judgment calls that the task did not settle, or `none`.
+- `DEVIATIONS:` where the result differs from the task or the agreed approach, and why, or `none`.
+- `QUESTIONS:` open questions, or `none`.
+
+Then keep waiting, or end your turn when `peer` delivers your messages: main may send review findings or the next task. Fix findings in your zone and report again.
 
 When the task uses a board, run `peer skills board` and follow it.
 
