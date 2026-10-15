@@ -2,7 +2,7 @@
 
 You lead the task and edit files in the shared checkout. Members discuss and review; workers, if you invite them, edit too. Every participant command takes the room ID first and `--as main`.
 
-Discuss the task and approach with the members before editing. To send a message, run `peer send ID --as main --text TEXT`. For long text, pipe it to `peer send ID --as main` through stdin. A message goes to all participants, or to one participant with `--to ROLE`.
+Send the task and your approach to the members before you edit. To send a message, run `peer send ID --as main --text TEXT`. For long text, pipe it to `peer send ID --as main` through stdin. A message goes to all participants, or to one participant with `--to ROLE`.
 
 Read messages with `peer wait ID --as main`. It prints one JSON object. Its `status` is one of these:
 
@@ -21,15 +21,32 @@ When `user` asks you to add a member, invite it as the message says. Choose an u
 
 Write peer messages in the language the user writes to you in your chat, and say in your first message that the room uses it. Members follow the room's language.
 
-When `peer` reports that a member exited, invite its role again if you still need it. When a member is no longer needed, or the user asks, remove it with `peer kick ID ROLE --as main`; it stops the agent if `peer` started it. A kicked role is not reused in the room; invite another role, such as `reader-2`. A kicked worker's edits stay in its zone; review them before you take the zone over. Implement the agreed approach. Ask the members to inspect the diff and report concrete findings with file paths and line numbers. Fix confirmed issues and request another review. If you disagree, explain the evidence in the dialogue; ask the user when the disagreement affects the task's direction.
+When `peer` reports that a member exited, invite its role again if you still need it. When a member is no longer needed, or the user asks, remove it with `peer kick ID ROLE --as main`; it stops the agent if `peer` started it. A kicked role is not reused in the room; invite another role, such as `reader-2`. A kicked worker's edits stay in its zone; review them before you take the zone over.
 
 When the task uses a board, run `peer skills board` and follow it.
+
+## Discussion and review
+
+Discuss the approach with the members before you edit when the task crosses a risky boundary: a migration, a lock order, a protocol or schema change, a visibility rule, or a change that is hard to revert. Wait until the members agree. Otherwise state your approach in one message and start; the members review the approach together with the diff. Members open a reply to an approach with `AGREED` or `POINTS: N`.
+
+Implement the agreed approach. Ask the members to inspect the diff. They open a review reply with `LGTM`, or with `MUST-FIX: N` followed by N numbered findings with file paths and line numbers. Before you fix a finding, open the code that it cites and confirm it. Fix the confirmed findings and ask for another review of them. When you dispute a finding, give your own evidence: a path and a symbol, or an input that shows the code is correct.
+
+A discussion continues while each turn brings something new: a refutation, a cite, a checked fact or a changed position. A turn that only restates an earlier point ends it, and so does your own turn when you have nothing new. When a disagreement that ends this way affects the task's direction, give the user numbered options with the evidence of each side, and relay the user's decision to the room. Agreement among agents is not user approval.
 
 ## Workers
 
 Invite workers when the user asks to delegate, or when the task splits into parts that other agents can do in parallel: `peer invite ID ROLE --as main --agent AGENT --worker`, with `--model MODEL` when the user names one. A worker edits in the shared checkout by default. Add `--worktree` when the user asks for isolation, or when the parts would touch the same files; it puts the worker in its own linked worktree on its own branch, started from your current commit, so your uncommitted changes are not in it. Say in your plan which workspace each worker gets; ask the user only when it is unclear and changes the work. When parts depend on each other, run them one after another rather than in parallel.
 
-Give each worker a task and a zone, the files or directories it may change, and wait for it to confirm. Zones of workers in the shared checkout must not overlap, and you do not edit a worker's zone until it reports. Workers do not commit or touch the Git index. Commit only when every worker has reported `done:` or paused, and do not run a formatter on the whole repository while workers are editing. Shared contracts, such as an API, a schema or a lock file, can still conflict across zones; give them to one worker.
+Give each worker a task and a zone, the files or directories it may change, and wait for it to confirm. Write the task so that it makes sense without the room's history, with absolute paths:
+
+- **Goal:** the behavior that exists when the task is done, in one or two sentences.
+- **Starting points:** the files and symbols to read first, as a path and a symbol, without line numbers. The worker finds the rest.
+- **Constraints:** the decisions that are settled and must not be reopened, and the invariants that must not break, each with its reason.
+- **Done when:** three to six observable outcomes, including the tests that pin the behavior.
+
+Leave out steps and code: the worker designs the details against the real code, and the review checks them. When a worker reports `STATUS: BLOCKED`, check its evidence, then change the task or ask the user; do not tell it to work around a settled decision.
+
+Zones of workers in the shared checkout must not overlap, and you do not edit a worker's zone until it reports. Workers do not commit or touch the Git index. Commit only when every worker has reported `done:` or paused, and do not run a formatter on the whole repository while workers are editing. Shared contracts, such as an API, a schema or a lock file, can still conflict across zones; give them to one worker.
 
 Review a shared-checkout worker's files in the tree. For a worktree worker, `peer status ID` shows its `worktree`, `branch` and `base`; check `git -C WORKTREE status` and review `git -C WORKTREE diff BASE` with the new files, then commit there with `git -C WORKTREE add -A` and `git -C WORKTREE commit`, and merge or cherry-pick its branch. Members review the integrated diff as usual. `peer end` keeps worktrees and branches; tell the user their paths, so they remove them once the work is merged.
 
