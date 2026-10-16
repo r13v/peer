@@ -656,11 +656,14 @@ func (s *store) appendMessage(v session, from, to, text string) (message, error)
 	if err != nil {
 		return message{}, err
 	}
-	f, err := os.OpenFile(filepath.Join(s.dir, "sessions", v.ID, "messages.jsonl"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+	f, err := os.OpenFile(filepath.Join(s.dir, "sessions", v.ID, "messages.jsonl"), os.O_CREATE|os.O_APPEND|os.O_RDWR, 0600)
 	if err != nil {
 		return message{}, err
 	}
-	if _, err = f.Write(append(b, '\n')); err == nil {
+	if err = dropPartialLine(f); err == nil {
+		_, err = f.Write(append(b, '\n'))
+	}
+	if err == nil {
 		err = f.Sync()
 	}
 	closeErr := f.Close()
@@ -668,6 +671,29 @@ func (s *store) appendMessage(v session, from, to, text string) (message, error)
 		return message{}, err
 	}
 	return m, closeErr
+}
+
+// dropPartialLine cuts a transcript back to its last full line. A write
+// that stopped mid-line, on a full disk or a crash, leaves a tail that scan
+// skips, and the next message would otherwise extend it into a bad line.
+// The caller holds the store lock, so no other write is in progress.
+func dropPartialLine(f *os.File) error {
+	fi, err := f.Stat()
+	if err != nil || fi.Size() == 0 {
+		return err
+	}
+	last := make([]byte, 1)
+	if _, err := f.ReadAt(last, fi.Size()-1); err != nil {
+		return err
+	}
+	if last[0] == '\n' {
+		return nil
+	}
+	data, err := os.ReadFile(f.Name())
+	if err != nil {
+		return err
+	}
+	return f.Truncate(int64(bytes.LastIndexByte(data, '\n') + 1))
 }
 
 // A batch holds at most batchCount messages and, unless its one message is
