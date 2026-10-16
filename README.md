@@ -142,7 +142,7 @@ Claude becomes main. It starts a room and runs Codex in the background as the re
 
 To start from Codex, send `$peer <task>` in a local Codex chat. Codex becomes main and runs Claude Code as the reader. The agent that gets the task is always main.
 
-To watch the conversation, run `peer` in a terminal, or open the Claude Code plugin's pane with 👀 at the right of the prompt footer.
+To watch the conversation, run `peer` in a terminal, or open the Claude Code plugin's pane with `👀 peer` at the right of the prompt footer.
 
 ### Examples
 
