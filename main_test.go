@@ -1481,6 +1481,40 @@ func TestSendTextAndUnread(t *testing.T) {
 	}
 }
 
+// A write that stopped mid-line, for example on a full disk, must not join
+// the next message into one bad line and lock every reader out of the room.
+func TestSendAfterPartialWrite(t *testing.T) {
+	repo := testRepo(t)
+	v := startRoom(t, repo, "partial")
+	if _, err := invoke(repo, "", "send", v.ID, "--as", "main", "--text", "one"); err != nil {
+		t.Fatal(err)
+	}
+	s, err := openStore(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(filepath.Join(s.dir, "sessions", v.ID, "messages.jsonl"), os.O_APPEND|os.O_WRONLY, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(`{"id":"cut","at":"2026`); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := invoke(repo, "", "send", v.ID, "--as", "main", "--text", "two"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := invoke(repo, "", "wait", v.ID, "--as", "reader")
+	if err != nil || !strings.Contains(got, `"text":"one"`) || !strings.Contains(got, `"text":"two"`) || strings.Contains(got, `"cut"`) {
+		t.Fatalf("batch after a partial write = %s, %v; want one and two", got, err)
+	}
+	if got, err := invoke(repo, "", "log", v.ID, "--json"); err != nil || !strings.Contains(got, `"text":"two"`) {
+		t.Fatalf("log after a partial write = %s, %v", got, err)
+	}
+}
+
 // Observing a room must not steal an agent's queue, and polling must not
 // replay its transcript. Cursor changes still need a room update for the UI.
 func TestWatchSnapshot(t *testing.T) {
