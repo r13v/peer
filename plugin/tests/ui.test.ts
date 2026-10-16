@@ -289,7 +289,7 @@ test("the footer counts messages the pane has not shown and toggles the pane", a
 			props: { modes: ["focus"] },
 		})
 		const drawn = JSON.stringify(await ui.drawn())
-		expect(drawn).toContain("👀 4")
+		expect(drawn).toContain("👀 peer 4")
 		expect(drawn).toContain("focus")
 		await ui.press({ key: "peer-open" })
 		expect(ran).toContainEqual(["ui.open", "peer"])
@@ -298,14 +298,27 @@ test("the footer counts messages the pane has not shown and toggles the pane", a
 	}
 })
 
-test("with two rooms, each footer button opens the pane on its room", async ($, on) => {
+test("with two rooms, the footer has one button that counts both", async ($, on) => {
 	const other = { ...ROOM, id: "auth-fix", started_at: "2026-10-05T19:00:00Z" }
+	const note = {
+		id: "z",
+		at: "2026-10-05T19:01:00Z",
+		from: "peer",
+		to: "main",
+		text: "hi",
+	}
 	await start(
 		$,
 		on,
 		lines(
 			{ event: "room", room: ROOM },
 			{ event: "room", room: other },
+			...MESSAGES.map((message) => ({
+				event: "message",
+				room: ROOM.id,
+				message,
+			})),
+			{ event: "message", room: other.id, message: note },
 			{ event: "ready" },
 		),
 	)
@@ -315,9 +328,18 @@ test("with two rooms, each footer button opens the pane on its room", async ($, 
 		component: "SessionMode",
 		props: { modes: [] },
 	})
-	expect(JSON.stringify(await footer.drawn())).toContain('"label":"2"')
-	// csv-export is newer, so auth-fix is the second room.
-	await footer.press({ key: "peer-open-2" })
+	const drawn = JSON.stringify(await footer.drawn())
+	expect(drawn).toContain("👀 peer 5")
+	expect(drawn).not.toContain("peer-open-")
+})
+
+test("the pane starts a new room with the skill and the typed task", async ($, on) => {
+	const ran: string[] = []
+	on("command.run", (_, e) => {
+		ran.push(`${e.command} ${e.args}`)
+		return { text: "" } as never
+	})
+	await start($, on)
 	const pane = await $.ui.mount({
 		plugin: "peer",
 		surface: "desktop",
@@ -325,7 +347,28 @@ test("with two rooms, each footer button opens the pane on its room", async ($, 
 		requestId: "peer",
 		props: PANE,
 	})
-	expect(JSON.stringify(await pane.drawn())).toContain("auth-fix")
+	// With a room, the field waits behind its button.
+	expect(await pane.find({ key: "new-room" })).toBeUndefined()
+	await pane.press({ key: "new-room-open" })
+	await pane.input({ key: "new-room", text: "   " })
+	expect(ran).toEqual([])
+	await pane.input({ key: "new-room", text: " add CSV export " })
+	expect(ran).toEqual(["peer:peer add CSV export"])
+	// The sent task replaces the field, so it is not sent twice.
+	expect(await pane.find({ key: "new-room" })).toBeUndefined()
+	expect(JSON.stringify(await pane.drawn())).toContain("Starting a room")
+})
+
+test("without a room, the pane shows the new room field at once", async ($, on) => {
+	await start($, on, lines({ event: "ready" }))
+	const pane = await $.ui.mount({
+		plugin: "peer",
+		surface: "desktop",
+		component: "Pane",
+		requestId: "peer",
+		props: PANE,
+	})
+	expect(await pane.find({ key: "new-room" })).toBeDefined()
 })
 
 test("a member log with an entry over the desktop text limit still draws", async ($, on) => {
@@ -463,12 +506,6 @@ test("the plugin's own rows are hidden; others and the terminal's ctrl+o draw as
 })
 
 test("another session's room of the checkout is not shown", async ($, on) => {
-	// Beneath the plugin, the engine's own footer.
-	on(
-		"ui.render",
-		{ component: "SessionMode" },
-		() => ({ type: "Text", props: {}, children: ["engine"] }) as never,
-	)
 	const ran = await start($, on, WATCH, "", false)
 	expect(ran.some((argv) => argv[0] === "ui.open")).toBe(false)
 	const ui = await $.ui.mount({
@@ -487,10 +524,8 @@ test("another session's room of the checkout is not shown", async ($, on) => {
 		component: "SessionMode",
 		props: { modes: [] },
 	})
-	expect(await footer.drawn()).toMatchObject({
-		type: "Text",
-		children: ["engine"],
-	})
+	// The button shows without a room, with no count.
+	expect(JSON.stringify(await footer.drawn())).toContain('"label":"👀 peer"')
 	// A failed join adopts nothing: alone, or inside a longer command line
 	// that prints the room with main in it.
 	await $.tool.call({
@@ -501,7 +536,7 @@ test("another session's room of the checkout is not shown", async ($, on) => {
 		tool: "Bash",
 		command: "peer join csv-export main; peer status csv-export",
 	} as never)
-	expect(JSON.stringify(await footer.drawn())).not.toContain("👀")
+	expect(JSON.stringify(await footer.drawn())).toContain('"label":"👀 peer"')
 })
 
 test("outside a Git checkout, a failing watch writes nothing to the chat", async ($, on) => {

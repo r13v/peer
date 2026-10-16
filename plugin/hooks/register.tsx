@@ -18,6 +18,8 @@ const EVERYONE = "*"
 const BOARDS = ":boards"
 // ICON stands for peer in the prompt footer.
 const ICON = "👀"
+// SKILL is the plugin's slash command that starts a room.
+const SKILL = "peer:peer"
 
 // All of the plugin's session state is one value: the engine lists the
 // values a module reads and writes, so each reference is a literal.
@@ -84,6 +86,18 @@ let files = { repo: "", paths: new Set<string>() }
 // boards tab shows; error says why the list could not be read.
 type BoardView = { ref: PeerBoardRef; board?: PeerBoard; error?: string }
 let boardViews: Record<string, { boards: BoardView[]; error?: string }> = {}
+// The pane's new room field: whether a room's pane shows it, and the task
+// sent from it until its turn ends or a room starts.
+let isComposing = false
+let startingTask = ""
+let isStartingTurn = false
+
+// starting sets the task the pane shows as starting and draws the pane.
+function starting($: Engine, task: string) {
+	startingTask = task
+	isStartingTurn = false
+	$.ui.invalidate("ui.render")
+}
 
 // normalize fills in the fields a state lacks; a state without own takes
 // the rooms it led as its own.
@@ -695,6 +709,14 @@ export const register: Register = (on) => {
 
 	on("turn.start", async ($, e, next) => {
 		await begin($)
+		if (startingTask) isStartingTurn = true
+		return next(e)
+	})
+
+	// The turn that ran the pane's /peer:peer is over: a room it started has
+	// cleared the task already, else the field shows again.
+	on("turn.complete", async ($, e, next) => {
+		if (isStartingTurn) starting($, "")
 		return next(e)
 	})
 
@@ -755,6 +777,7 @@ export const register: Register = (on) => {
 		if (!room) return ran
 		await put($, selected, () => room.id)
 		await lead($, room.id, true)
+		starting($, "")
 		void openPane($)
 		return { ...ran, context: [HANDOFF] }
 	})
@@ -765,13 +788,58 @@ export const register: Register = (on) => {
 		const els = $.ui.resolve(e)
 		const { Box, Text, Button, Markdown, Code } = els
 		const room = current(st)
+		// starter starts a new room with the plugin's skill: the person writes
+		// the task in the field and presses Enter, and the field gives way to
+		// the task until its room starts. A surface without Input gets a
+		// button that puts /peer:peer in the prompt box instead. The padding
+		// leaves room for the field's focus ring.
+		let starter = (
+			<Text dimColor>Starting a room: {clip(startingTask, 200)}</Text>
+		)
+		if (!startingTask)
+			starter =
+				"Input" in els ? (
+					<Box paddingY="xs" paddingX="xs">
+						<els.Input
+							key="new-room"
+							label="new room"
+							placeholder="task"
+							submitLabel="start"
+							autoFocus
+							onSubmit={(task) => {
+								if (!task.trim()) return
+								isComposing = false
+								starting($, task.trim())
+								$.command
+									.run({ command: SKILL, args: task.trim() })
+									.catch((err) => {
+										starting($, "")
+										$.ui.toast(`peer: ${String(err).slice(0, 200)}`)
+									})
+							}}
+						/>
+					</Box>
+				) : (
+					<Box>
+						<Button
+							key="new-room"
+							label="+ new room"
+							variant="secondary"
+							onPress={async () => {
+								const { isFilled } = await $.prompt.fill({ text: `/${SKILL} ` })
+								if (!isFilled) $.ui.toast(`peer: type /${SKILL} TASK`)
+							}}
+						/>
+					</Box>
+				)
 		if (!room) {
 			return (
-				<Box flexDirection="column">
+				<Box flexDirection="column" gap={1}>
 					<Text dimColor>
 						No active peer room in this checkout. Start one with /peer:peer
 						TASK.
 					</Text>
+					{starter}
 					{st.watchError && <Text color="red">{st.watchError}</Text>}
 					{Object.entries(st.ackErrors).map(([id, text]) => (
 						<Text key={`ack-${id}`} color="red">
@@ -821,7 +889,7 @@ export const register: Register = (on) => {
 			)
 
 		// One row: the chat, the boards, a tab per member and, at the right, the
-		// end button. A member's tab shows its log.
+		// new room and end buttons; the new room button shows the field. A member's tab shows its log.
 		const pick = (one: string) => async () => {
 			await put($, tab, () => one)
 			if (one === "chat") toNewest($)
@@ -867,9 +935,21 @@ export const register: Register = (on) => {
 						/>
 					))}
 					<Box flexGrow={1} />
+					{"Input" in els && (
+						<Button
+							key="new-room-open"
+							label="+ new room"
+							variant={isComposing ? "primary" : "secondary"}
+							onPress={() => {
+								isComposing = !isComposing
+								$.ui.invalidate("ui.render")
+							}}
+						/>
+					)}
 					{isOpen &&
 						armed("end", "end", "⏹ end", ["end", room.id, "--as", "user"])}
 				</Box>
+				{(isComposing || startingTask || !("Input" in els)) && starter}
 				{st.watchError && <Text color="red">{st.watchError}</Text>}
 				{Object.entries(st.ackErrors).map(([id, text]) => (
 					<Text key={`ack-${id}`} color="red">
@@ -1071,51 +1151,35 @@ export const register: Register = (on) => {
 		)
 	})
 
-	// The prompt footer gets the peer icon, with the count of messages that
-	// came since the pane last showed: one room opens the pane on it; with
-	// several, a numbered button per room, in the pane's order. A press on the
-	// room the shown pane holds closes it.
-	on("ui.render", { component: "SessionMode" }, async ($, e, next) => {
+	// The prompt footer always gets one peer button, with the count of
+	// messages in the session's rooms that came since the pane last showed
+	// them: it opens the pane, and closes it when the pane already shows.
+	on("ui.render", { component: "SessionMode" }, async ($, e) => {
 		const st = await snapshot($)
-		const active = activeRooms(st)
-		if (active.length === 0) return next(e)
 		const { Box, Text, Button } = $.ui.resolve(e)
-		const show = (id: string) => async () => {
+		const fresh = activeRooms(st).reduce(
+			(sum, room) =>
+				sum + (st.messages[room.id] ?? []).length - (st.seen[room.id] ?? 0),
+			0,
+		)
+		const toggle = async () => {
 			const isShown = (await $.ui.panes()).some(
 				(pane) => pane.id === PANE && pane.isShown,
 			)
-			if (isShown && current(await snapshot($))?.id === id)
-				return $.ui.close({ id: PANE })
-			await put($, selected, () => id)
+			if (isShown) return $.ui.close({ id: PANE })
 			await openPane($)
-		}
-		const fresh = (room: PeerRoom) => {
-			const n = (st.messages[room.id] ?? []).length - (st.seen[room.id] ?? 0)
-			return n > 0 ? ` ${n}` : ""
 		}
 		return (
 			<Box gap={1}>
 				{e.props.modes.length > 0 && (
 					<Text dimColor>{e.props.modes.join(" & ")}</Text>
 				)}
-				{active.length === 1 && active[0] && (
-					<Button
-						key="peer-open"
-						label={`${ICON}${fresh(active[0])}`}
-						plain
-						onPress={show(active[0].id)}
-					/>
-				)}
-				{active.length > 1 && <Text>{ICON}</Text>}
-				{active.length > 1 &&
-					active.map((room, i) => (
-						<Button
-							// biome-ignore lint/suspicious/noArrayIndexKey: the button is the numbered slot, not the room.
-							key={`peer-open-${i + 1}`}
-							label={`${i + 1}${fresh(room)}`}
-							onPress={show(room.id)}
-						/>
-					))}
+				<Button
+					key="peer-open"
+					label={`${ICON} peer${fresh > 0 ? ` ${fresh}` : ""}`}
+					plain
+					onPress={toggle}
+				/>
 			</Box>
 		)
 	})
