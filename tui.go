@@ -697,7 +697,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// room leaves the list when its session directory is removed.
 		cmds := []tea.Cmd{tea.Tick(pollEvery, func(time.Time) tea.Msg { return tickMsg{} })}
 		if msg.room != nil && msg.gen == m.gen && msg.room.e.key() == m.room.e.key() {
-			cmds = append(cmds, m.apply(msg.room))
+			m.apply(msg.room)
 		}
 		if msg.listed {
 			m.lastRooms = msg.polled
@@ -776,10 +776,8 @@ func (m *model) choose(i int) {
 	m.layout()
 }
 
-// apply shows what a poll read of the selected room; it returns a
-// notification when the room is seen to end.
-func (m *model) apply(r *room) tea.Cmd {
-	wasActive := m.room.loaded && m.room.e.v.EndedAt == ""
+// apply shows what a poll read of the selected room.
+func (m *model) apply(r *room) {
 	grew := len(r.msgs) != len(m.room.msgs) || r.e.v.EndedAt != m.room.e.v.EndedAt || !m.room.loaded
 	logGrew := len(r.logs) != len(m.room.logs) || r.logRole != m.room.logRole || !m.room.loaded
 	r.starts = m.room.starts // a render since the poll may have moved them
@@ -790,11 +788,6 @@ func (m *model) apply(r *room) tea.Cmd {
 	if logGrew {
 		m.renderLog()
 	}
-	if wasActive && r.e.v.EndedAt != "" {
-		text := "Session ended: " + m.tally()
-		return func() tea.Msg { notify("peer", text); return nil }
-	}
-	return nil
 }
 
 // tally counts the room's messages by author, e.g.

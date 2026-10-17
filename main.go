@@ -16,7 +16,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"slices"
 	"strings"
 	"syscall"
@@ -407,15 +406,6 @@ var (
 	boldSpan   = regexp.MustCompile(`\*\*([^*\n]+)\*\*`)
 	listMarker = regexp.MustCompile(`^(\s*)([-*]|\d+\.)(\s)`)
 )
-
-// notify shows a desktop notification; it is replaced in tests.
-var notify = func(title, text string) {
-	if runtime.GOOS != "darwin" {
-		return
-	}
-	// Pass text as arguments so it is never parsed as AppleScript.
-	_ = exec.Command("osascript", "-e", "on run argv", "-e", "display notification (item 2 of argv) with title (item 1 of argv)", "-e", "end run", title, text).Run()
-}
 
 // printer renders the transcript for people. Colors and links need a
 // terminal, so redirected logs stay plain; NO_COLOR turns them off.
