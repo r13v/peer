@@ -8,7 +8,7 @@
 	"scripts": {
 		"build:web": "vite build --config web/vite.config.ts",
 		"typecheck": "tsc --noEmit -p tsconfig.json && npm run typecheck:plugin",
-		"typecheck:plugin": "if [ -f plugin/.claude-plugin/types/tsconfig.json ]; then tsc -p plugin/tsconfig.json; else echo 'typecheck:plugin SKIPPED: plugin/.claude-plugin/types is missing; run Claude Code with the plugin (claude --plugin-dir plugin) to generate it' >&2; fi",
+		"typecheck:plugin": "node scripts/typecheck-plugin.ts",
 		"check": "biome check .",
 		"check:fix": "biome check --write .",
 		"knip": "knip",

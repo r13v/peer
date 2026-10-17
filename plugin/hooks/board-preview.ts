@@ -663,6 +663,136 @@ export function frameLines(board: PeerBoard) {
 	return lines
 }
 
+// RASTER_FILL is a card's color as a terminal cell's background, the
+// schematic's fill without its alpha.
+const RASTER_FILL: Record<string, number> = {
+	gray: 0x4a4a4a,
+	yellow: 0xe5c07b,
+	green: 0x98c379,
+	blue: 0x4c8dff,
+	purple: 0xb48cff,
+	red: 0xe06060,
+}
+// DEFAULT is the terminal's own color in a Raster cell.
+const DEFAULT = 0x01000000
+const RASTER_ROWS = 24
+
+// boardRaster draws the schematic as terminal cells, columns wide: frames
+// as boxes with their titles, cards as blocks of their color with their
+// first line. A cell is half as wide as it is tall, so rows are half the
+// columns' scale. It returns null for an empty board.
+export function boardRaster(board: PeerBoard, columns: number) {
+	if (board.nodes.length === 0) return null
+	const { boxes, whole } = schematic(board)
+	if (whole.w <= 0 || whole.h <= 0) return null
+	const sx = (columns - 1) / whole.w
+	const sy = Math.min(sx / 2, (RASTER_ROWS - 1) / whole.h)
+	const rows = Math.max(1, Math.ceil(whole.h * sy) + 1)
+	const glyph = new Uint32Array(columns * rows).fill(0x20)
+	const fg = new Uint32Array(columns * rows).fill(DEFAULT)
+	const bg = new Uint32Array(columns * rows).fill(DEFAULT)
+	const put = (c: number, r: number, code: number, color = DEFAULT) => {
+		if (c < 0 || r < 0 || c >= columns || r >= rows) return
+		glyph[r * columns + c] = code
+		fg[r * columns + c] = color
+	}
+	const write = (
+		c: number,
+		r: number,
+		text: string,
+		n: number,
+		color: number,
+	) => {
+		for (const [i, ch] of Array.from(fit(text, n)).entries())
+			put(c + i, r, cell(ch), color)
+	}
+	const span = (b: Box) => {
+		const c0 = Math.floor(b.x * sx)
+		const r0 = Math.floor(b.y * sy)
+		return {
+			c0,
+			r0,
+			c1: Math.max(c0 + 1, Math.floor((b.x + b.w) * sx)),
+			r1: Math.max(r0, Math.floor((b.y + b.h) * sy)),
+		}
+	}
+	// Outer frames first, so a nested frame and the cards draw over them.
+	const frames = board.nodes
+		.filter((node) => node.type === "frame" && boxes.has(node.id))
+		.sort((a, b) => {
+			const p = boxes.get(a.id) as Box
+			const q = boxes.get(b.id) as Box
+			return q.w * q.h - p.w * p.h
+		})
+	for (const node of frames) {
+		const { c0, r0, c1, r1 } = span(boxes.get(node.id) as Box)
+		for (let c = c0 + 1; c < c1; c++) {
+			put(c, r0, 0x2500, 0x888888)
+			put(c, r1, 0x2500, 0x888888)
+		}
+		for (let r = r0 + 1; r < r1; r++) {
+			put(c0, r, 0x2502, 0x888888)
+			put(c1, r, 0x2502, 0x888888)
+		}
+		put(c0, r0, 0x250c, 0x888888)
+		put(c1, r0, 0x2510, 0x888888)
+		put(c0, r1, 0x2514, 0x888888)
+		put(c1, r1, 0x2518, 0x888888)
+		write(c0 + 2, r0, label(node), c1 - c0 - 3, 0xbbbbbb)
+	}
+	for (const node of board.nodes) {
+		const b = boxes.get(node.id)
+		if (node.type === "frame" || !b) continue
+		const { c0, r0, c1, r1 } = span(b)
+		const fill = RASTER_FILL[node.color ?? "gray"] ?? 0x4a4a4a
+		const ink = fill === 0x4a4a4a ? 0xeeeeee : 0x111111
+		for (let r = r0; r <= Math.max(r0, r1 - 1); r++)
+			for (let c = c0; c < c1; c++) {
+				put(c, r, 0x20)
+				if (c < columns && r < rows) bg[r * columns + c] = fill
+			}
+		write(c0, r0, label(node), c1 - c0, ink)
+	}
+	const words = new Uint32Array(columns * rows * 3)
+	for (let i = 0; i < columns * rows; i++) {
+		words[i * 3] = glyph[i] ?? 0x20
+		words[i * 3 + 1] = fg[i] ?? DEFAULT
+		words[i * 3 + 2] = bg[i] ?? DEFAULT
+	}
+	return { columns, rows, cells: base64(new Uint8Array(words.buffer)) }
+}
+
+// cell gives a glyph a Raster takes, one printable width-1 BMP character:
+// Latin, Greek, Cyrillic, punctuation and arrows are kept, the rest,
+// such as CJK and emoji, show as "?".
+function cell(ch: string) {
+	const code = ch.codePointAt(0) ?? 0x3f
+	const isKept =
+		(code >= 0x20 && code <= 0x7e) ||
+		(code >= 0xa0 && code <= 0x24ff && !(code >= 0x300 && code <= 0x36f))
+
+	return isKept ? code : 0x3f
+}
+
+const BASE64 =
+	"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+
+// base64 encodes bytes as standard padded base64, which a Raster's cells are.
+function base64(bytes: Uint8Array) {
+	let out = ""
+	for (let i = 0; i < bytes.length; i += 3) {
+		const a = bytes[i] ?? 0
+		const b = bytes[i + 1] ?? 0
+		const c = bytes[i + 2] ?? 0
+		out += BASE64[a >> 2]
+		out += BASE64[((a & 3) << 4) | (b >> 4)]
+		out += i + 1 < bytes.length ? BASE64[((b & 15) << 2) | (c >> 6)] : "="
+		out += i + 2 < bytes.length ? BASE64[c & 63] : "="
+	}
+
+	return out
+}
+
 function plural(n: number, noun: string) {
 	return `${n} ${noun}${n === 1 ? "" : "s"}`
 }

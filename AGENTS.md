@@ -17,7 +17,7 @@ These rules apply to the whole checkout. Work from the repository root.
 
 - Go: `make test` (race detector), `make lint`, `make build`. `make build` also builds the SPA; `make fmt` formats Go code.
 - TypeScript and the SPA: install with `npm ci`, then run `npm run verify` — `tsc`, the SPA unit tests (`npm run test:web`), Biome, Knip and the production build into `web/dist`.
-- Plugin types: `npm run typecheck` also runs `typecheck:plugin` (`tsc -p plugin/tsconfig.json`). It needs `plugin/.claude-plugin/types`, which Claude Code generates when it loads the plugin. Without it, for example in CI, the step prints SKIPPED; run it locally before you change `plugin/`.
+- Plugin types: `npm run typecheck` also runs `typecheck:plugin` (`tsc -p plugin/tsconfig.json`) against `plugin/.claude-plugin/types`. When those types are not of `claude --version`, the step has the installed Claude Code write them (a few seconds, no login). Without `claude` on `PATH` it prints SKIPPED. The daily Claude Code workflow runs it against the latest Claude Code.
 - Claude Code plugin: `claude plugin validate plugin` and `claude plugin test plugin`. After a Claude Code update: `npm run engine-check` (see [plugin/README.md](plugin/README.md)).
 - Documentation only: follow [docs/DOCS.md](docs/DOCS.md) and run `git diff --check`.
 - Targeted: `npx --no-install biome check <files>`. Do not format unrelated files.

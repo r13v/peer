@@ -1,10 +1,10 @@
 name: Claude Code
 
-# Runs the plugin's tests against the latest Claude Code every day, so a
-# Claude Code release that breaks the plugin fails here before users update.
-# The tests run in the kit inside the claude binary and need no login. The
-# typecheck needs the types that only an interactive load writes, so it runs
-# locally: npm run engine-check.
+# Checks the plugin against the latest Claude Code every day, so a Claude
+# Code release that breaks the plugin fails here before users update. The
+# typecheck has that Claude Code write its types by loading the plugin in a
+# pseudo-terminal; the tests run in the kit inside the claude binary. Neither
+# needs a login.
 
 on:
   schedule:
@@ -28,5 +28,9 @@ jobs:
           claude --version
       - name: Validate
         run: claude plugin validate plugin
+      - name: Typecheck
+        run: |
+          npm ci --ignore-scripts
+          npm run typecheck:plugin
       - name: Test
         run: claude plugin test plugin

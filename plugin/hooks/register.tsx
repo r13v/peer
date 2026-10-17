@@ -10,7 +10,12 @@ import type {
 	PeerRoom,
 	PeerState,
 } from "../types"
-import { boardStats, boardSvg, frameLines } from "./board-preview.ts"
+import {
+	boardRaster,
+	boardStats,
+	boardSvg,
+	frameLines,
+} from "./board-preview.ts"
 
 const PANE = "peer"
 const EVERYONE = "*"
@@ -91,6 +96,28 @@ let boardViews: Record<string, { boards: BoardView[]; error?: string }> = {}
 let isComposing = false
 let startingTask = ""
 let isStartingTurn = false
+// The rooms by id as watch last printed them, for drawings that must not
+// read the state: a transcript row that read it would be drawn again on
+// every write.
+let roomIndex: Record<string, PeerRoom> = {}
+// What the running turn reads when it is a delivery: the spinner's line,
+// and the author the prompt box suggests answering once it ends.
+let deliveryNote = ""
+let deliveryAuthor = ""
+// What each queued delivery's turn will read, by its text, made from the
+// messages themselves: a message's text never names an author here.
+const deliveries = new Map<string, { line: string; author: string }>()
+// When each room last raised a notification for a message to main.
+const notifiedAt: Record<string, number> = {}
+// The member whose edits the pane replays, the step it shows, and that
+// step's file diff once git printed it.
+let replay: { role: string; index: number } | null = null
+let replayDiff: {
+	key: string
+	text: string
+	error?: string
+	isLoaded?: boolean
+} | null = null
 
 // starting sets the task the pane shows as starting and draws the pane.
 function starting($: Engine, task: string) {
@@ -152,6 +179,13 @@ async function begin($: Engine) {
 	// A pane left open by the module before a reload is drawn by this one.
 	$.ui.invalidate("ui.render")
 	await restore($)
+	await $.command
+		.register({
+			name: "room",
+			description: "peer: open or close the pane of this session's room",
+			immediate: true,
+		})
+		.catch(() => ({}))
 	watch($)
 	$.clock.every(3000, () => void refresh($))
 	void loadOffset($)
@@ -264,6 +298,29 @@ async function openPane($: Engine) {
 	return opened
 }
 
+// togglePane closes the pane where it shows, and opens it otherwise.
+async function togglePane($: Engine) {
+	const isShown = (await $.ui.panes()).some(
+		(pane) => pane.id === PANE && pane.isShown,
+	)
+	if (isShown) {
+		await $.ui.close({ id: PANE })
+		return "closed"
+	}
+	const { isPlaced } = await openPane($)
+	return isPlaced ? "opened" : "not placed"
+}
+
+// unseen counts the messages in the session's rooms that came since the
+// pane last showed them.
+function unseen(st: PeerState) {
+	return activeRooms(st).reduce(
+		(sum, room) =>
+			sum + (st.messages[room.id] ?? []).length - (st.seen[room.id] ?? 0),
+		0,
+	)
+}
+
 // watch keeps rooms and messages current from peer watch, which reads
 // the store without moving anyone's cursor.
 function watch($: Engine) {
@@ -364,16 +421,32 @@ async function apply($: Engine, lines: string[]) {
 	}
 	if (isReady) {
 		const mine = new Set(await get($, own))
+		// Notifications are main's: a session that is a member of the room
+		// too would raise each one twice.
+		const leads = new Set(await get($, led))
 		for (const room of roomEvents) {
 			const was = before[room.id]
 			if (!mine.has(room.id)) continue
-			if (room.ended_at && was && !was.ended_at)
+			if (room.ended_at && was && !was.ended_at) {
 				$.ui.toast(`peer: room ${room.id} ended`)
+				if (leads.has(room.id)) notify($, `room ${room.id} ended`)
+			}
 		}
 		for (const [id, list] of Object.entries(fresh)) {
 			if (!mine.has(id)) continue
 			for (const m of list) {
 				if (m.from === "peer") $.ui.toast(`${id}: ${m.text}`)
+			}
+			// A member that writes to main alone may wait for an answer. The
+			// notification names the author and the room, never the text: the
+			// person's notification hooks may send it off the machine.
+			const direct = list.find(
+				(m) => m.to === "main" && !["main", "peer", "user"].includes(m.from),
+			)
+			const now = Date.now()
+			if (direct && leads.has(id) && now - (notifiedAt[id] ?? 0) > 60_000) {
+				notifiedAt[id] = now
+				notify($, `${direct.from} wrote to main in ${id}`)
 			}
 		}
 		const st = await snapshot($)
@@ -406,7 +479,14 @@ async function apply($: Engine, lines: string[]) {
 			if (activeRooms(await snapshot($)).length > 0) void openPane($)
 		}
 	}
+	roomIndex = await get($, rooms)
 	void pump($)
+}
+
+// notify raises a native notification; a person who turned them off, or a
+// surface without them, is no error.
+function notify($: Engine, text: string) {
+	void $.ui.notify(text, { title: "peer" }).catch(() => ({}))
 }
 
 // readLog adds a room's whole transcript from peer log to the messages,
@@ -600,8 +680,11 @@ async function deliver(
 	const text =
 		note ??
 		`peer room ${id}: ${list.length} new message${list.length === 1 ? "" : "s"} for main, delivered by the peer plugin; you do not run peer wait for this room.\n\n${body}`
+	deliveries.set(text, deliverySummary(id, list, Boolean(note)))
 	const submitted = await $.prompt.submit({ text })
-	return !("drop" in submitted && submitted.drop)
+	const isQueued = !("drop" in submitted && submitted.drop)
+	if (!isQueued) deliveries.delete(text)
+	return isQueued
 }
 
 // refresh keeps the footer's count and the shown log or boards tab current
@@ -710,14 +793,67 @@ export const register: Register = (on) => {
 	on("turn.start", async ($, e, next) => {
 		await begin($)
 		if (startingTask) isStartingTurn = true
+		// A delivery's turn names what it reads on the spinner.
+		const queued = [...deliveries.keys()].find((text) => e.text.includes(text))
+		const note = queued === undefined ? null : deliveries.get(queued)
+		if (queued !== undefined) deliveries.delete(queued)
+		const line = note?.line ?? ""
+		deliveryAuthor = note?.author ?? ""
+		if (line !== deliveryNote) {
+			deliveryNote = line
+			$.ui.invalidate("ui.render")
+		}
 		return next(e)
 	})
 
 	// The turn that ran the pane's /peer:peer is over: a room it started has
-	// cleared the task already, else the field shows again.
+	// cleared the task already, else the field shows again. After a
+	// delivery, the empty prompt box suggests telling its last author.
 	on("turn.complete", async ($, e, next) => {
 		if (isStartingTurn) starting($, "")
-		return next(e)
+		const done = await next(e)
+		// A subagent's turn ends inside the delivery's turn.
+		if (e.agentId) return done
+		const author = deliveryAuthor
+		if (deliveryNote) {
+			deliveryNote = ""
+			$.ui.invalidate("ui.render")
+		}
+		deliveryAuthor = ""
+		if (author)
+			void $.prompt.suggest({ text: `Tell ${author}: ` }).catch(() => ({}))
+		return done
+	})
+
+	on("ui.render", { component: "Spinner" }, (_, e, next) =>
+		deliveryNote
+			? next({ ...e, props: { ...e.props, message: deliveryNote } })
+			: next(e),
+	)
+
+	// /room opens or closes the pane, as the footer's button does.
+	on("command.run", { command: "room" }, async ($) => {
+		await begin($)
+		const done = await togglePane($)
+		if (done !== "not placed") return { text: `peer: pane ${done}` }
+		return { text: "peer: there is no room for the pane here" }
+	})
+
+	// @ROLE in the prompt box offers the members of the room the pane shows.
+	on("prompt.autocomplete", { token: /^@/ }, async ($, e, next) => {
+		const found = await next(e)
+		const room = current(await snapshot($))
+		if (!room || room.ended_at) return found
+		const prefix = e.token.slice(1)
+		const roles = room.members
+			.filter(
+				(m) => m.role !== "main" && !m.kicked && m.role.startsWith(prefix),
+			)
+			.map((m) => ({
+				text: `@${m.role}`,
+				description: `${m.worker ? "worker" : "member"} of ${room.id}`,
+			}))
+		return { suggestions: [...found.suggestions, ...roles] }
 	})
 
 	on("tool.call", { tool: "Bash" }, async ($, e, next) => {
@@ -746,6 +882,18 @@ export const register: Register = (on) => {
 				}
 			}
 			return next(e)
+		}
+		// The permission dialog of a peer end or kick says who it stops.
+		const stop = commands.find(
+			(args) => (args[0] === "end" || args[0] === "kick") && args[1],
+		)
+		const effect = stop && stopNote(roomIndex[stop[1] ?? ""], stop)
+		if (effect) {
+			try {
+				$.ui.notice(e.tool_use_id, effect)
+			} catch {
+				// no dialog for this call
+			}
 		}
 		const startedAt = new Date(Date.now() - 1000).toISOString()
 		const ran = await next(e)
@@ -824,6 +972,7 @@ export const register: Register = (on) => {
 						<Button
 							key="new-room"
 							label="+ new room"
+							hotkey="n"
 							variant="secondary"
 							onPress={async () => {
 								const { isFilled } = await $.prompt.fill({ text: `/${SKILL} ` })
@@ -861,11 +1010,18 @@ export const register: Register = (on) => {
 
 		// armed draws a button that acts on its second press: the first turns
 		// it into confirm, and three seconds without the second turn it back.
-		const armed = (what: string, key: string, label: string, argv: string[]) =>
+		const armed = (
+			what: string,
+			key: string,
+			label: string,
+			hotkey: string,
+			argv: string[],
+		) =>
 			pending === what ? (
 				<Button
 					key={key}
 					label="confirm"
+					hotkey={hotkey}
 					variant="primary"
 					onPress={async () => {
 						await put($, confirm, () => null)
@@ -877,6 +1033,7 @@ export const register: Register = (on) => {
 				<Button
 					key={key}
 					label={label}
+					hotkey={hotkey}
 					variant="secondary"
 					onPress={async () => {
 						await put($, confirm, () => what)
@@ -891,6 +1048,7 @@ export const register: Register = (on) => {
 		// One row: the chat, the boards, a tab per member and, at the right, the
 		// new room and end buttons; the new room button shows the field. A member's tab shows its log.
 		const pick = (one: string) => async () => {
+			replay = null
 			await put($, tab, () => one)
 			if (one === "chat") toNewest($)
 			else if (one === BOARDS) await loadBoards($, room)
@@ -917,19 +1075,22 @@ export const register: Register = (on) => {
 					<Button
 						key="tab-chat"
 						label={`${dot(isOpen)} chat ${all.length}`}
+						hotkey="1"
 						variant={shown === "chat" ? "primary" : "secondary"}
 						onPress={pick("chat")}
 					/>
 					<Button
 						key="tab-boards"
 						label={`boards${boardCount}`}
+						hotkey="2"
 						variant={shown === BOARDS ? "primary" : "secondary"}
 						onPress={pick(BOARDS)}
 					/>
-					{others.map((m) => (
+					{others.map((m, i) => (
 						<Button
 							key={`tab-${m.role}`}
 							label={`${dot(isOpen && !m.exited && !m.kicked)} ${m.role}`}
+							hotkey={i < 7 ? String(i + 3) : undefined}
 							variant={shown === m.role ? "primary" : "secondary"}
 							onPress={pick(m.role)}
 						/>
@@ -939,6 +1100,7 @@ export const register: Register = (on) => {
 						<Button
 							key="new-room-open"
 							label="+ new room"
+							hotkey="n"
 							variant={isComposing ? "primary" : "secondary"}
 							onPress={() => {
 								isComposing = !isComposing
@@ -947,7 +1109,7 @@ export const register: Register = (on) => {
 						/>
 					)}
 					{isOpen &&
-						armed("end", "end", "⏹ end", ["end", room.id, "--as", "user"])}
+						armed("end", "end", "⏹ end", "e", ["end", room.id, "--as", "user"])}
 				</Box>
 				{(isComposing || startingTask || !("Input" in els)) && starter}
 				{st.watchError && <Text color="red">{st.watchError}</Text>}
@@ -1013,6 +1175,8 @@ export const register: Register = (on) => {
 			)
 		} else {
 			const member = room.members.find((m) => m.role === shown)
+			const steps = editSteps(st.log)
+			const isReplaying = replay?.role === shown && steps.length > 0
 			body = (
 				<Box flexDirection="column" gap={1}>
 					{member && (
@@ -1026,9 +1190,21 @@ export const register: Register = (on) => {
 								{member.branch ? ` · ${member.branch}` : ""}
 							</Text>
 							<Box flexGrow={1} />
+							{steps.length > 0 && (
+								<Button
+									key="replay"
+									label={isReplaying ? "log" : `replay ${steps.length} edits`}
+									hotkey="r"
+									variant={isReplaying ? "primary" : "secondary"}
+									onPress={() => {
+										replay = isReplaying ? null : { role: shown, index: 0 }
+										$.ui.invalidate("ui.render")
+									}}
+								/>
+							)}
 							{isOpen &&
 								!member.kicked &&
-								armed(`kick:${member.role}`, "kick", "kick", [
+								armed(`kick:${member.role}`, "kick", "kick", "k", [
 									"kick",
 									room.id,
 									member.role,
@@ -1037,37 +1213,131 @@ export const register: Register = (on) => {
 								])}
 						</Box>
 					)}
+					{isReplaying && member && replayView(room, member, steps)}
 					{st.log.length === 0 && <Text dimColor>No log yet.</Text>}
-					{st.log
-						.slice(-80)
-						.reverse()
-						.map((entry, i) => (
-							// biome-ignore lint/suspicious/noArrayIndexKey: log entries have no id; the list is redrawn whole.
-							<Box key={`log-${i}`} gap={1}>
-								<Text dimColor>
-									{entry.at && !entry.at.startsWith("0001")
-										? clock(entry.at, true)
-										: "        "}
-								</Text>
-								<Box flexGrow={1} flexShrink={1}>
-									{entry.kind === "tool" ? (
-										<Code source={clip(entry.text, 500)} language="bash" />
-									) : (
-										<Text
-											dimColor={entry.kind !== "text"}
-											wrap={entry.kind === "text" ? "wrap" : "truncate-end"}
-										>
-											{clip(
-												entry.kind === "text"
-													? entry.text
-													: entry.text.split("\n").slice(0, 3).join(" ⏎ "),
-												500,
-											)}
-										</Text>
-									)}
+					{!isReplaying &&
+						st.log
+							.slice(-80)
+							.reverse()
+							.map((entry, i) => (
+								// biome-ignore lint/suspicious/noArrayIndexKey: log entries have no id; the list is redrawn whole.
+								<Box key={`log-${i}`} gap={1}>
+									<Text dimColor>
+										{entry.at && !entry.at.startsWith("0001")
+											? clock(entry.at, true)
+											: "        "}
+									</Text>
+									<Box flexGrow={1} flexShrink={1}>
+										{entry.kind === "tool" ? (
+											<Code source={clip(entry.text, 500)} language="bash" />
+										) : (
+											<Text
+												dimColor={entry.kind !== "text"}
+												wrap={entry.kind === "text" ? "wrap" : "truncate-end"}
+											>
+												{clip(
+													entry.kind === "text"
+														? entry.text
+														: entry.text.split("\n").slice(0, 3).join(" ⏎ "),
+													500,
+												)}
+											</Text>
+										)}
+									</Box>
 								</Box>
-							</Box>
+							))}
+				</Box>
+			)
+		}
+
+		// replayView steps through a member's edits one at a time: a strip of
+		// the steps, the file, and the file's diff in the member's checkout
+		// now, since its log keeps the edit's path, not its text.
+		function replayView(
+			shownRoom: PeerRoom,
+			member: PeerMember,
+			steps: EditStep[],
+		) {
+			const k = Math.max(0, Math.min(replay?.index ?? 0, steps.length - 1))
+			const step = steps[k] as EditStep
+			const dir = member.worktree || shownRoom.repo
+			const path = step.path.startsWith(`${dir}/`)
+				? step.path.slice(dir.length + 1)
+				: step.path
+			const key = `${dir}\n${step.path}`
+			if (replayDiff?.key !== key) void loadDiff($, key, dir, step.path)
+			const diff = replayDiff?.key === key ? replayDiff : null
+			const lines = (diff?.text ?? "")
+				.split("\n")
+				.filter(
+					(line) => line && !/^(diff --git|index |--- |\+\+\+ )/.test(line),
+				)
+			const go = (to: number) => () => {
+				replay = {
+					role: member.role,
+					index: Math.max(0, Math.min(to, steps.length - 1)),
+				}
+				$.ui.invalidate("ui.render")
+			}
+			return (
+				<Box key="replay-view" flexDirection="column">
+					<Box gap={1} flexWrap="wrap">
+						{steps.map((_, n) => (
+							<Text
+								// biome-ignore lint/suspicious/noArrayIndexKey: steps are positions in the log.
+								key={`step-${n}`}
+								inverse={n === k}
+								dimColor={n !== k}
+							>
+								{` ${n + 1} `}
+							</Text>
 						))}
+					</Box>
+					<Box gap={1}>
+						<Text bold color={authorColor(shownRoom, member.role)}>
+							{path}
+						</Text>
+						<Text dimColor>
+							{`${step.tool}${step.at ? ` · ${clock(step.at, true)}` : ""} · step ${k + 1} of ${steps.length}`}
+						</Text>
+					</Box>
+					<Text dimColor>
+						The file's uncommitted diff now, not this step's own.
+					</Text>
+					{diff?.error && <Text color="red">{diff.error}</Text>}
+					{diff?.isLoaded && !diff.error && lines.length === 0 && (
+						<Text dimColor>
+							No uncommitted change: committed, untracked or undone.
+						</Text>
+					)}
+					{lines.slice(0, 12).map((line, n) => (
+						<Text
+							// biome-ignore lint/suspicious/noArrayIndexKey: diff lines repeat.
+							key={`diff-${n}`}
+							color={DIFF_COLOR[line[0] ?? ""]}
+							dimColor={!/^[+-]/.test(line)}
+							wrap="truncate-end"
+						>
+							{clip(line, 300)}
+						</Text>
+					))}
+					{lines.length > 12 && (
+						<Text dimColor>… {lines.length - 12} more lines</Text>
+					)}
+					<Box gap={1}>
+						<Button
+							key="replay-prev"
+							label="◀ prev"
+							hotkey="h"
+							onPress={go(k - 1)}
+						/>
+						<Button
+							key="replay-next"
+							label="next ▶"
+							hotkey="l"
+							onPress={go(k + 1)}
+						/>
+					</Box>
 				</Box>
 			)
 		}
@@ -1078,6 +1348,13 @@ export const register: Register = (on) => {
 			const isDrawn = e.surface !== "terminal" && "Svg" in els
 			const svg = board && isDrawn ? boardSvg(board) : null
 			const lines = board && !isDrawn ? frameLines(board) : []
+			const raster =
+				board && !isDrawn && "Raster" in els
+					? boardRaster(
+							board,
+							Math.max(20, Math.min(72, e.props.bodyColumns - 4)),
+						)
+					: null
 			return (
 				<Box key={`board-${ref.key}`} flexDirection="column">
 					<Text bold>
@@ -1093,6 +1370,9 @@ export const register: Register = (on) => {
 							source={svg}
 							alt={`Schematic of board ${ref.title ?? ""}`}
 						/>
+					)}
+					{raster && "Raster" in els && (
+						<els.Raster key={`raster-${ref.key}`} {...raster} />
 					)}
 					{lines.map((line) => (
 						<Text key={`${ref.key}-${line}`}>{line}</Text>
@@ -1151,24 +1431,116 @@ export const register: Register = (on) => {
 		)
 	})
 
+	// A Bash row that only runs peer send is drawn as the message it sent, a
+	// card in its author's color; any other row, or one that failed, as the
+	// engine draws it.
+	on("ui.render", { component: "ToolUse" }, ($, e, next) => {
+		const { tool, input, isErrored, isInterrupted, isRunning } = e.props
+		const command = (input as { command?: unknown } | undefined)?.command
+		if (
+			tool !== "Bash" ||
+			isErrored ||
+			isInterrupted ||
+			typeof command !== "string"
+		)
+			return next(e)
+		const sent = sentMessage(command)
+		if (!sent) return next(e)
+		const room = roomIndex[sent.id] ?? {
+			id: sent.id,
+			repo: "",
+			members: [],
+			started_at: "",
+		}
+		const { Box, Text, Markdown } = $.ui.resolve(e)
+		const lines = sent.text.split("\n")
+		const text = lines.length > 14 ? excerpt(lines, 12) : sent.text
+		return (
+			<Box
+				flexDirection="column"
+				borderStyle="single"
+				borderColor={borderOf(room, sent.from)}
+				paddingX={1}
+			>
+				<Box gap={1}>
+					<Text dimColor>{`${ICON} ${sent.id}`}</Text>
+					<Text bold color={authorColor(room, sent.from)}>
+						{sent.from}
+					</Text>
+					<Text dimColor>→</Text>
+					<Text
+						color={
+							sent.to === EVERYONE ? undefined : authorColor(room, sent.to)
+						}
+					>
+						{sent.to === EVERYONE ? "all" : sent.to}
+					</Text>
+					{isRunning && <Text dimColor>sending…</Text>}
+				</Box>
+				<Markdown text={clip(linkify(text), 8000)} />
+			</Box>
+		)
+	})
+
+	// The band above the prompt shows the pulse of the room the pane shows
+	// while it is active: who runs, how busy the last hour was, what the pane
+	// has not shown, and a button that opens the pane.
+	on("ui.render", { component: "AbovePrompt" }, async ($, e, next) => {
+		if (e.props.hasSurvey) return next(e)
+		const st = await snapshot($)
+		const room = current(st)
+		if (!room || room.ended_at) return next(e)
+		const { Box, Text, Button } = $.ui.resolve(e)
+		const others = room.members.filter((m) => m.role !== "main" && !m.kicked)
+		const isWide = e.props.bodyColumns >= 60
+		const fresh = unseen(st)
+		const running = others.filter((m) => !m.exited).length
+		return (
+			<Box gap={2} paddingX={1}>
+				<Text bold color={authorColor(room, "main")}>
+					{`${ICON} ${room.id}`}
+				</Text>
+				{isWide ? (
+					<Box gap={1}>
+						{others.map((m) => (
+							<Text
+								key={`pulse-${m.role}`}
+								color={authorColor(room, m.role)}
+								dimColor={Boolean(m.exited)}
+							>
+								{`${m.exited ? "○" : "●"} ${m.role}`}
+							</Text>
+						))}
+					</Box>
+				) : (
+					<Text dimColor>{`${running}/${others.length} running`}</Text>
+				)}
+				{isWide && (
+					<Text dimColor>
+						{`last hour ${sparkline(st.messages[room.id] ?? [], Date.now())}`}
+					</Text>
+				)}
+				{fresh > 0 && (
+					<Text color={authorColor(room, "user")}>{`✉ ${fresh}`}</Text>
+				)}
+				<Button
+					key="pulse-open"
+					label="open"
+					hotkey="o"
+					variant="secondary"
+					onPress={() => togglePane($)}
+				/>
+			</Box>
+		)
+	})
+
 	// The prompt footer always gets one peer button, with the count of
 	// messages in the session's rooms that came since the pane last showed
 	// them: it opens the pane, and closes it when the pane already shows.
 	on("ui.render", { component: "SessionMode" }, async ($, e) => {
 		const st = await snapshot($)
 		const { Box, Text, Button } = $.ui.resolve(e)
-		const fresh = activeRooms(st).reduce(
-			(sum, room) =>
-				sum + (st.messages[room.id] ?? []).length - (st.seen[room.id] ?? 0),
-			0,
-		)
-		const toggle = async () => {
-			const isShown = (await $.ui.panes()).some(
-				(pane) => pane.id === PANE && pane.isShown,
-			)
-			if (isShown) return $.ui.close({ id: PANE })
-			await openPane($)
-		}
+		const fresh = unseen(st)
 		return (
 			<Box gap={1}>
 				{e.props.modes.length > 0 && (
@@ -1178,7 +1550,7 @@ export const register: Register = (on) => {
 					key="peer-open"
 					label={`${ICON} peer${fresh > 0 ? ` ${fresh}` : ""}`}
 					plain
-					onPress={toggle}
+					onPress={() => togglePane($)}
 				/>
 			</Box>
 		)
@@ -1195,6 +1567,160 @@ export const register: Register = (on) => {
 		const { Box } = $.ui.resolve(e)
 		return <Box />
 	})
+}
+
+// sentMessage reads a line that only runs peer send with --text: its
+// room, author, recipient and text. A line the shell would change first,
+// with $, `, \, < or >, is not read: a card must show what was sent.
+function sentMessage(command: string) {
+	if (/[$`\\<>]/.test(command)) return null
+	const all = shellCommands(command)
+	const args = all.length === 1 ? peerArgs(all[0] ?? []) : null
+	if (args?.[0] !== "send" || !args[1]) return null
+	const sent = { id: args[1], from: "", to: EVERYONE, text: "" }
+	let hasText = false
+	for (let i = 2; i < args.length; i++) {
+		const arg = args[i] ?? ""
+		const [flag, inline] = arg.startsWith("--") ? arg.split(/=(.*)/s) : [arg]
+		const value = inline ?? args[++i]
+		if (value === undefined) return null
+		if (flag === "--as") sent.from = value
+		else if (flag === "--to") sent.to = value
+		else if (flag === "--text") {
+			sent.text = value
+			hasText = true
+		} else return null
+	}
+	return sent.from && hasText ? sent : null
+}
+
+const BARS = "▂▃▄▅▆▇█"
+
+// DIFF_COLOR colors a diff line by its first character.
+const DIFF_COLOR: Record<string, string> = { "+": "green", "-": "red" }
+
+// sparkline draws the room's messages, not peer's notices, in twelve
+// five-minute bins up to now: ▁ for none, then taller as the busiest bin.
+function sparkline(list: PeerMessage[], now: number) {
+	const bins = new Array<number>(12).fill(0)
+	for (const m of list) {
+		const ago = Math.floor((now - Date.parse(m.at)) / 300_000)
+		if (m.from !== "peer" && ago >= 0 && ago < 12)
+			bins[11 - ago] = (bins[11 - ago] ?? 0) + 1
+	}
+	const top = Math.max(1, ...bins)
+	return bins
+		.map((n) =>
+			n === 0
+				? "▁"
+				: BARS[
+						Math.min(BARS.length - 1, Math.floor((n / top) * (BARS.length - 1)))
+					],
+		)
+		.join("")
+}
+
+type EditStep = { path: string; tool: string; at?: string }
+
+// editSteps lists a member's file edits from its log: Claude's Edit,
+// Write and MultiEdit with their file_path, read only when the logged input
+// is whole JSON (the log cuts it at 200 characters), and Codex's edit with
+// its paths.
+function editSteps(entries: PeerLogEntry[]) {
+	const steps: EditStep[] = []
+	for (const entry of entries) {
+		if (entry.kind !== "tool") continue
+		const claude = /^(Edit|Write|MultiEdit) (\{[\s\S]*\})$/.exec(entry.text)
+		if (claude) {
+			try {
+				const path = (JSON.parse(claude[2] ?? "") as { file_path?: unknown })
+					.file_path
+				if (typeof path === "string" && path)
+					steps.push({ path, tool: claude[1] ?? "", at: entry.at })
+			} catch {
+				// cut input: its path may be cut too
+			}
+			continue
+		}
+		const codex = /^edit (.+)$/.exec(entry.text)
+		for (const path of codex?.[1]?.split(" ").filter(Boolean) ?? [])
+			steps.push({ path, tool: "edit", at: entry.at })
+	}
+	return steps
+}
+
+// loadDiff reads path's uncommitted diff in the checkout dir for the step
+// key; a path outside it shows git's error.
+async function loadDiff($: Engine, key: string, dir: string, path: string) {
+	replayDiff = { key, text: "" }
+	try {
+		const { exitCode, stdout, stderr } = await $.process.run(
+			["git", "-C", dir, "diff", "--", path],
+			{ timeoutMs: 10_000 },
+		)
+		if (replayDiff?.key !== key) return
+		replayDiff =
+			exitCode === 0
+				? { key, text: stdout, isLoaded: true }
+				: {
+						key,
+						text: "",
+						error: `git diff: ${clip(stderr.trim(), 200)}`,
+						isLoaded: true,
+					}
+	} catch (err) {
+		if (replayDiff?.key === key)
+			replayDiff = {
+				key,
+				text: "",
+				error: `git diff: ${clip(String(err), 200)}`,
+				isLoaded: true,
+			}
+	}
+	$.ui.invalidate("ui.render")
+}
+
+// deliverySummary is what a delivery's turn reads, from its messages'
+// from fields: one line for the spinner and the last member that wrote,
+// a valid role name, for the prompt box's suggestion.
+function deliverySummary(id: string, list: PeerMessage[], hasEnded: boolean) {
+	if (hasEnded) return { line: `peer: room ${id} ended`, author: "" }
+	const names = [
+		...new Set(
+			list
+				.map((m) => m.from)
+				.filter(
+					(one) =>
+						one !== "peer" &&
+						one !== "user" &&
+						/^[a-z][a-z0-9_-]{0,63}$/.test(one),
+				),
+		),
+	]
+	const n = list.length
+	return {
+		line: `peer: reading ${n} message${n === 1 ? "" : "s"}${names.length > 0 ? ` from ${names.join(", ")}` : ""}`,
+		author: names.at(-1) ?? "",
+	}
+}
+
+// stopNote says what a peer end or kick stops: the members of room whose
+// agents still run, or the kicked member's agent.
+function stopNote(room: PeerRoom | undefined, args: string[]) {
+	if (!room || room.ended_at) return ""
+	const running = room.members.filter(
+		(m) => m.role !== "main" && m.pid && !m.exited && !m.kicked,
+	)
+	if (args[0] === "end") {
+		const names = running.map((m) => m.role)
+		return names.length > 0
+			? `peer: ends ${room.id}; still running: ${names.join(", ")}`
+			: `peer: ends ${room.id}`
+	}
+	const member = room.members.find((m) => m.role === args[2])
+	if (!member) return ""
+	const agent = [member.agent, member.model].filter(Boolean).join(" ")
+	return `peer: removes ${member.role}${agent ? ` (${agent})` : ""} from ${room.id}${running.includes(member) ? " and stops its agent" : ""}`
 }
 
 // startedRoom reads the room peer start printed, when the output reached
