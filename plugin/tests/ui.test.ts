@@ -251,8 +251,10 @@ test("messages are cards with the time first, notices one line, file refs links"
 	const drawn = JSON.stringify(await ui.drawn())
 	// A reader's card: its purple mixed into the background.
 	expect(drawn).toContain('"borderStyle":"single","borderColor":"#493d5f"')
+	// The chat tab has no message count.
+	expect(drawn).toContain('"label":"● chat"')
 	// Times are in the host's zone, UTC+3 here, newest first, under the tabs.
-	expect(drawn.indexOf("chat 4")).toBeLessThan(drawn.indexOf("23:03"))
+	expect(drawn.indexOf('"label":"● chat"')).toBeLessThan(drawn.indexOf("23:03"))
 	expect(drawn.indexOf("23:03")).toBeLessThan(drawn.indexOf("23:02"))
 	expect(drawn).toContain("reader joined · tester joined")
 	expect(drawn).toContain("[`main.go:42`](file:///repo/main.go)")
@@ -289,7 +291,7 @@ test("the footer counts messages the pane has not shown and toggles the pane", a
 			props: { modes: ["focus"] },
 		})
 		const drawn = JSON.stringify(await ui.drawn())
-		expect(drawn).toContain("👀 peer 4")
+		expect(drawn).toContain("👀 Peer 4")
 		expect(drawn).toContain("focus")
 		await ui.press({ key: "peer-open" })
 		expect(ran).toContainEqual(["ui.open", "peer"])
@@ -329,7 +331,7 @@ test("with two rooms, the footer has one button that counts both", async ($, on)
 		props: { modes: [] },
 	})
 	const drawn = JSON.stringify(await footer.drawn())
-	expect(drawn).toContain("👀 peer 5")
+	expect(drawn).toContain("👀 Peer 5")
 	expect(drawn).not.toContain("peer-open-")
 })
 
@@ -525,7 +527,7 @@ test("another session's room of the checkout is not shown", async ($, on) => {
 		props: { modes: [] },
 	})
 	// The button shows without a room, with no count.
-	expect(JSON.stringify(await footer.drawn())).toContain('"label":"👀 peer"')
+	expect(JSON.stringify(await footer.drawn())).toContain('"label":"👀 Peer"')
 	// A failed join adopts nothing: alone, or inside a longer command line
 	// that prints the room with main in it.
 	await $.tool.call({
@@ -536,7 +538,7 @@ test("another session's room of the checkout is not shown", async ($, on) => {
 		tool: "Bash",
 		command: "peer join csv-export main; peer status csv-export",
 	} as never)
-	expect(JSON.stringify(await footer.drawn())).toContain('"label":"👀 peer"')
+	expect(JSON.stringify(await footer.drawn())).toContain('"label":"👀 Peer"')
 })
 
 test("outside a Git checkout, a failing watch writes nothing to the chat", async ($, on) => {
@@ -641,7 +643,7 @@ async function mountBoards(
 
 test("the boards tab links the room's boards only", async ($, on) => {
 	const { drawn, read } = await mountBoards($, on, "terminal")
-	expect(drawn).toContain("boards 1")
+	expect(drawn).toContain('"label":"boards"')
 	// The title is the link, and the hint shows once under the boards.
 	expect(drawn).toContain(
 		'"href":"http://localhost:4747/b/a1","label":"Architecture ↗"',
@@ -1036,41 +1038,6 @@ test("a peer send row is the message card; a line the shell rewrites stays the c
 		})
 		expect(JSON.stringify(await row.drawn())).toContain("engine row")
 	}
-})
-
-test("the band shows the active room's pulse and yields to a survey", async ($, on) => {
-	on("ui.render", { component: "AbovePrompt" }, ($, e) =>
-		$.ui.resolve(e).Text({ children: "survey" }),
-	)
-	const ran = await start($, on)
-	const props = {
-		hasSurvey: false,
-		isWorking: false,
-		maxRows: 10,
-		bodyColumns: 100,
-		scroll: { offset: 0, bodyRows: 10 },
-	} as never
-	const band = await $.ui.mount({
-		plugin: "peer",
-		surface: "terminal",
-		component: "AbovePrompt",
-		props,
-	})
-	const drawn = JSON.stringify(await band.drawn())
-	expect(drawn).toContain("👀 csv-export")
-	expect(drawn).toContain("● reader")
-	expect(drawn).toContain("✉ 4")
-	await band.press({ key: "pulse-open" })
-	expect(ran).toContainEqual(["ui.open", "peer"])
-	const survey = await $.ui.mount({
-		plugin: "peer",
-		surface: "terminal",
-		component: "AbovePrompt",
-		props: { ...(props as object), hasSurvey: true } as never,
-	})
-	const yielded = JSON.stringify(await survey.drawn())
-	expect(yielded).toContain("survey")
-	expect(yielded).not.toContain("csv-export")
 })
 
 test("/room toggles the pane and @ offers the room's members", async ($, on) => {

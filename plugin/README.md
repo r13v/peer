@@ -5,15 +5,14 @@ The `peer` plugin shows a session's peer rooms in Claude Code: in the Code tab o
 - **`/peer:peer TASK`** starts the work: the plugin's own skill runs `peer skills flow`, and as main, Claude reads the room through the plugin instead of `peer wait`. With the plugin, Claude Code does not need the standalone `peer` skill.
 
 - **Pane.** It opens by itself when a room is active and there is room for it, and from the footer button.
-  - One row of tabs: **Chat** with its message count, a tab for each member, ● while its agent runs and ○ once it stopped, and `⏹ end` at the right. A member's tab shows its model and state, a kick button and its log: its text, its commands and their results. Kick and end act on a second press: the first turns the button into `confirm` for three seconds.
+  - One row of tabs: **Chat**, a tab for each member, ● while its agent runs and ○ once it stopped, and `⏹ end` at the right. A member's tab shows its model and state, a kick button and its log: its text, its commands and their results. Kick and end act on a second press: the first turns the button into `confirm` for three seconds.
   - **New room.** A pane without a room shows a task field; with a room, `+ new room` in the row of tabs shows it. A task sent with Enter runs `/peer:peer TASK`, and the pane shows the task in place of the field until the room starts. Where the surface has no fields, `+ new room` puts `/peer:peer ` in the prompt box instead.
   - **Keys.** While the pane holds the keyboard (ctrl+x tab or a click): `1` chat, `2` boards, `3`–`9` the members' tabs, `n` new room, `e` end, `k` kick on a member's tab; end and kick still take a second press.
   - **Replay.** A member's tab with file edits in its log has `replay N edits` (`r`): one step per edit, with `h` and `l` to go back and on. A step shows the file and the file's uncommitted diff in the member's checkout (its worktree, if it has one) now, not the step's own diff: the log keeps an edit's path, and cuts its input at 200 characters, so an edit whose input was cut is left out.
   - **Chat** shows the newest message first. Each message is a card in its author's color, the time first, with Markdown, code blocks and links to the checkout's files, such as `main.go:42`. Notices from `peer` take one line, and a long message shows its first lines until you expand it. A timeline shows who wrote when (not in the terminal). The pane shows each new message unless you hold its keyboard.
 - **Boards.** The pane's **boards** tab lists the boards of the room it shows, from `peer board list`: each with its title, a link to open it in the browser (start `peer` if the link does not open) and a preview. The preview is a schematic of the frames, nodes and edges that the plugin lays out itself, so a board nobody opened in the browser has one too; in the terminal, the same schematic drawn in cells (frames as boxes, cards as blocks of their color, without edges) and a list of frames with their node and open-thread counts. See [docs/BOARD.md](../docs/BOARD.md).
-- **Footer button.** At the right of the prompt footer, `👀 peer` is always there, with or without a room. It shows the number of messages in the session's rooms that came since the pane last showed them, opens the pane, and closes it when the pane already shows.
+- **Footer button.** At the right of the prompt footer, `👀 Peer` is always there, with or without a room. It shows the number of messages in the session's rooms that came since the pane last showed them, opens the pane, and closes it when the pane already shows.
 - **Delivery to main.** When Claude Code is main of a room, the plugin reads the room for main and puts each batch of messages into the chat as a turn of its own: right away while Claude is idle, and right after the running turn while it works. These rows are hidden in the chat, since the toast, the pane and the footer's count show the messages; in the terminal and VS Code, ctrl+o shows them as the model reads them. Main does not run `peer wait`; the plugin answers a `wait` for the room itself, so the room has only one reader as main.
-- **Band above the prompt.** In the terminal and the desktop app, while the session has an active room: the room, ● or ○ for each member, a sparkline of the room's messages in five-minute bins over the last hour, ✉ with the count the footer shows, and `open` (`o`). It yields to a survey; another plugin that draws there can take the band.
 - **Messages in the transcript.** A Bash row that only runs `peer send ID --as ROLE [--to ROLE] --text TEXT` is drawn as the message card, in its author's color. A line the shell changes first (`$`, `` ` ``, `\`, `<`, `>`, more commands) keeps its row, so a card shows only what was sent.
 - **`/room`** opens or closes the pane. In the prompt box, `@` offers the members of the room the pane shows.
 - **Delivery turns.** While Claude reads a delivery, the spinner says how many messages and from whom; after it, the empty prompt box suggests `Tell ROLE: ` for the last author (Tab takes it).
@@ -44,6 +43,19 @@ claude plugin validate plugin
 claude plugin test plugin
 claude --plugin-dir plugin
 ```
+
+### See a change in a running session
+
+The installed plugin runs the copy that `claude plugin install` or `claude plugin update` made, so an edit in the checkout reaches it only with a release. To see an edit at once, load `plugin` from the checkout into the session.
+
+1. Disable the installed plugin: `claude plugin disable peer@r13v`. Two copies would both read a room for main, which breaks one reader per role, and both would draw a footer button.
+2. Load the checkout's `plugin`:
+   - **Terminal:** `claude --plugin-dir plugin` from the checkout. The session watches the folder: a saved file reloads the hooks module.
+   - **Desktop app (Code tab), new session:** name the absolute path of `plugin` in `CLAUDE_CODE_PLUGIN_DIRS` in the `env` block of `~/.claude/settings.json`. Each new session loads it when it starts.
+   - **Desktop app, running session:** ask Claude to live-reload the plugin from this checkout. Claude loads its `plugin-authoring` skill and links `plugin` into the session's mods folder; Claude Code then asks once "Enable hot reloading for this session?". Choose `Enable for this session`: the plugin loads when the turn ends, and each later edit reloads it when the turn that made the edit ends.
+3. When you are done, run `claude plugin enable peer@r13v` and remove the link or the `CLAUDE_CODE_PLUGIN_DIRS` entry.
+
+A reload starts the module again: its own variables, such as queued deliveries, start empty. Rooms lose no messages, because `peer ack` keeps main's cursor in the store.
 
 ### Check against a new Claude Code
 
