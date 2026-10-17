@@ -1,9 +1,9 @@
 // engine-check checks the Claude Code plugin against the installed Claude
-// Code once per engine: the plugin's typecheck against the types the engine
-// wrote, then the plugin's tests in the CLI's kit. A stamp in the user's
-// cache keeps the pair of versions it last passed; --force checks again.
-// It prints everything to stdout: a SessionStart hook puts only stdout into
-// the session.
+// Code once per version: the plugin's typecheck against that version's
+// types, which typecheck:plugin has it write, then the plugin's tests in the
+// CLI's kit. A stamp in the user's cache keeps the version it last passed;
+// --force checks again. It prints everything to stdout: a SessionStart hook
+// puts only stdout into the session.
 import { spawnSync } from "node:child_process"
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os"
@@ -15,33 +15,17 @@ if (process.env.PEER_ENGINE_CHECK) process.exit(0)
 process.env.PEER_ENGINE_CHECK = "1"
 
 const root = join(import.meta.dirname, "..")
-const typesFile = join(
-	root,
-	"plugin/.claude-plugin/types/claude-code/index.d.ts",
-)
 const stampFile = join(homedir(), ".cache/peer/engine-checked")
 
-let firstLine = ""
-try {
-	firstLine = readFileSync(typesFile, "utf8").split("\n", 1)[0] ?? ""
-} catch {
-	console.log(
-		"engine-check: plugin/.claude-plugin/types is missing; Claude Code writes it when it loads the plugin interactively: run claude --plugin-dir plugin in a terminal, then run this again",
-	)
-	process.exit(1)
-}
-const types = /^\/\/ Written by Claude Code (\S+)\./.exec(firstLine)?.[1]
 const cli = spawnSync("claude", ["--version"], { encoding: "utf8" })
 	.stdout?.trim()
 	.split(" ")[0]
-if (!types || !cli) {
-	console.log(
-		`engine-check: cannot read the versions (types: ${types ?? "?"}, cli: ${cli ?? "?"})`,
-	)
+if (!cli) {
+	console.log("engine-check: cannot read claude --version")
 	process.exit(1)
 }
 
-const pair = `types ${types}, cli ${cli}`
+const pair = `cli ${cli}`
 let stamp = ""
 try {
 	stamp = readFileSync(stampFile, "utf8").trim()
@@ -64,8 +48,4 @@ for (const step of ["typecheck:plugin", "test:plugin"]) {
 
 mkdirSync(dirname(stampFile), { recursive: true })
 writeFileSync(stampFile, `${pair}\n`)
-console.log(`checked against Claude Code (${pair})`)
-if (types !== cli)
-	console.log(
-		`the typecheck used the types of Claude Code ${types}, not of the CLI ${cli}: run claude --plugin-dir plugin in a terminal so the CLI writes its types, then npm run engine-check`,
-	)
+console.log(`checked against Claude Code ${cli}`)
