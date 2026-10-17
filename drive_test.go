@@ -404,7 +404,10 @@ func TestStoppedDriveLetsAgentCleanUp(t *testing.T) {
 	turnRecord(t, dir, 1)
 	cancel()
 	select {
-	case <-done:
+	case err := <-done:
+		if err != nil && !errors.Is(err, context.Canceled) {
+			t.Fatal(err)
+		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("drive outlived its stop")
 	}

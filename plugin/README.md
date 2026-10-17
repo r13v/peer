@@ -17,7 +17,7 @@ The `peer` plugin shows a session's peer rooms in Claude Code: in the Code tab o
 - **`/room`** opens or closes the pane. In the prompt box, `@` offers the members of the room the pane shows.
 - **Delivery turns.** While Claude reads a delivery, the spinner says how many messages and from whom; after it, the empty prompt box suggests `Tell ROLE: ` for the last author (Tab takes it).
 - **Permission dialog.** For `peer end` and `peer kick`, a line under the dialog says which members' agents still run or which agent the kick stops.
-- **Toasts** when a member joins, exits or is kicked, and when a room ends. **Notifications** through your notification channel when a room ends and when a member writes to main alone, at most one a minute for each room. They name the author and the room, never the text, since your notification hooks may send it off the machine.
+- **Toasts** when a member joins, exits or is kicked, and when a room ends. The plugin raises no system notifications.
 
 The plugin's version is the CLI's: each release of `peer` sets it, so `claude plugin update` brings the plugin that goes with the new CLI. The plugin runs `peer watch`, `peer memberlog` and `peer ack` from your `PATH`, so it needs a `peer` with these commands. After each delivery, `peer ack` moves main's cursor just past the last message in the chat, so a `peer wait` run after the plugin is turned off gets the rest. When `peer ack` fails, for example with an older `peer` earlier on `PATH`, the pane shows why in red; the plugin tries that room again and goes on delivering the other rooms.
 

@@ -107,8 +107,6 @@ let deliveryAuthor = ""
 // What each queued delivery's turn will read, by its text, made from the
 // messages themselves: a message's text never names an author here.
 const deliveries = new Map<string, { line: string; author: string }>()
-// When each room last raised a notification for a message to main.
-const notifiedAt: Record<string, number> = {}
 // The member whose edits the pane replays, the step it shows, and that
 // step's file diff once git printed it.
 let replay: { role: string; index: number } | null = null
@@ -421,32 +419,16 @@ async function apply($: Engine, lines: string[]) {
 	}
 	if (isReady) {
 		const mine = new Set(await get($, own))
-		// Notifications are main's: a session that is a member of the room
-		// too would raise each one twice.
-		const leads = new Set(await get($, led))
 		for (const room of roomEvents) {
 			const was = before[room.id]
 			if (!mine.has(room.id)) continue
-			if (room.ended_at && was && !was.ended_at) {
+			if (room.ended_at && was && !was.ended_at)
 				$.ui.toast(`peer: room ${room.id} ended`)
-				if (leads.has(room.id)) notify($, `room ${room.id} ended`)
-			}
 		}
 		for (const [id, list] of Object.entries(fresh)) {
 			if (!mine.has(id)) continue
 			for (const m of list) {
 				if (m.from === "peer") $.ui.toast(`${id}: ${m.text}`)
-			}
-			// A member that writes to main alone may wait for an answer. The
-			// notification names the author and the room, never the text: the
-			// person's notification hooks may send it off the machine.
-			const direct = list.find(
-				(m) => m.to === "main" && !["main", "peer", "user"].includes(m.from),
-			)
-			const now = Date.now()
-			if (direct && leads.has(id) && now - (notifiedAt[id] ?? 0) > 60_000) {
-				notifiedAt[id] = now
-				notify($, `${direct.from} wrote to main in ${id}`)
 			}
 		}
 		const st = await snapshot($)
@@ -481,12 +463,6 @@ async function apply($: Engine, lines: string[]) {
 	}
 	roomIndex = await get($, rooms)
 	void pump($)
-}
-
-// notify raises a native notification; a person who turned them off, or a
-// surface without them, is no error.
-function notify($: Engine, text: string) {
-	void $.ui.notify(text, { title: "peer" }).catch(() => ({}))
 }
 
 // readLog adds a room's whole transcript from peer log to the messages,

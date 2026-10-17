@@ -268,32 +268,31 @@ test("a room whose ack keeps failing does not hold back another room's delivery"
 	expect(JSON.stringify(await pane.drawn())).not.toContain("peer ack failed")
 })
 
-test("a message to main and the room's end raise notifications without the text", async ($, on) => {
+test("a message to main and the room's end show toasts, never system notifications", async ($, on) => {
 	const notes: string[] = []
+	const toasts: string[] = []
 	on("ui.notify", (_, e) => {
 		notes.push(e.text)
 		return { value: { isSent: true, channel: "terminal" } } as never
 	})
-	on("ui.toast", () => ({ value: undefined }) as never)
+	on("ui.toast", (_, e) => {
+		toasts.push(e.text)
+		return { value: undefined } as never
+	})
 	const tools = await lead(
 		$,
 		on,
 		[],
 		[
 			{ event: "message", room: ROOM.id, message: message(1) },
-			// A second one within a minute raises none.
-			{ event: "message", room: ROOM.id, message: message(2) },
 			{ event: "room", room: { ...ROOM, ended_at: "2026-10-05T21:00:00Z" } },
 		],
 		(text) => ({ text }),
 	)
 	tools.release()
 	await new Promise((resolve) => setTimeout(resolve, 100))
-	expect([...notes].sort()).toEqual([
-		"reader wrote to main in csv-export",
-		"room csv-export ended",
-	])
-	expect(notes.join(" ")).not.toContain("finding")
+	expect(toasts).toContain(`peer: room ${ROOM.id} ended`)
+	expect(notes).toEqual([])
 })
 
 test("a delivery's turn names its authors on the spinner, then suggests answering the last", async ($, on) => {

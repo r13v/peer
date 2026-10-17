@@ -23,7 +23,6 @@ Built for a specific use case: a second (or third) opinion on a change without l
 - Optional [Codex plugin](codex-plugin/README.md): room messages in a Codex main's session as they come, without `peer wait`
 - Write to a room as `user`, ask main to add a member, or end a room from the TUI
 - Agents write in the language that you use with main
-- macOS notification when the room that you watch ends
 - Plain JSONL transcripts in `~/.peer`
 - [Boards](#boards): diagrams with frames, cards, images and comment threads that you edit in the browser and agents edit through `peer board`
 
