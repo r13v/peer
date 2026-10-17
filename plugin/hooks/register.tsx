@@ -1059,7 +1059,6 @@ export const register: Register = (on) => {
 		// has stopped, as every member of an ended room has.
 		const dot = (isOn: boolean) => (isOn ? "●" : "○")
 		const boardList = boardViews[room.id]
-		const boardCount = boardList ? ` ${boardList.boards.length}` : ""
 		const header = (
 			<Box flexDirection="column" gap={1}>
 				{active.length > 1 && "Select" in els && (
@@ -1074,14 +1073,14 @@ export const register: Register = (on) => {
 				<Box gap={1} flexWrap="wrap">
 					<Button
 						key="tab-chat"
-						label={`${dot(isOpen)} chat ${all.length}`}
+						label={`${dot(isOpen)} chat`}
 						hotkey="1"
 						variant={shown === "chat" ? "primary" : "secondary"}
 						onPress={pick("chat")}
 					/>
 					<Button
 						key="tab-boards"
-						label={`boards${boardCount}`}
+						label="boards"
 						hotkey="2"
 						variant={shown === BOARDS ? "primary" : "secondary"}
 						onPress={pick(BOARDS)}
@@ -1482,58 +1481,6 @@ export const register: Register = (on) => {
 		)
 	})
 
-	// The band above the prompt shows the pulse of the room the pane shows
-	// while it is active: who runs, how busy the last hour was, what the pane
-	// has not shown, and a button that opens the pane.
-	on("ui.render", { component: "AbovePrompt" }, async ($, e, next) => {
-		if (e.props.hasSurvey) return next(e)
-		const st = await snapshot($)
-		const room = current(st)
-		if (!room || room.ended_at) return next(e)
-		const { Box, Text, Button } = $.ui.resolve(e)
-		const others = room.members.filter((m) => m.role !== "main" && !m.kicked)
-		const isWide = e.props.bodyColumns >= 60
-		const fresh = unseen(st)
-		const running = others.filter((m) => !m.exited).length
-		return (
-			<Box gap={2} paddingX={1}>
-				<Text bold color={authorColor(room, "main")}>
-					{`${ICON} ${room.id}`}
-				</Text>
-				{isWide ? (
-					<Box gap={1}>
-						{others.map((m) => (
-							<Text
-								key={`pulse-${m.role}`}
-								color={authorColor(room, m.role)}
-								dimColor={Boolean(m.exited)}
-							>
-								{`${m.exited ? "○" : "●"} ${m.role}`}
-							</Text>
-						))}
-					</Box>
-				) : (
-					<Text dimColor>{`${running}/${others.length} running`}</Text>
-				)}
-				{isWide && (
-					<Text dimColor>
-						{`last hour ${sparkline(st.messages[room.id] ?? [], Date.now())}`}
-					</Text>
-				)}
-				{fresh > 0 && (
-					<Text color={authorColor(room, "user")}>{`✉ ${fresh}`}</Text>
-				)}
-				<Button
-					key="pulse-open"
-					label="open"
-					hotkey="o"
-					variant="secondary"
-					onPress={() => togglePane($)}
-				/>
-			</Box>
-		)
-	})
-
 	// The prompt footer always gets one peer button, with the count of
 	// messages in the session's rooms that came since the pane last showed
 	// them: it opens the pane, and closes it when the pane already shows.
@@ -1548,7 +1495,7 @@ export const register: Register = (on) => {
 				)}
 				<Button
 					key="peer-open"
-					label={`${ICON} peer${fresh > 0 ? ` ${fresh}` : ""}`}
+					label={`${ICON} Peer${fresh > 0 ? ` ${fresh}` : ""}`}
 					plain
 					onPress={() => togglePane($)}
 				/>
@@ -1594,31 +1541,8 @@ function sentMessage(command: string) {
 	return sent.from && hasText ? sent : null
 }
 
-const BARS = "▂▃▄▅▆▇█"
-
 // DIFF_COLOR colors a diff line by its first character.
 const DIFF_COLOR: Record<string, string> = { "+": "green", "-": "red" }
-
-// sparkline draws the room's messages, not peer's notices, in twelve
-// five-minute bins up to now: ▁ for none, then taller as the busiest bin.
-function sparkline(list: PeerMessage[], now: number) {
-	const bins = new Array<number>(12).fill(0)
-	for (const m of list) {
-		const ago = Math.floor((now - Date.parse(m.at)) / 300_000)
-		if (m.from !== "peer" && ago >= 0 && ago < 12)
-			bins[11 - ago] = (bins[11 - ago] ?? 0) + 1
-	}
-	const top = Math.max(1, ...bins)
-	return bins
-		.map((n) =>
-			n === 0
-				? "▁"
-				: BARS[
-						Math.min(BARS.length - 1, Math.floor((n / top) * (BARS.length - 1)))
-					],
-		)
-		.join("")
-}
 
 type EditStep = { path: string; tool: string; at?: string }
 
