@@ -994,3 +994,176 @@ test("a board written twice in one second is read again", async ($, on) => {
 		listing.boards = BOARD_LIST
 	}
 })
+
+const toolUse = (command: string) =>
+	({
+		tool_use_id: "t1",
+		tool: "Bash",
+		input: { command },
+		isRunning: false,
+		isErrored: false,
+		isInterrupted: false,
+	}) as never
+
+test("a peer send row is the message card; a line the shell rewrites stays the command", async ($, on) => {
+	on("ui.render", { component: "ToolUse" }, ($, e) =>
+		$.ui.resolve(e).Text({ children: "engine row" }),
+	)
+	await start($, on)
+	const card = await $.ui.mount({
+		plugin: "peer",
+		surface: "desktop",
+		component: "ToolUse",
+		props: toolUse(
+			'peer send csv-export --as reader --to main --text "See main.go:42"',
+		),
+	})
+	const drawn = JSON.stringify(await card.drawn())
+	expect(drawn).toContain("👀 csv-export")
+	expect(drawn).toContain("reader")
+	expect(drawn).toContain("[main.go:42](file:///repo/main.go)")
+	// What $(…) prints is what the room got, so the card would show other text.
+	for (const command of [
+		'peer send csv-export --as main --text "done: $(cat notes)"',
+		"peer send csv-export --as main <<EOF",
+		"peer send csv-export --as main --text hi && peer end csv-export --as main",
+	]) {
+		const row = await $.ui.mount({
+			plugin: "peer",
+			surface: "desktop",
+			component: "ToolUse",
+			props: toolUse(command),
+		})
+		expect(JSON.stringify(await row.drawn())).toContain("engine row")
+	}
+})
+
+test("the band shows the active room's pulse and yields to a survey", async ($, on) => {
+	on("ui.render", { component: "AbovePrompt" }, ($, e) =>
+		$.ui.resolve(e).Text({ children: "survey" }),
+	)
+	const ran = await start($, on)
+	const props = {
+		hasSurvey: false,
+		isWorking: false,
+		maxRows: 10,
+		bodyColumns: 100,
+		scroll: { offset: 0, bodyRows: 10 },
+	} as never
+	const band = await $.ui.mount({
+		plugin: "peer",
+		surface: "terminal",
+		component: "AbovePrompt",
+		props,
+	})
+	const drawn = JSON.stringify(await band.drawn())
+	expect(drawn).toContain("👀 csv-export")
+	expect(drawn).toContain("● reader")
+	expect(drawn).toContain("✉ 4")
+	await band.press({ key: "pulse-open" })
+	expect(ran).toContainEqual(["ui.open", "peer"])
+	const survey = await $.ui.mount({
+		plugin: "peer",
+		surface: "terminal",
+		component: "AbovePrompt",
+		props: { ...(props as object), hasSurvey: true } as never,
+	})
+	const yielded = JSON.stringify(await survey.drawn())
+	expect(yielded).toContain("survey")
+	expect(yielded).not.toContain("csv-export")
+})
+
+test("/room toggles the pane and @ offers the room's members", async ($, on) => {
+	on("prompt.autocomplete", () => ({ suggestions: [] }) as never)
+	const ran = await start($, on)
+	await $.command.run({ command: "room", args: "" } as never)
+	expect(ran).toContainEqual(["ui.open", "peer"])
+	await $.command.run({ command: "room", args: "" } as never)
+	expect(ran).toContainEqual(["ui.close", "peer"])
+	// The kit raises the event, though Engine does not list it.
+	const typeahead = $.prompt as unknown as {
+		autocomplete: (e: unknown) => Promise<{ suggestions: { text: string }[] }>
+	}
+	const { suggestions } = await typeahead.autocomplete({
+		text: "ask @re",
+		cursor: 7,
+		token: "@re",
+		start: 4,
+	})
+	expect(suggestions.map((one) => one.text)).toContain("@reader")
+})
+
+test("the dialog of a peer end says which members still run", async ($, on) => {
+	const notices: string[] = []
+	on("ui.notice", (_, e) => {
+		notices.push(String((e as { text?: string }).text))
+		return { value: undefined } as never
+	})
+	await start($, on)
+	await $.tool.call({
+		tool: "Bash",
+		command: "peer end csv-export --as main",
+		tool_use_id: "t2",
+	} as never)
+	expect(notices).toContainEqual("peer: ends csv-export; still running: reader")
+})
+
+test("a member's edits replay one file at a time, from whole log entries only", async ($, on) => {
+	const log = lines(
+		{
+			kind: "tool",
+			text: 'Edit {"file_path":"/repo/main.go","old_string":"a"}',
+		},
+		// The log cut this input, so its path may be cut too.
+		{ kind: "tool", text: 'Write {"file_path":"/repo/very/long…' },
+		{ kind: "tool", text: "edit store.go web/app.ts" },
+	)
+	const ran = await start($, on, WATCH, log)
+	const ui = await $.ui.mount({
+		plugin: "peer",
+		surface: "desktop",
+		component: "Pane",
+		requestId: "peer",
+		props: PANE,
+	})
+	await ui.press({ key: "tab-reader" })
+	let drawn = JSON.stringify(await ui.drawn())
+	expect(drawn).toContain("replay 3 edits")
+	await ui.press({ key: "replay" })
+	drawn = JSON.stringify(await ui.drawn())
+	expect(drawn).toContain("main.go")
+	expect(drawn).toContain("step 1 of 3")
+	expect(ran).toContainEqual([
+		"git",
+		"-C",
+		"/repo",
+		"diff",
+		"--",
+		"/repo/main.go",
+	])
+	await ui.press({ key: "replay-next" })
+	expect(JSON.stringify(await ui.drawn())).toContain("store.go")
+})
+
+test("the terminal draws a board as cells of its schematic", async ($, on) => {
+	on("fs.read", () => ({ value: JSON.stringify(BOARD) }) as never)
+	await start($, on)
+	const ui = await $.ui.mount({
+		plugin: "peer",
+		surface: "terminal",
+		component: "Pane",
+		requestId: "peer",
+		props: PANE,
+	})
+	await ui.press({ key: "tab-boards" })
+	await new Promise((resolve) => setTimeout(resolve, 50))
+	const drawn = JSON.stringify(await ui.drawn())
+	const raster = /"columns":(\d+),"rows":(\d+),"cells":"([^"]+)"/.exec(drawn)
+	expect(raster).not.toBeNull()
+	const [, columns, rows, cells] = raster ?? []
+	// Three little-endian u32 per cell, in padded base64.
+	expect(Math.ceil((Number(columns) * Number(rows) * 12) / 3) * 4).toBe(
+		cells?.length ?? 0,
+	)
+	expect(drawn).toContain("Store · 3 nodes")
+})
