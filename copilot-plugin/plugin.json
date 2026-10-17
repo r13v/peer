@@ -1,6 +1,6 @@
 {
   "name": "peer",
-  "version": "0.1.54",
+  "version": "0.1.55",
   "description": "Lead peer rooms from Copilot CLI: room messages for main come into the session as turns of their own, without peer wait, and a canvas shows the room",
   "author": {
     "name": "r13v"
