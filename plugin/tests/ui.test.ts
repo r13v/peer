@@ -136,6 +136,20 @@ const WATCH = lines(
 	{ event: "ready" },
 )
 
+// engineFooter stands for what is beneath the plugin in the SessionMode chain:
+// the engine's mode labels and, when given, another plugin's button.
+function engineFooter(on: Parameters<TestBody>[1], button?: string) {
+	on("ui.render", { component: "SessionMode" }, ($, e) => {
+		const { Box, Text, Button } = $.ui.resolve(e)
+		const labels = Text({ children: e.props.modes.join(" & ") })
+		return Box({
+			children: button
+				? [labels, Button({ key: "other", label: button, onPress: () => {} })]
+				: [labels],
+		} as never)
+	})
+}
+
 // start runs the plugin against a checkout that tracks main.go, in UTC+3,
 // with watch printing what it is given and memberlog printing memberlog,
 // and records the commands it runs and the panes it opens. The session
@@ -281,6 +295,7 @@ test("a long message shows its start until it is expanded", async ($, on) => {
 })
 
 test("the footer counts messages the pane has not shown and toggles the pane", async ($, on) => {
+	engineFooter(on)
 	const ran = await start($, on)
 	for (const surface of ["terminal", "desktop"] as const) {
 		ran.length = 0
@@ -300,7 +315,24 @@ test("the footer counts messages the pane has not shown and toggles the pane", a
 	}
 })
 
+test("the footer keeps another plugin's footer button beside the peer one", async ($, on) => {
+	engineFooter(on, "☑️ Draft")
+	await start($, on)
+	const footer = await $.ui.mount({
+		plugin: "peer",
+		surface: "desktop",
+		component: "SessionMode",
+		props: { modes: ["focus"] },
+	})
+	const drawn = JSON.stringify(await footer.drawn())
+	expect(drawn).toContain("☑️ Draft")
+	expect(drawn).toContain("👀 Peer 4")
+	// The labels are drawn once, by the inner part of the chain.
+	expect(drawn.split("focus").length).toBe(2)
+})
+
 test("with two rooms, the footer has one button that counts both", async ($, on) => {
+	engineFooter(on)
 	const other = { ...ROOM, id: "auth-fix", started_at: "2026-10-05T19:00:00Z" }
 	const note = {
 		id: "z",
@@ -508,6 +540,7 @@ test("the plugin's own rows are hidden; others and the terminal's ctrl+o draw as
 })
 
 test("another session's room of the checkout is not shown", async ($, on) => {
+	engineFooter(on)
 	const ran = await start($, on, WATCH, "", false)
 	expect(ran.some((argv) => argv[0] === "ui.open")).toBe(false)
 	const ui = await $.ui.mount({
