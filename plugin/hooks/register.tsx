@@ -1460,15 +1460,16 @@ export const register: Register = (on) => {
 	// The prompt footer always gets one peer button, with the count of
 	// messages in the session's rooms that came since the pane last showed
 	// them: it opens the pane, and closes it when the pane already shows.
-	on("ui.render", { component: "SessionMode" }, async ($, e) => {
+	// The rest of the chain draws the mode labels and other plugins' buttons;
+	// the peer button goes beside them.
+	on("ui.render", { component: "SessionMode" }, async ($, e, next) => {
+		const rest = await next(e)
 		const st = await snapshot($)
-		const { Box, Text, Button } = $.ui.resolve(e)
+		const { Box, Button } = $.ui.resolve(e)
 		const fresh = unseen(st)
 		return (
 			<Box gap={1}>
-				{e.props.modes.length > 0 && (
-					<Text dimColor>{e.props.modes.join(" & ")}</Text>
-				)}
+				{rest}
 				<Button
 					key="peer-open"
 					label={`${ICON} Peer${fresh > 0 ? ` ${fresh}` : ""}`}
