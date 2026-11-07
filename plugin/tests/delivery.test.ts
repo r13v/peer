@@ -342,3 +342,141 @@ test("a delivery's turn names its authors on the spinner, then suggests answerin
 	await $.turn.start({ text: "go on", turnId: "u" })
 	expect(JSON.stringify(await spinner.drawn())).not.toContain("peer: reading")
 })
+
+test("a member that joined here gets its role's messages, acks as it, and learns of its kick", async ($, on) => {
+	const room = {
+		...ROOM,
+		members: [
+			{ role: "main", agent: "codex" },
+			{ role: "critic", agent: "claude" },
+			{ role: "tester", agent: "pi" },
+		],
+	}
+	const mail = (i: number, from: string, to: string) => ({
+		event: "message",
+		room: ROOM.id,
+		message: { ...message(i), from, to },
+	})
+	const submits: string[] = []
+	const acks: string[][] = []
+	const waits: string[] = []
+	let release = () => {}
+	const gate = new Promise<void>((resolve) => (release = resolve))
+	on("process.spawn", async function* (_, e, next) {
+		if (e.argv[1] !== "watch") return yield* next(e)
+		yield {
+			stream: "stdout",
+			text: lines(
+				{ event: "room", room },
+				// Before the join: the member still gets it, as its first wait would.
+				mail(1, "main", "*"),
+				{ event: "ready" },
+			),
+		}
+		await gate
+		yield {
+			stream: "stdout",
+			text: lines(
+				mail(2, "main", "critic"),
+				mail(3, "main", "tester"),
+				mail(4, "critic", "*"),
+				mail(5, "tester", "*"),
+			),
+		}
+		await new Promise((resolve) => setTimeout(resolve, 30))
+		yield {
+			stream: "stdout",
+			text: lines(
+				{
+					event: "room",
+					room: {
+						...room,
+						members: room.members.map((m) =>
+							m.role === "critic" ? { ...m, kicked: true } : m,
+						),
+					},
+				},
+				mail(6, "main", "*"),
+			),
+		}
+		await new Promise(() => {})
+		return { code: 0, signal: null } as never
+	})
+	on("process.run", (_, e) => {
+		if (e.argv[1] === "ack") acks.push([...e.argv.slice(2)])
+		return { value: { exitCode: 0, stdout: "", stderr: "" } } as never
+	})
+	on("prompt.submit", (_, e) => {
+		submits.push(e.text)
+		return { text: e.text } as never
+	})
+	on("tool.call", { tool: "Bash" }, (_, e) => {
+		if (e.command.startsWith("peer wait")) waits.push(e.command)
+		return {
+			result: {
+				stdout: e.command.startsWith("peer join")
+					? `${JSON.stringify(room)}\n`
+					: "",
+				stderr: "",
+				interrupted: false,
+			},
+		} as never
+	})
+	on("session.start", (_, e) => ({ cwd: e.cwd }) as never)
+	on("session.cwd", () => ({ value: "/repo" }) as never)
+	on("ui.open", () => ({ value: { isPlaced: true } }) as never)
+	on("ui.scroll", () => ({ value: {} }) as never)
+	on("ui.panes", () => ({ value: [] }) as never)
+	await $.session.start({ source: "startup", cwd: "/repo" } as never)
+	await new Promise((resolve) => setTimeout(resolve, 50))
+	const joined = await $.tool.call({
+		tool: "Bash",
+		command: `peer join ${ROOM.id} critic --agent claude`,
+	} as never)
+	expect(JSON.stringify(joined)).toContain(
+		"The peer plugin reads this room for critic",
+	)
+	await new Promise((resolve) => setTimeout(resolve, 50))
+	expect(submits).toHaveLength(1)
+	expect(submits[0]).toContain(
+		`peer room ${ROOM.id}: 1 new message for critic, delivered by the peer plugin`,
+	)
+	// The member's own wait is answered by the plugin, never run; main's is
+	// not the session's to take over.
+	const waited = await $.tool.call({
+		tool: "Bash",
+		command: `peer wait ${ROOM.id} --as critic`,
+	} as never)
+	expect(JSON.stringify(waited)).toContain("reads this room for critic")
+	const mixed = await $.tool.call({
+		tool: "Bash",
+		command: `peer send ${ROOM.id} --as critic --text hi; peer wait ${ROOM.id} --as critic`,
+	} as never)
+	expect(JSON.stringify(mixed)).toContain(
+		"Run the other commands without peer wait",
+	)
+	// A wait for another room first in the line does not let the member's
+	// wait through.
+	const behind = await $.tool.call({
+		tool: "Bash",
+		command: `peer wait other --as main --timeout 0; peer wait ${ROOM.id} --as critic --timeout 0`,
+	} as never)
+	expect(JSON.stringify(behind)).toContain(
+		"Run the other commands without peer wait",
+	)
+	await $.tool.call({
+		tool: "Bash",
+		command: `peer wait ${ROOM.id} --as main`,
+	} as never)
+	expect(waits).toEqual([`peer wait ${ROOM.id} --as main`])
+	release()
+	await new Promise((resolve) => setTimeout(resolve, 150))
+	// Only what is for critic, never its own words or another's mail; then
+	// the kick alone, without the message after it.
+	expect(submits.map(delivered)).toEqual([[1], [2, 5], []])
+	expect(submits[2]).toContain(
+		`You were kicked from peer room ${ROOM.id} as critic.`,
+	)
+	expect(acks).toContainEqual([ROOM.id, "--as", "critic", "--upto", "m5"])
+	expect(acks.every((args) => args[2] === "critic")).toBe(true)
+})

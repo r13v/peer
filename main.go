@@ -40,7 +40,7 @@ var workerInstructions []byte
 //go:embed instructions/board.md
 var boardInstructions []byte
 
-const usage = "usage: peer, peer --version, peer update, peer skills flow|main|member|worker|board, peer start NAME, peer join|invite|kick ID ROLE, peer send|wait|end ID --as ROLE, peer send ID --as ROLE --text TEXT, peer wait ID --as ROLE --timeout DURATION, peer ack ID --as ROLE --upto MESSAGE_ID, peer forward ID --as main --codex-thread UUID|--copilot-session UUID, peer status [ID], peer history, peer watch [ID], peer log ID [--json], peer memberlog ID ROLE [--follow], or peer board create|list|inspect|apply|import-image|schema"
+const usage = "usage: peer, peer --version, peer update, peer skills flow|main|member|worker|board, peer start NAME, peer join|invite|kick ID ROLE, peer send|wait|end ID --as ROLE, peer send ID --as ROLE --text TEXT, peer wait ID --as ROLE --timeout DURATION, peer ack ID --as ROLE --upto MESSAGE_ID, peer forward ID --as ROLE --codex-thread UUID|--copilot-session UUID, peer status [ID], peer history, peer watch [ID], peer log ID [--json], peer memberlog ID ROLE [--follow], or peer board create|list|inspect|apply|import-image|schema"
 
 // sendTextHint names the ways send takes a message, for agents that
 // guess --message or a positional text.
@@ -316,13 +316,14 @@ func run(args []string, in io.Reader, out io.Writer, cwd string) error {
 		}
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
+		isRole := checkName(*actor) == nil && *actor != human && *actor != system
 		switch {
-		case *actor == mainRole && codexThread.MatchString(*thread) && *copilotSession == "":
+		case isRole && codexThread.MatchString(*thread) && *copilotSession == "":
 			return s.forward(ctx, id, *actor, *thread, nil, out)
-		case *actor == mainRole && codexThread.MatchString(*copilotSession) && *thread == "":
+		case isRole && codexThread.MatchString(*copilotSession) && *thread == "":
 			return s.forward(ctx, id, *actor, *copilotSession, in, out)
 		}
-		return errors.New("usage: peer forward ID --as main --codex-thread UUID|--copilot-session UUID; it delivers main's messages to the Codex session with that UUID, or over stdio to the Copilot extension of that session")
+		return errors.New("usage: peer forward ID --as ROLE --codex-thread UUID|--copilot-session UUID; it delivers the role's messages to the Codex session with that UUID, or over stdio to the Copilot extension of that session")
 	case "drive": // hidden: invite runs it for a codex, claude or copilot member
 		if err := needRole("drive ID ROLE [--brief TEXT]"); err != nil {
 			return err

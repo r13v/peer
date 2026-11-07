@@ -19,8 +19,8 @@ Built for a specific use case: a second (or third) opinion on a change without l
 - Main or you can kick a member and stop its agent
 - Several active rooms in one checkout at the same time
 - TUI (`peer` with no arguments): all rooms from all checkouts, transcripts, background member logs, search
-- Optional [Claude Code plugin](plugin/README.md): a room pane in Claude Code and room messages in main's chat as they come
-- Optional [Codex plugin](codex-plugin/README.md): room messages in a Codex main's session as they come, without `peer wait`
+- Optional [Claude Code plugin](plugin/README.md): a room pane in Claude Code and room messages in the chat of main, or of a member that joined, as they come
+- Optional [Codex plugin](codex-plugin/README.md): room messages in the session of a Codex main, or of a Codex member that joined, as they come, without `peer wait`
 - Write to a room as `user`, ask main to add a member, or end a room from the TUI
 - Agents write in the language that you use with main
 - Plain JSONL transcripts in `~/.peer`
@@ -81,7 +81,7 @@ npx skills remove peer -g -a claude-code
 
 See [plugin/README.md](plugin/README.md).
 
-**Codex plugin (optional):** as main, Codex gets room messages as turns of their own instead of running `peer wait`. It brings its own `peer` skill, so Codex does not need the agent skill above. Without the plugin, Codex uses the agent skill as before.
+**Codex plugin (optional):** as main, or as a member that joined, Codex gets room messages as turns of their own instead of running `peer wait`. It brings its own `peer` skill, so Codex does not need the agent skill above. Without the plugin, Codex uses the agent skill as before.
 
 ```bash
 codex plugin marketplace add r13v/peer
@@ -90,7 +90,7 @@ codex plugin add peer@r13v-codex
 
 Then trust its hooks with `/hooks` in Codex, and remove the agent skill there: `npx skills remove peer -g -a codex`. See [codex-plugin/README.md](codex-plugin/README.md).
 
-**Copilot CLI plugin (optional):** as main, Copilot gets room messages as turns of their own instead of running `peer wait`, and the GitHub Copilot app shows the room on a canvas. It needs Copilot's experimental features. It brings its own `peer` skill, so Copilot does not need the agent skill above.
+**Copilot CLI plugin (optional):** as main, or as a member that joined, Copilot gets room messages as turns of their own instead of running `peer wait`, and the GitHub Copilot app shows the room on a canvas. It needs Copilot's experimental features. It brings its own `peer` skill, so Copilot does not need the agent skill above.
 
 ```bash
 copilot plugin marketplace add r13v/peer
@@ -193,11 +193,12 @@ Add any agent yourself, for example Copilot: paste main's join prompt into that 
 2. **Add members.** Main runs `peer invite ROOM ROLE --as main --agent codex` to start `codex`, `claude`, `copilot` or `pi` in the background in the same checkout. Any other agent runs `peer join ROOM ROLE`. Main gets a notice from `peer` for each member that joins.
 3. **Discuss.** The agents send messages with `peer send` and receive them with `peer wait`. A message goes to all participants, or to one with `--to ROLE`. `wait` blocks until a message comes, the room ends or the agent is kicked. Then it returns all the messages that came, up to 16 at a time. `--timeout 5m` limits the wait, for an agent whose shell tool stops long commands. `--timeout 0` checks once and returns immediately, for an agent that is busy. When main runs on an agent that can run a background command and wake when the command exits, such as Claude Code, main keeps a `wait` running between turns. Thus main reads what you send from `peer`.
    A background Codex, Claude Code or Copilot member does not run `wait`. `peer` reads the room for it and starts the member's session with the first batch of messages and resumes it with each later batch as a new turn; between turns the member is idle and costs no tokens. The member answers with `peer send` and ends its turn. Its role refuses `wait`, so the role keeps one reader. A batch is marked read once its turn succeeds; a failed turn stops the member, and main's notice gives the agent's last error. Pi has no session to resume, so a pi member keeps calling `wait`.
+   With the Claude Code, Codex or Copilot plugin, an agent that joins with `peer join` on a line of its own gets its messages as turns of its own too, and does not run `wait`; when it is kicked, a last turn tells it so.
 4. **Implement.** Main edits files, and so do the workers that it invited.
 5. **Review.** The members inspect the diff and report findings. Main fixes them and asks for another review.
 6. **End.** Main runs `peer end`. After this, nobody can send messages to the room. Start a new room for the next task.
 
-`peer` does not type into idle chats, except the background Codex, Claude Code and Copilot members that it resumes. Every other agent calls `wait` when it needs a reply.
+`peer` does not type into idle chats, except the background Codex, Claude Code and Copilot members that it resumes. The plugins queue turns in the sessions they deliver to. Every other agent calls `wait` when it needs a reply.
 
 ### Room Lifecycle
 

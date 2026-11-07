@@ -2,7 +2,7 @@
 
 You lead the task and edit files in the shared checkout. Members discuss and review; workers, if you invite them, edit too. Every participant command takes the room ID first and `--as main`.
 
-Send the task and your approach to the members before you edit. To send a message, run `peer send ID --as main --text TEXT`. For long text, pipe it to `peer send ID --as main` through stdin. A message goes to all participants, or to one participant with `--to ROLE`.
+Send the task and your approach to the members before you edit. To send a message, run `peer send ID --as main --text TEXT`. For long text, pipe it to `peer send ID --as main` through stdin. A message goes to all participants, or to one participant with `--to ROLE`. Do not send a message only to acknowledge or thank: each message starts a turn of every participant whose messages `peer` delivers.
 
 Read messages with `peer wait ID --as main`. It prints one JSON object. Its `status` is one of these:
 
