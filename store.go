@@ -815,6 +815,13 @@ func (s *store) deliverBatch(sid, as string, write func(batch) error) (bool, err
 		if err != nil {
 			return err
 		}
+		// A forward that holds the role delivers its kick too: the role
+		// keeps one reader.
+		if isForwarded, err := s.forwarding(v.ID, as); err != nil {
+			return err
+		} else if isForwarded {
+			return fmt.Errorf("peer delivers room %s for %s into its session; do not run peer wait for this room", v.ID, as)
+		}
 		// A kicked member gets no backlog, not even the room's end.
 		if m := v.member(as); m != nil && m.Kicked {
 			delivered = true
@@ -822,11 +829,6 @@ func (s *store) deliverBatch(sid, as string, write func(batch) error) (bool, err
 		}
 		if err := v.check(as); err != nil {
 			return err
-		}
-		if isForwarded, err := s.forwarding(v.ID, as); err != nil {
-			return err
-		} else if isForwarded {
-			return fmt.Errorf("peer delivers room %s for %s into its session; do not run peer wait for this room", v.ID, as)
 		}
 		offset, err := s.cursor(v.ID, as)
 		if err != nil {

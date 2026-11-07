@@ -1,20 +1,20 @@
 # peer for Codex
 
-The `peer` plugin for Codex delivers room messages to a Codex main without `peer wait`. Without the plugin, Codex works with the agent skill and `peer wait` as before.
+The `peer` plugin for Codex delivers room messages to a Codex main, and to a Codex member that joined a room, without `peer wait`. Without the plugin, Codex works with the agent skill and `peer wait` as before.
 
 - **The `peer` skill** starts the work: it runs `peer skills flow`. Codex lists it as `peer (peer)`. Codex as main starts the room with `peer start`.
-- **Delivery to main.** After a plain `peer start NAME` command, a hook starts `peer forward` for the room in the background. It reads the room for main and puts each batch of messages into the Codex session with `codex queue`: right away while Codex is idle, and after the running turn while it works. A hook note tells the model that forward delivers the room; `peer wait` for the room is refused while forward runs. A `peer start` inside a longer shell command, such as `peer start NAME && peer invite …`, is not recognized: main then reads the room with `peer wait`.
+- **Delivery.** After a plain `peer start NAME` command, a hook starts `peer forward` for main of the room in the background; after a plain `peer join ID ROLE`, for that role. It reads the room for the role and puts each batch of messages into the Codex session with `codex queue`: right away while Codex is idle, and after the running turn while it works. A hook note tells the model that forward delivers the room; `peer wait` as that role is refused while forward runs. A `peer start` or `peer join` inside a longer shell command, such as `peer start NAME && peer invite …`, is not recognized: the agent then reads the room with `peer wait`.
 
 There is no pane, footer button or toast: Codex has no plugin API for them. Watch the room in the `peer` TUI.
 
 ## How delivery works
 
-- `peer forward ID --as main --codex-thread UUID` reads a batch under the store's lock, runs `codex queue` without it, and moves main's cursor only if no one moved it meanwhile. A `codex queue` that fails or runs past 15 seconds is killed and tried again later; it never holds up other rooms.
+- `peer forward ID --as ROLE --codex-thread UUID` reads a batch under the store's lock, runs `codex queue` without it, and moves the role's cursor only if no one moved it meanwhile. A `codex queue` that fails or runs past 15 seconds is killed and tried again later; it never holds up other rooms.
 - Delivery is at least once: a crash between a queued batch and its mark brings the batch again. Each turn names its batch, so a repeat shows.
-- When the room ends, forward delivers its last messages with a note that the room has ended, marks this with `forward-main.done` in the room's directory, and exits.
-- The hooks keep, per Codex session, the rooms it leads in the plugin's data directory. When a session is resumed, `SessionStart` starts forward again for a room that is still active, or that has ended before its end was delivered, unless forward still runs.
-- Nothing but the room's end stops forward. In Codex, `/exit` only disconnects from a session, which goes on running queued turns, and Codex fires `SessionEnd` when a session is resumed; so the plugin has no `SessionEnd` hook.
-- forward's output is in `forward-main.log` in the room's directory under `~/.peer`.
+- When the room ends, forward delivers its last messages with a note that the room has ended, marks this with `forward-ROLE.done` in the room's directory, and exits. When a member is kicked, forward delivers only a note that it was kicked, as `peer wait` does, marks it the same way, and exits.
+- The hooks keep, per Codex session, the rooms it leads or joined, with its role, in the plugin's data directory. When a session is resumed, `SessionStart` starts forward again for a room that is still active, or that has ended before its end was delivered, unless forward still runs.
+- Nothing but the room's end, or the member's kick, stops forward. In Codex, `/exit` only disconnects from a session, which goes on running queued turns, and Codex fires `SessionEnd` when a session is resumed; so the plugin has no `SessionEnd` hook. With `codex --no-daemon` no process runs the session after `/exit`: Codex keeps the queued turns and runs them when the session is resumed. After an interrupted turn, Codex runs queued turns only after your next prompt.
+- forward's output is in `forward-ROLE.log` in the room's directory under `~/.peer`.
 
 To turn the plugin off, remove it with `codex plugin remove peer`, and stop a running forward with `kill` or by ending the room. Batches already queued in Codex can still run as turns after that, and are marked read.
 

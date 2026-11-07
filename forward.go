@@ -127,8 +127,9 @@ func (s *store) forward(ctx context.Context, sid, as, thread string, in io.Reade
 		if err != nil {
 			return err
 		}
-		if err := v.check(as); err != nil {
-			return err
+		// A kicked role still gets its forward, once, to learn of the kick.
+		if v.member(as) == nil {
+			return v.check(as)
 		}
 		if _, err := os.Stat(s.forwardDonePath(v.ID, as)); err == nil {
 			isDone = true
@@ -174,7 +175,11 @@ func (s *store) forward(ctx context.Context, sid, as, thread string, in io.Reade
 	for {
 		b, from, next, err := s.readBatch(sid, as)
 		if err != nil {
-			return err
+			if isKicked, kerr := s.kicked(sid, as); kerr != nil || !isKicked {
+				return err
+			}
+			// A kicked member gets no backlog, only the kick, as from wait.
+			b = batch{Status: "kicked"}
 		}
 		if b.Status != "" {
 			if err := deliver(ctx, batchID(sid, b), forwardText(sid, as, "peer forward", b)); err != nil {
@@ -194,9 +199,15 @@ func (s *store) forward(ctx context.Context, sid, as, thread string, in io.Reade
 			}
 			retry = forwardRetry
 		}
+		if b.Status == "kicked" {
+			return writeAtomic(s.forwardDonePath(sid, as), []byte(time.Now().UTC().Format(time.RFC3339Nano)+"\n"))
+		}
 		// An empty batch still moves the cursor past messages for others.
 		isMarked, err := s.commitBatch(sid, as, from, next, b.Status == "ended")
 		if err != nil {
+			if isKicked, kerr := s.kicked(sid, as); kerr == nil && isKicked {
+				continue // kicked after the read: the next read delivers the kick
+			}
 			return err
 		}
 		if b.Status == "ended" && isMarked {
@@ -206,6 +217,15 @@ func (s *store) forward(ctx context.Context, sid, as, thread string, in io.Reade
 			return nil
 		}
 	}
+}
+
+func (s *store) kicked(id, role string) (bool, error) {
+	v, err := s.session(id)
+	if err != nil {
+		return false, err
+	}
+	m := v.member(role)
+	return m != nil && m.Kicked, nil
 }
 
 // readBatch reads as's next batch of room sid and the cursor it starts at,
@@ -265,10 +285,13 @@ var errStdinClosed = errors.New("stdin closed")
 type stopError struct{ error }
 
 // batchID names a batch in its turn and in the stdio protocol: the room's
-// end, or else its last message.
+// end, the kick, or else its last message.
 func batchID(id string, b batch) string {
-	if b.Status == "ended" {
+	switch b.Status {
+	case "ended":
 		return id + "-end"
+	case "kicked":
+		return id + "-kicked"
 	}
 	return b.Messages[len(b.Messages)-1].ID
 }
@@ -342,6 +365,9 @@ func forwardText(id, as, by string, b batch) string {
 			at, _ := time.Parse(time.RFC3339Nano, m.At)
 			fmt.Fprintf(&sb, "\n[%s → %s · %s]\n%s\n", m.From, to, at.Local().Format("15:04:05"), m.Text)
 		}
+	}
+	if b.Status == "kicked" {
+		fmt.Fprintf(&sb, "You were kicked from peer room %s as %s (batch %s-kicked). Stop work on its task; peer no longer takes your messages.", id, as, id)
 	}
 	if b.Status == "ended" {
 		if sb.Len() > 0 {

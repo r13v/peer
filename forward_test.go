@@ -655,3 +655,257 @@ func TestStdioForwardDeliversEndOnce(t *testing.T) {
 		t.Fatalf("second forward = %q, %v; want done", again.String(), err)
 	}
 }
+
+// TestForwardDeliversJoinedMember checks forward for a member's role: the
+// member gets what is for it, keeps one reader, and learns of its kick.
+func TestForwardDeliversJoinedMember(t *testing.T) {
+	codex := fakeCodex(t)
+	repo := testRepo(t)
+	v := startRoom(t, repo, "member")
+	s, err := openStore(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, as := range []string{"user", "peer", "ghost"} {
+		if _, err := invoke(repo, "", "forward", v.ID, "--as", as, "--codex-thread", testThread); err == nil {
+			t.Fatalf("forward as %s accepted", as)
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	out, done := &syncBuffer{}, make(chan error, 1)
+	go func() { done <- s.forward(ctx, v.ID, "reader", testThread, nil, out) }()
+	eventually(t, "forward to be ready", func() bool { return strings.Contains(out.String(), `"ready"`) })
+	if _, err := invoke(repo, "", "wait", v.ID, "--as", "reader"); err == nil || !strings.Contains(err.Error(), "peer delivers room") {
+		t.Fatalf("wait beside the member's forward = %v", err)
+	}
+	// Main's wait is not the member's: it still works.
+	if _, err := invoke(repo, "", "wait", v.ID, "--as", "main", "--timeout", "0"); err != nil {
+		t.Fatalf("main's wait beside the member's forward: %v", err)
+	}
+	if _, err := invoke(repo, "", "join", v.ID, "tester"); err != nil {
+		t.Fatal(err)
+	}
+	for _, send := range [][]string{{"plan for reader", "main", "reader"}, {"plan for tester", "main", "tester"}, {"own words", "reader", "*"}, {"plan for all", "main", "*"}} {
+		if _, err := invoke(repo, send[0], "send", v.ID, "--as", send[1], "--to", send[2]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	eventually(t, "the member's messages to be queued", func() bool { return strings.Contains(queued(codex), "plan for all") })
+	log := queued(codex)
+	if !strings.Contains(log, "for reader (batch") || !strings.Contains(log, "plan for reader") || strings.Contains(log, "plan for tester") || strings.Contains(log, "own words") {
+		t.Fatalf("queued for reader:\n%s", log)
+	}
+	eventually(t, "the batches to be marked read", func() bool { n, err := s.unread(v.ID, "reader"); return err == nil && n == 0 })
+	if _, err := invoke(repo, "", "kick", v.ID, "reader", "--as", "main"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("forward after the kick: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("forward did not exit after the kick")
+	}
+	log = queued(codex)
+	if strings.Count(log, "You were kicked from peer room member as reader") != 1 {
+		t.Fatalf("kick not delivered once:\n%s", log)
+	}
+}
+
+// TestForwardDeliversKickWithoutBacklog checks that a member kicked while
+// no forward ran learns of the kick, and only of it, when forward starts.
+func TestForwardDeliversKickWithoutBacklog(t *testing.T) {
+	codex := fakeCodex(t)
+	repo := testRepo(t)
+	v := startRoom(t, repo, "late-kick")
+	s, err := openStore(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := invoke(repo, "unread plan", "send", v.ID, "--as", "main"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := invoke(repo, "", "kick", v.ID, "reader", "--as", "main"); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := s.forward(context.Background(), v.ID, "reader", testThread, nil, &out); err != nil {
+		t.Fatal(err)
+	}
+	if log := queued(codex); !strings.Contains(log, "You were kicked") || strings.Contains(log, "unread plan") {
+		t.Fatalf("queued after a kick:\n%s", log)
+	}
+}
+
+func TestCodexHookForwardsJoinedRole(t *testing.T) {
+	codex := fakeCodex(t)
+	repo := testRepo(t)
+	data := t.TempDir()
+	t.Setenv("PLUGIN_DATA", data)
+	s, err := openStore(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v := startRoom(t, repo, "joined")
+	endWhenDone(t, repo, s, v.ID)
+	joined, err := invoke(repo, "", "join", v.ID, "critic", "--agent", "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	post := func(command string, response any) string {
+		return hookEvent(t, map[string]any{"hook_event_name": "PostToolUse", "session_id": testThread, "tool_input": map[string]any{"command": command}, "tool_response": response})
+	}
+	for command, response := range map[string]any{
+		"peer status joined":                          joined,                                        // not a join
+		"peer join joined ghost --agent codex":        joined,                                        // printed a room without that role
+		"peer join other critic":                      joined,                                        // printed another room
+		"peer join joined critic && peer wait joined": joined,                                        // not a plain join
+		"peer join joined critic":                     "peer: role critic is already in room joined", // failed
+	} {
+		if got := post(command, response); got != "" {
+			t.Fatalf("%q bound a room: %s", command, got)
+		}
+	}
+	got := post("peer join joined critic --agent codex", map[string]any{"output": joined, "exit_code": 0})
+	if !strings.Contains(got, "critic of peer room joined") {
+		t.Fatalf("PostToolUse after the join printed %q", got)
+	}
+	if h, ok, _ := s.forwardHolder(v.ID, "critic"); !ok || h.Thread != testThread {
+		t.Fatalf("no forward for critic: %+v", h)
+	}
+	if ok, _ := s.forwarding(v.ID, mainRole); ok {
+		t.Fatal("a member's join started a forward for main")
+	}
+	if _, err := invoke(repo, "please review", "send", v.ID, "--as", "main", "--to", "critic"); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "the critic's message", func() bool { return strings.Contains(queued(codex), "please review") })
+	if !strings.Contains(queued(codex), "for critic (batch") {
+		t.Fatalf("queued:\n%s", queued(codex))
+	}
+	// A crash and a resume bring the member's forward back.
+	h, _, _ := s.forwardHolder(v.ID, "critic")
+	if err := syscall.Kill(h.PID, syscall.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "forward to die", func() bool { ok, _ := s.forwarding(v.ID, "critic"); return !ok })
+	if got := hookEvent(t, map[string]any{"hook_event_name": "SessionStart", "session_id": testThread, "source": "resume"}); !strings.Contains(got, "critic of peer room joined") {
+		t.Fatalf("SessionStart after a crash printed %q", got)
+	}
+	// A kick is delivered and ends the member's forward for good.
+	if _, err := invoke(repo, "", "kick", v.ID, "critic", "--as", "main"); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "the kick to be delivered", func() bool {
+		_, err := os.Stat(s.forwardDonePath(v.ID, "critic"))
+		return err == nil
+	})
+	if got := hookEvent(t, map[string]any{"hook_event_name": "SessionStart", "session_id": testThread, "source": "resume"}); got != "" {
+		t.Fatalf("SessionStart after the kick printed %q", got)
+	}
+	// A kicked role's join prints no room, so it binds nothing either.
+	if got := post("peer join joined critic", joined); got != "" {
+		t.Fatalf("a kicked role was bound: %s", got)
+	}
+}
+
+func TestCopilotStartNamesRole(t *testing.T) {
+	repo := testRepo(t)
+	v := startRoom(t, repo, "copilot")
+	joined, err := invoke(repo, "", "join", v.ID, "critic", "--agent", "copilot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	started, err := invoke(repo, "", "start", "copilot-main", "--agent", "copilot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for command, want := range map[string]string{"peer join copilot critic": `"id":"copilot"`, "peer start copilot-main": `"id":"copilot-main"`} {
+		response := joined
+		role := "critic"
+		if strings.Contains(command, "start") {
+			response, role = started, mainRole
+		}
+		in, _ := json.Marshal(map[string]any{"tool_input": map[string]any{"command": command}, "tool_response": response})
+		var out bytes.Buffer
+		if err := copilotStart(bytes.NewReader(in), &out); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(out.String(), want) || !strings.Contains(out.String(), `"as":"`+role+`"`) || !strings.Contains(out.String(), `"repo":`) {
+			t.Fatalf("%s printed %q", command, out.String())
+		}
+	}
+}
+
+// TestWaitRefusedWhileForwardHoldsKick checks that a kicked role keeps one
+// reader: while its forward hands over the kick, wait as that role is
+// refused rather than a second reader of the kick.
+func TestWaitRefusedWhileForwardHoldsKick(t *testing.T) {
+	repo := testRepo(t)
+	v := startRoom(t, repo, "kick-hold")
+	s, err := openStore(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := invoke(repo, "", "kick", v.ID, "reader", "--as", "main"); err != nil {
+		t.Fatal(err)
+	}
+	r, w := io.Pipe()
+	defer w.Close()
+	out, done := &syncBuffer{}, make(chan error, 1)
+	go func() { done <- s.forward(context.Background(), v.ID, "reader", testThread, r, out) }()
+	if id := handedBatch(t, out, 1); id != v.ID+"-kicked" {
+		t.Fatalf("handed batch %s, want the kick", id)
+	}
+	if got, err := invoke(repo, "", "wait", v.ID, "--as", "reader"); err == nil || !strings.Contains(err.Error(), "peer delivers room") {
+		t.Fatalf("wait while forward holds the kick = %q, %v", got, err)
+	}
+	if _, err := fmt.Fprintf(w, `{"ack":%q}`+"\n", v.ID+"-kicked"); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestCodexHookKeepsRoleBindingsApart checks that main of room demo-reader
+// and reader of room demo, in one session, keep a binding each.
+func TestCodexHookKeepsRoleBindingsApart(t *testing.T) {
+	fakeCodex(t)
+	repo := testRepo(t)
+	data := t.TempDir()
+	t.Setenv("PLUGIN_DATA", data)
+	s, err := openStore(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started, err := invoke(repo, "", "start", "demo-reader", "--agent", "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	endWhenDone(t, repo, s, "demo-reader")
+	if _, err := invoke(repo, "", "start", "demo", "--agent", "claude"); err != nil {
+		t.Fatal(err)
+	}
+	endWhenDone(t, repo, s, "demo")
+	joined, err := invoke(repo, "", "join", "demo", "reader", "--agent", "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for command, response := range map[string]string{"peer start demo-reader": started, "peer join demo reader": joined} {
+		if got := hookEvent(t, map[string]any{"hook_event_name": "PostToolUse", "session_id": testThread, "tool_input": map[string]any{"command": command}, "tool_response": response}); got == "" {
+			t.Fatalf("%s bound nothing", command)
+		}
+	}
+	bindings, err := readBindings(filepath.Join(data, "sessions", testThread))
+	if err != nil || len(bindings) != 2 {
+		t.Fatalf("bindings = %+v, %v; want main of demo-reader and reader of demo", bindings, err)
+	}
+	t.Cleanup(func() {
+		if _, err := invoke(repo, "", "kick", "demo", "reader", "--as", "main"); err == nil {
+			eventually(t, "the reader's forward to exit", func() bool { ok, _ := s.forwarding("demo", "reader"); return !ok })
+		}
+	})
+}

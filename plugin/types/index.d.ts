@@ -79,7 +79,10 @@ export type PeerState = {
 	// 'chat', ':boards', or the role whose log the pane shows.
 	tab: string
 	confirm: string | null
+	// led lists the rooms the plugin reads for this session: as main, or as
+	// the member it joined as, which roles names.
 	led: string[]
+	roles: Record<string, string>
 	// own lists the rooms of this session, the only ones the plugin shows:
 	// started or led here, or joined from here; a room stays once it ends.
 	own: string[]

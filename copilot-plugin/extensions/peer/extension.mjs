@@ -1,8 +1,9 @@
-// The peer extension for Copilot CLI. After main's `peer start`, it runs
-// `peer forward --copilot-session` for the room and puts each batch it
-// hands over into this session as a queued turn, then acks it; peer keeps
-// the room's reader, cursor and end. A canvas shows the chat of the rooms
-// this session leads. Diagnostics go to stderr: stdout is the CLI's
+// The peer extension for Copilot CLI. After main's `peer start` or a
+// member's `peer join`, it runs `peer forward --copilot-session` for the
+// session's role in the room and puts each batch it hands over into this
+// session as a queued turn, then acks it; peer keeps the room's reader,
+// cursor and end. A canvas shows the chat of the rooms this session leads
+// or joined. Diagnostics go to stderr: stdout is the CLI's
 // JSON-RPC channel.
 import { execFile, spawn } from "node:child_process"
 import { createHash, randomBytes } from "node:crypto"
@@ -23,12 +24,15 @@ import { createCanvas, joinSession } from "@github/copilot-sdk/extension"
 const here = dirname(fileURLToPath(import.meta.url))
 const log = (...args) => console.error("peer:", ...args)
 
-// A binding {repo, room} is known by its key, since rooms of different
-// checkouts can share an ID.
+// A binding {repo, room, role} is known by its key, since rooms of different
+// checkouts can share an ID. A binding without a role is main's; "@"
+// occurs in no room or role name, so a member's key never matches another
+// room's.
+const roleOf = (b) => b.role ?? "main"
 const keyOf = (b) =>
-	`${createHash("sha256").update(b.repo).digest("hex").slice(0, 16)}-${b.room}`
+	`${createHash("sha256").update(b.repo).digest("hex").slice(0, 16)}-${b.room}${b.role ? `@${b.role}` : ""}`
 // forwards maps a binding's key to its forward child, and ready to the
-// binding once that forward holds main's delivery.
+// binding once that forward holds the role's delivery.
 const forwards = new Map()
 const ready = new Map()
 
@@ -57,10 +61,9 @@ const dataDir = () =>
 // One file per room, so bindings written at once never overwrite each other.
 const bindingsDir = (sessionId) => join(dataDir(), "sessions", sessionId)
 
-function bind(sessionId, room) {
+function bind(sessionId, b) {
 	const dir = bindingsDir(sessionId)
 	mkdirSync(dir, { recursive: true })
-	const b = { repo: room.repo, room: room.id }
 	// Written aside and renamed, so a crash never leaves half a binding.
 	const path = join(dir, `${keyOf(b)}.json`)
 	writeFileSync(`${path}.tmp`, JSON.stringify(b))
@@ -80,7 +83,9 @@ function bindings(sessionId) {
 	return files.flatMap((f) => {
 		try {
 			const b = JSON.parse(readFileSync(join(dir, f), "utf8"))
-			return typeof b?.repo === "string" && typeof b?.room === "string"
+			return typeof b?.repo === "string" &&
+				typeof b?.room === "string" &&
+				(b.role === undefined || typeof b.role === "string")
 				? [b]
 				: []
 		} catch (err) {
@@ -92,7 +97,7 @@ function bindings(sessionId) {
 
 /**
  * Starts the forward of a bound room and resolves true once it holds
- * main's delivery, or false when the room needs none, another reader holds
+ * the role's delivery, or false when the room needs none, another reader holds
  * it or forward cannot start. Each batch is queued in the session and acked
  * in turn; a failed queue is nacked, so peer hands the batch over again.
  */
@@ -101,7 +106,14 @@ function startForward(session, b) {
 	if (forwards.has(key)) return Promise.resolve(ready.has(key))
 	const child = spawn(
 		"peer",
-		["forward", b.room, "--as", "main", "--copilot-session", session.sessionId],
+		[
+			"forward",
+			b.room,
+			"--as",
+			roleOf(b),
+			"--copilot-session",
+			session.sessionId,
+		],
 		{
 			cwd: b.repo,
 			env: { ...process.env, PEER_REPO: b.repo },
@@ -130,13 +142,14 @@ function startForward(session, b) {
 			forwards.delete(key)
 			const wasReady = ready.delete(key)
 			resolve(false)
-			// A forward that stops before it marked the acked end leaves main
-			// to wait.
+			// A forward that stops before it marked the acked end, or kick,
+			// leaves the role to wait.
 			if (wasReady && !(isClean && isEndAcked)) {
 				log(`forward for room ${b.room} stopped: ${why}`)
+				const skill = roleOf(b) === "main" ? "main" : "member"
 				session
 					.send({
-						prompt: `The peer plugin stopped delivering peer room ${b.room}. Read it with peer wait as peer skills main says.`,
+						prompt: `The peer plugin stopped delivering peer room ${b.room} for ${roleOf(b)}. Read it with peer wait as peer skills ${skill} says.`,
 						mode: "enqueue",
 						source: "system",
 					})
@@ -171,7 +184,8 @@ function startForward(session, b) {
 					return
 				}
 				answer({ ack: ev.batch }, () => {
-					if (ev.batch === `${b.room}-end`) isEndAcked = true
+					if (ev.batch === `${b.room}-end` || ev.batch === `${b.room}-kicked`)
+						isEndAcked = true
 				})
 			} else if (ev.status === "retry") {
 				log(`room ${b.room}: ${ev.error}`)
@@ -180,8 +194,8 @@ function startForward(session, b) {
 	})
 }
 
-const note = (rooms) =>
-	`The peer plugin delivers the messages for main of peer room ${rooms.join(", ")} into this Copilot session: each batch comes as a turn of its own. Do not run peer wait for these rooms; peer refuses it while the plugin delivers.`
+const note = (bound) =>
+	`The peer plugin delivers the messages for ${bound.map((b) => `${roleOf(b)} of peer room ${b.room}`).join(", ")} into this Copilot session: each batch comes as a turn of its own. Do not run peer wait for these rooms; peer refuses it while the plugin delivers.`
 
 const bashCommand = (input) =>
 	input.toolName === "bash" ? String(input.toolArgs?.command ?? "") : ""
@@ -243,7 +257,8 @@ function serve() {
 				return
 			}
 			if (url.pathname === "/log") {
-				// Only a room this session leads, never a path from the URL.
+				// Only a room this session leads or joined, never a path from
+				// the URL.
 				const b =
 					ready.get(url.searchParams.get("b")) ??
 					openRooms.get(url.searchParams.get("b"))
@@ -282,7 +297,8 @@ const openRooms = new Map()
 const roomCanvas = createCanvas({
 	id: "peer-room",
 	displayName: "peer room",
-	description: "Shows the chat of a peer room that this session leads as main.",
+	description:
+		"Shows the chat of a peer room that this session leads as main or joined as a member.",
 	inputSchema: {
 		type: "object",
 		properties: {
@@ -299,9 +315,7 @@ const roomCanvas = createCanvas({
 			? rooms.findLast((r) => r.room === input.room)
 			: [...ready.values()].at(-1)
 		if (!b)
-			throw new Error(
-				"this session leads no peer room that the plugin delivers",
-			)
+			throw new Error("this session has no peer room that the plugin delivers")
 		openRooms.set(keyOf(b), b)
 		const http = await serve()
 		const { port } = http.address()
@@ -342,7 +356,7 @@ const session = await joinSession({
 		},
 		onPostToolUse: async (input) => {
 			const command = bashCommand(input)
-			if (!/\bpeer\s+start\b/.test(command)) return
+			if (!/\bpeer\s+(start|join)\b/.test(command)) return
 			let room
 			try {
 				const out = await peer(
@@ -358,20 +372,22 @@ const session = await joinSession({
 				return
 			}
 			if (!room) return
+			const b = { repo: room.repo, room: room.id }
+			if (room.as && room.as !== "main") b.role = room.as
 			// Bind before starting forward, so a resume finds every forward.
-			bind(session.sessionId, room)
-			if (await startForward(session, { repo: room.repo, room: room.id }))
-				return { additionalContext: note([room.id]) }
+			bind(session.sessionId, b)
+			if (await startForward(session, b))
+				return { additionalContext: note([b]) }
 		},
 		onPreToolUse: (input) => {
 			const command = bashCommand(input)
-			const room = [...ready.values()]
-				.map((b) => b.room)
-				.find((id) => new RegExp(`\\bpeer\\s+wait\\s+${id}\\b`).test(command))
-			if (room) {
+			const b = [...ready.values()].find((one) =>
+				new RegExp(`\\bpeer\\s+wait\\s+${one.room}\\b`).test(command),
+			)
+			if (b) {
 				return {
 					permissionDecision: "deny",
-					permissionDecisionReason: `The peer plugin delivers the messages for main of room ${room}; do not run peer wait for it.`,
+					permissionDecisionReason: `The peer plugin delivers the messages for ${roleOf(b)} of room ${b.room}; do not run peer wait for it.`,
 				}
 			}
 		},
@@ -382,7 +398,7 @@ const session = await joinSession({
 // delivered; a new session after /clear has no bindings of its own.
 const resumed = []
 for (const b of bindings(session.sessionId)) {
-	if (await startForward(session, b)) resumed.push(b.room)
+	if (await startForward(session, b)) resumed.push(b)
 }
 if (resumed.length > 0) pendingNote = note(resumed)
 

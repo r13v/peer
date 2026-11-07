@@ -37,14 +37,16 @@ const INITIAL: PeerState = {
 	tab: "chat",
 	confirm: null,
 	led: [],
+	roles: {},
 	own: [],
 	watchError: null,
 	ackErrors: {},
 	log: [],
-	// delivered marks, per led room, the last message for main that is in
-	// the chat, so a reload goes on from it.
+	// delivered marks, per led room, the last message for the session's role
+	// that is in the chat, so a reload goes on from it.
 	delivered: {},
-	// notified lists the led rooms whose end main has been told about.
+	// notified lists the led rooms whose end, or the member's kick, the
+	// session has been told about.
 	notified: [],
 	expanded: [],
 	seen: {},
@@ -56,6 +58,7 @@ const selected = "selected"
 const tab = "tab"
 const confirm = "confirm"
 const led = "led"
+const roles = "roles"
 const own = "own"
 const watchError = "watchError"
 const ackErrors = "ackErrors"
@@ -65,8 +68,15 @@ const notified = "notified"
 const expanded = "expanded"
 const seen = "seen"
 
-const HANDOFF =
-	"The peer plugin reads this room for main and puts its messages into this chat as a turn of their own, once this session is free. Do not run peer wait for this room; go on with the task."
+// handoff tells the session that the plugin reads a room for its role.
+function handoff(role: string) {
+	return `The peer plugin reads this room for ${role} and puts its messages into this chat as a turn of their own, once this session is free. Do not run peer wait for this room; go on with the task.`
+}
+
+// roleIn is the session's role in room id: the role it joined as, or main.
+function roleIn(st: PeerState, id: string) {
+	return st.roles[id] ?? "main"
+}
 
 // Module variables start over on a reload; everything drawn is in $.state.
 let isReady = false
@@ -77,8 +87,9 @@ let watchRetry = 2500
 let isStarted = false
 let isPumping = false
 let isPumpWanted = false
-// The rooms restore found this session started, led once watch is ready.
-let toLead: string[] = []
+// The rooms restore found this session started or joined, with its role,
+// led once watch is ready.
+let toLead: { id: string; role: string }[] = []
 // Whether the person holds the pane's keyboard: then a new message does not
 // scroll it, so what they read stays put.
 let isPaneFocused = false
@@ -193,13 +204,12 @@ async function begin($: Engine) {
 
 // restore finds this session's rooms in its conversation when its state
 // starts empty while the chat goes on, as after a rewind or a resume: a
-// room joined there is its own again, and one started there is led again
-// once watch is ready.
+// room started or joined there is its own and led again, for main or the
+// joined role, once watch is ready.
 async function restore($: Engine) {
 	if ((await $.state.get(STATE)).value !== undefined) return
 	const found = await $.session.messages().catch(() => [])
 	if ("deny" in found) return
-	const joined: string[] = []
 	for (const use of found.flatMap((m) => m.toolUses)) {
 		if (
 			use.tool !== "Bash" ||
@@ -220,13 +230,13 @@ async function restore($: Engine) {
 			role &&
 			joinedRoom(stdout, id, role)
 		)
-			joined.push(id)
+			toLead.push({ id, role })
 		const room = commands.some((args) => args[0] === "start")
 			? await startedRoom(stdout)
 			: null
-		if (room) toLead.push(room.id)
+		if (room) toLead.push({ id: room.id, role: "main" })
 	}
-	const mine = [...new Set([...joined, ...toLead])]
+	const mine = [...new Set(toLead.map((one) => one.id))]
 	if (mine.length > 0) await put($, own, () => mine)
 }
 
@@ -454,8 +464,8 @@ async function apply($: Engine, lines: string[]) {
 			// Lead the restored rooms now that their messages are in: lead
 			// marks what main read against them.
 			const all = await get($, rooms)
-			for (const id of toLead)
-				if (all[id] && !all[id].ended_at) await lead($, id)
+			for (const { id, role } of toLead)
+				if (all[id] && !all[id].ended_at) await lead($, id, false, role)
 			toLead = []
 			isReady = true
 			if (activeRooms(await snapshot($)).length > 0) void openPane($)
@@ -497,25 +507,30 @@ async function readLog($: Engine, id: string) {
 	return true
 }
 
-// lead makes this session main's reader for room id. Messages come from
-// peer watch's transcript, not from wait, so a reload or a failed delivery
-// loses none; main's cursor moves only after a delivery. A reload between
-// a queued turn and its mark brings that batch again: at least once, not
-// exactly once.
-async function lead($: Engine, id: string, isNew = false) {
+// lead makes this session the reader of role, main or the role it joined
+// as, for room id. Messages come from peer watch's transcript, not from
+// wait, so a reload or a failed delivery loses none; the role's cursor
+// moves only after a delivery. A reload between a queued turn and its mark
+// brings that batch again: at least once, not exactly once.
+async function lead($: Engine, id: string, isNew = false, role = "main") {
 	await put($, own, (list) => (list.includes(id) ? list : [...list, id]))
+	if (role !== "main")
+		await put($, roles, (all) =>
+			all[id] === role ? all : { ...all, [id]: role },
+		)
 	if ((await get($, led)).includes(id)) return
 	if (!(id in (await get($, delivered)))) {
-		// From a new room, deliver everything; otherwise start after what main
-		// already read with wait, which status counts as not unread.
+		// From a new room or a new member, deliver everything; otherwise start
+		// after what the role already read with wait, which status counts as
+		// not unread.
 		let mark: PeerMark | null = null
 		if (!isNew) {
 			const { stdout } = await peer($, ["status", id])
 			const unread =
 				(JSON.parse(stdout || "{}") as PeerRoom).members?.find(
-					(m) => m.role === "main",
+					(m) => m.role === role,
 				)?.unread ?? 0
-			const list = forMain((await get($, messages))[id] ?? [])
+			const list = forRole((await get($, messages))[id] ?? [], role)
 			const last = list[list.length - unread - 1]
 			mark = last ? { id: last.id, at: last.at } : null
 		}
@@ -525,9 +540,10 @@ async function lead($: Engine, id: string, isNew = false) {
 	void pump($)
 }
 
-function forMain(list: PeerMessage[]) {
+// forRole keeps the messages that go to role, as peer wait gives them.
+function forRole(list: PeerMessage[], role: string) {
 	return list.filter(
-		(m) => m.from !== "main" && (m.to === "main" || m.to === EVERYONE),
+		(m) => m.from !== role && (m.to === role || m.to === EVERYONE),
 	)
 }
 
@@ -540,7 +556,8 @@ function after(list: PeerMessage[], mark: PeerMark | null) {
 	return list.filter((m) => Date.parse(m.at) > at)
 }
 
-// pump puts what is new for main in each led room into the chat, in order;
+// pump puts what is new for the session's role in each led room into the
+// chat, in order;
 // a mark moves only once its batch is there, and a failure is tried again.
 async function pump($: Engine) {
 	if (!isReady) return
@@ -570,31 +587,46 @@ async function pump($: Engine) {
 	if (isPumpWanted) void pump($)
 }
 
-// pumpRoom puts what is new for main in led room id into the chat, then
-// tells main that the room ended once it has.
+// pumpRoom puts what is new for the session's role in led room id into
+// the chat, then tells the session that the room ended once it has. A
+// kicked member gets no backlog, only the kick, as from peer wait.
 async function pumpRoom($: Engine, id: string) {
+	const role = roleIn(await snapshot($), id)
+	const isKicked = Boolean(
+		(await get($, rooms))[id]?.members.find((m) => m.role === role)?.kicked,
+	)
+	if (isKicked) {
+		if (!(await get($, notified)).includes(id)) {
+			const note = `You were kicked from peer room ${id} as ${role}. Stop work on its task; peer no longer takes your messages.`
+			if (!(await deliver($, id, [], note))) throw new Error("not delivered")
+			await put($, notified, (list) => [...list, id])
+		}
+		await put($, led, (list) => list.filter((one) => one !== id))
+		return
+	}
 	// watch can print a room's end before its last messages: read the
 	// whole transcript once the room has ended, before the end note.
 	const hasEnded = Boolean((await get($, rooms))[id]?.ended_at)
 	if (hasEnded && !(await readLog($, id))) throw new Error("no log")
 	for (;;) {
 		const pending = after(
-			forMain((await get($, messages))[id] ?? []),
+			forRole((await get($, messages))[id] ?? [], role),
 			(await get($, delivered))[id] ?? null,
 		)
 		const batch = pending.slice(0, 16)
 		const last = batch[batch.length - 1]
 		if (!last) break
-		if (!(await deliver($, id, batch))) throw new Error("not delivered")
+		if (!(await deliver($, id, batch, undefined, role)))
+			throw new Error("not delivered")
 		await put($, delivered, (all) => ({
 			...all,
 			[id]: { id: last.id, at: last.at },
 		}))
-		await ack($, id, last)
+		await ack($, id, last, role)
 	}
 	// Ack the saved mark too: an ack that failed before a reload is
 	// tried again here.
-	await ack($, id, (await get($, delivered))[id] ?? null)
+	await ack($, id, (await get($, delivered))[id] ?? null, role)
 	const room = (await get($, rooms))[id]
 	if (hasEnded && room) {
 		if (!(await get($, notified)).includes(id)) {
@@ -607,16 +639,16 @@ async function pumpRoom($: Engine, id: string) {
 	}
 }
 
-// ack moves main's cursor just past mark, the last message in the chat, so
+// ack moves role's cursor just past mark, the last message in the chat, so
 // unread counts stay right and a wait run after the plugin is turned off
 // misses nothing. A failed ack throws, and the pump tries again later.
-async function ack($: Engine, id: string, mark: PeerMark | null) {
+async function ack($: Engine, id: string, mark: PeerMark | null, role: string) {
 	if (!mark) return
 	const { exitCode, stderr } = await peer($, [
 		"ack",
 		id,
 		"--as",
-		"main",
+		role,
 		"--upto",
 		mark.id,
 	])
@@ -646,6 +678,7 @@ async function deliver(
 	id: string,
 	list: PeerMessage[],
 	note?: string,
+	role = "main",
 ) {
 	const body = list
 		.map(
@@ -655,7 +688,7 @@ async function deliver(
 		.join("\n\n")
 	const text =
 		note ??
-		`peer room ${id}: ${list.length} new message${list.length === 1 ? "" : "s"} for main, delivered by the peer plugin; you do not run peer wait for this room.\n\n${body}`
+		`peer room ${id}: ${list.length} new message${list.length === 1 ? "" : "s"} for ${role}, delivered by the peer plugin; you do not run peer wait for this room.\n\n${body}`
 	deliveries.set(text, deliverySummary(id, list, Boolean(note)))
 	const submitted = await $.prompt.submit({ text })
 	const isQueued = !("drop" in submitted && submitted.drop)
@@ -838,20 +871,44 @@ export const register: Register = (on) => {
 		const commands = all
 			.map(peerArgs)
 			.filter((args): args is string[] => args !== null)
-		const wait = commands.find((args) => args[0] === "wait" && asMain(args))
-		if (wait?.[1] && all.length > 1 && (await get($, led)).includes(wait[1])) {
+		// A wait as the session's role in the room: main's, or the role it
+		// joined as.
+		const st = await snapshot($)
+		const waits = commands.filter(
+			(args) => args[0] === "wait" && asRole(args, roleIn(st, args[1] ?? "")),
+		)
+		// Any wait for a room the plugin reads denies a longer line, wherever
+		// it stands in the line.
+		const ledWait = waits.find((args) => st.led.includes(args[1] ?? ""))
+		if (ledWait && all.length > 1) {
 			// Answering the whole line would skip its other commands.
-			return { deny: `Run the other commands without peer wait. ${HANDOFF}` }
+			return {
+				deny: `Run the other commands without peer wait. ${handoff(roleIn(st, ledWait[1] ?? ""))}`,
+			}
 		}
+		const wait = waits[0]
+		const waitRole = roleIn(st, wait?.[1] ?? "")
 		if (wait?.[1] && all.length === 1) {
 			const id = wait[1]
-			const room = (await get($, rooms))[id]
-			// led first: rooms comes from watch and can lag behind a start.
-			if ((await get($, led)).includes(id) || (room && !room.ended_at)) {
-				await lead($, id)
+			const room = st.rooms[id]
+			// led first: rooms comes from watch and can lag behind a start. A
+			// member's room is led from its join; a kicked member's wait goes on
+			// to peer, which reports the kick.
+			const isMember = waitRole !== "main"
+			const isKicked = Boolean(
+				room?.members.find((m) => m.role === waitRole)?.kicked,
+			)
+			if (
+				!isKicked &&
+				(st.led.includes(id) || (!isMember && room && !room.ended_at))
+			) {
+				await lead($, id, false, waitRole)
 				return {
 					result: {
-						stdout: JSON.stringify({ status: "timeout", note: HANDOFF }),
+						stdout: JSON.stringify({
+							status: "timeout",
+							note: handoff(waitRole),
+						}),
 						stderr: "",
 						interrupted: false,
 					},
@@ -876,12 +933,13 @@ export const register: Register = (on) => {
 		if (ran.deny !== undefined || ran.isError) return ran
 		// Main ended the room itself, so it needs no note that it ended.
 		for (const args of commands) {
-			if (args[0] === "end" && args[1] && asMain(args))
+			if (args[0] === "end" && args[1] && asRole(args, "main"))
 				await put($, notified, (list) => [...list, args[1] ?? ""])
 		}
-		// A room this session joins as a member is its own too: a peer join on
-		// a line of its own that printed the room with that role. On a longer
-		// line, another command can print the room after a failed join.
+		// A room this session joins as a member is its own too, and the plugin
+		// reads it for that role: a peer join on a line of its own that
+		// printed the room with that role. On a longer line, another command
+		// can print the room after a failed join.
 		const stdout = (ran.result as { stdout?: string } | undefined)?.stdout ?? ""
 		const [cmd, id, role] = commands[0] ?? []
 		if (
@@ -889,9 +947,11 @@ export const register: Register = (on) => {
 			cmd === "join" &&
 			id &&
 			role &&
+			role !== "main" &&
 			joinedRoom(stdout, id, role)
 		) {
-			await put($, own, (list) => (list.includes(id) ? list : [...list, id]))
+			await lead($, id, true, role)
+			return { ...ran, context: [handoff(role)] }
 		}
 		const start = commands.find((args) => args[0] === "start" && args[1])
 		if (!start) return ran
@@ -903,7 +963,7 @@ export const register: Register = (on) => {
 		await lead($, room.id, true)
 		starting($, "")
 		void openPane($)
-		return { ...ran, context: [HANDOFF] }
+		return { ...ran, context: [handoff("main")] }
 	})
 
 	on("ui.render", { component: "Pane", requestId: PANE }, async ($, e) => {
@@ -1723,10 +1783,10 @@ function peerArgs(words: string[]) {
 	return name === "peer" || name.endsWith("/peer") ? words.slice(1) : null
 }
 
-function asMain(args: string[]) {
+function asRole(args: string[], role: string) {
 	return args.some(
 		(arg, i) =>
-			arg === "--as=main" || (arg === "--as" && args[i + 1] === "main"),
+			arg === `--as=${role}` || (arg === "--as" && args[i + 1] === role),
 	)
 }
 
@@ -1828,7 +1888,7 @@ function clock(at: string, withSeconds = false) {
 // isPeerRow tells a row this plugin submitted by its text; the engine's
 // framing may surround it.
 function isPeerRow(text: string) {
-	return /(?:^|\n)peer room \S+: \d+ new messages? for main, delivered by the peer plugin|(?:^|\n)peer room \S+ has ended\. Its members/.test(
+	return /(?:^|\n)peer room \S+: \d+ new messages? for \S+, delivered by the peer plugin|(?:^|\n)peer room \S+ has ended\. Its members|(?:^|\n)You were kicked from peer room \S+ as \S+\. Stop work/.test(
 		text,
 	)
 }
