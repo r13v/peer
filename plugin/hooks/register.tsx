@@ -68,11 +68,6 @@ const notified = "notified"
 const expanded = "expanded"
 const seen = "seen"
 
-// handoff tells the session that the plugin reads a room for its role.
-function handoff(role: string) {
-	return `The peer plugin reads this room for ${role} and puts its messages into this chat as a turn of their own, once this session is free. Do not run peer wait for this room; go on with the task.`
-}
-
 // roleIn is the session's role in room id: the role it joined as, or main.
 function roleIn(st: PeerState, id: string) {
 	return st.roles[id] ?? "main"
@@ -87,9 +82,6 @@ let watchRetry = 2500
 let isStarted = false
 let isPumping = false
 let isPumpWanted = false
-// The rooms restore found this session started or joined, with its role,
-// led once watch is ready.
-let toLead: { id: string; role: string }[] = []
 // Whether the person holds the pane's keyboard: then a new message does not
 // scroll it, so what they read stays put.
 let isPaneFocused = false
@@ -187,7 +179,6 @@ async function begin($: Engine) {
 	isStarted = true
 	// A pane left open by the module before a reload is drawn by this one.
 	$.ui.invalidate("ui.render")
-	await restore($)
 	await $.command
 		.register({
 			name: "room",
@@ -200,44 +191,6 @@ async function begin($: Engine) {
 	void loadOffset($)
 	$.clock.every(60_000, () => void loadFiles($))
 	void loadFiles($)
-}
-
-// restore finds this session's rooms in its conversation when its state
-// starts empty while the chat goes on, as after a rewind or a resume: a
-// room started or joined there is its own and led again, for main or the
-// joined role, once watch is ready.
-async function restore($: Engine) {
-	if ((await $.state.get(STATE)).value !== undefined) return
-	const found = await $.session.messages().catch(() => [])
-	if ("deny" in found) return
-	for (const use of found.flatMap((m) => m.toolUses)) {
-		if (
-			use.tool !== "Bash" ||
-			use.isError ||
-			typeof use.input.command !== "string"
-		)
-			continue
-		const all = shellCommands(use.input.command)
-		const commands = all
-			.map(peerArgs)
-			.filter((args): args is string[] => args !== null)
-		const stdout = (use.result as { stdout?: string } | undefined)?.stdout ?? ""
-		const [cmd, id, role] = commands[0] ?? []
-		if (
-			all.length === 1 &&
-			cmd === "join" &&
-			id &&
-			role &&
-			joinedRoom(stdout, id, role)
-		)
-			toLead.push({ id, role })
-		const room = commands.some((args) => args[0] === "start")
-			? await startedRoom(stdout)
-			: null
-		if (room) toLead.push({ id: room.id, role: "main" })
-	}
-	const mine = [...new Set(toLead.map((one) => one.id))]
-	if (mine.length > 0) await put($, own, () => mine)
 }
 
 // loadOffset reads the host's UTC offset, as +0300, and draws the times again.
@@ -369,6 +322,8 @@ function watch($: Engine) {
 }
 
 async function apply($: Engine, lines: string[]) {
+	// A restarted watch prints ready again: its rooms are live events then.
+	const wasReady = isReady
 	const roomEvents: PeerRoom[] = []
 	const newMessages: Record<string, PeerMessage[]> = {}
 	let ready = false
@@ -461,18 +416,70 @@ async function apply($: Engine, lines: string[]) {
 			}
 		}
 		if (!isReady) {
-			// Lead the restored rooms now that their messages are in: lead
-			// marks what main read against them.
-			const all = await get($, rooms)
-			for (const { id, role } of toLead)
-				if (all[id] && !all[id].ended_at) await lead($, id, false, role)
-			toLead = []
+			// Lead the rooms this session had before a reload or a rewind now
+			// that their messages are in: lead marks what it read against them.
+			await claim($, Object.values(await get($, rooms)), false)
 			isReady = true
 			if (activeRooms(await snapshot($)).length > 0) void openPane($)
 		}
 	}
+	if (wasReady) await claim($, roomEvents, true)
 	roomIndex = await get($, rooms)
 	void pump($)
+}
+
+// claim takes the rooms of list that this session started or joined, as
+// peer recorded the session for the role, as its own. It leads each active
+// one and holds the role's delivery so peer wait refuses it: the plugin
+// delivers instead. A room new to the plugin gets all its messages, and
+// one main started opens the pane.
+async function claim($: Engine, list: PeerRoom[], isNew: boolean) {
+	const sid = await $.session.id()
+	for (const room of list) {
+		for (const m of room.members) {
+			if (m.session !== sid) continue
+			await put($, own, (ids) =>
+				ids.includes(room.id) ? ids : [...ids, room.id],
+			)
+			if (room.ended_at || m.kicked) continue
+			const isLed = (await get($, led)).includes(room.id)
+			await lead($, room.id, isNew, m.role)
+			hold($, room.id, m.role)
+			if (isNew && !isLed && m.role === "main") {
+				await put($, selected, () => room.id)
+				starting($, "")
+				void openPane($)
+			}
+		}
+	}
+}
+
+// holding has the rooms and roles whose delivery a peer hold of this
+// module holds.
+const holding = new Set<string>()
+
+// hold runs peer hold for role in room id until the room ends, the role
+// is kicked or the module unloads.
+function hold($: Engine, id: string, role: string) {
+	const key = `${id} ${role}`
+	if (holding.has(key)) return
+	holding.add(key)
+	void (async () => {
+		let stderr = ""
+		try {
+			for await (const { stream, text } of $.process.spawn({
+				argv: ["peer", "hold", id, "--as", role],
+			}))
+				if (stream === "stderr") stderr += text
+		} catch (err) {
+			stderr += String(err)
+		}
+		holding.delete(key)
+		if (stderr.trim())
+			$.ui.log(`peer hold ${id} stopped: ${stderr.trim().slice(0, 200)}`, {
+				to: "transcript",
+			})
+	})()
 }
 
 // readLog adds a room's whole transcript from peer log to the messages,
@@ -512,8 +519,7 @@ async function readLog($: Engine, id: string) {
 // wait, so a reload or a failed delivery loses none; the role's cursor
 // moves only after a delivery. A reload between a queued turn and its mark
 // brings that batch again: at least once, not exactly once.
-async function lead($: Engine, id: string, isNew = false, role = "main") {
-	await put($, own, (list) => (list.includes(id) ? list : [...list, id]))
+async function lead($: Engine, id: string, isNew: boolean, role: string) {
 	if (role !== "main")
 		await put($, roles, (all) =>
 			all[id] === role ? all : { ...all, [id]: role },
@@ -537,7 +543,6 @@ async function lead($: Engine, id: string, isNew = false, role = "main") {
 		await put($, delivered, (all) => ({ ...all, [id]: mark }))
 	}
 	await put($, led, (list) => [...list, id])
-	void pump($)
 }
 
 // forRole keeps the messages that go to role, as peer wait gives them.
@@ -863,107 +868,6 @@ export const register: Register = (on) => {
 				description: `${m.worker ? "worker" : "member"} of ${room.id}`,
 			}))
 		return { suggestions: [...found.suggestions, ...roles] }
-	})
-
-	on("tool.call", { tool: "Bash" }, async ($, e, next) => {
-		await begin($)
-		const all = shellCommands(e.command)
-		const commands = all
-			.map(peerArgs)
-			.filter((args): args is string[] => args !== null)
-		// A wait as the session's role in the room: main's, or the role it
-		// joined as.
-		const st = await snapshot($)
-		const waits = commands.filter(
-			(args) => args[0] === "wait" && asRole(args, roleIn(st, args[1] ?? "")),
-		)
-		// Any wait for a room the plugin reads denies a longer line, wherever
-		// it stands in the line.
-		const ledWait = waits.find((args) => st.led.includes(args[1] ?? ""))
-		if (ledWait && all.length > 1) {
-			// Answering the whole line would skip its other commands.
-			return {
-				deny: `Run the other commands without peer wait. ${handoff(roleIn(st, ledWait[1] ?? ""))}`,
-			}
-		}
-		const wait = waits[0]
-		const waitRole = roleIn(st, wait?.[1] ?? "")
-		if (wait?.[1] && all.length === 1) {
-			const id = wait[1]
-			const room = st.rooms[id]
-			// led first: rooms comes from watch and can lag behind a start. A
-			// member's room is led from its join; a kicked member's wait goes on
-			// to peer, which reports the kick.
-			const isMember = waitRole !== "main"
-			const isKicked = Boolean(
-				room?.members.find((m) => m.role === waitRole)?.kicked,
-			)
-			if (
-				!isKicked &&
-				(st.led.includes(id) || (!isMember && room && !room.ended_at))
-			) {
-				await lead($, id, false, waitRole)
-				return {
-					result: {
-						stdout: JSON.stringify({
-							status: "timeout",
-							note: handoff(waitRole),
-						}),
-						stderr: "",
-						interrupted: false,
-					},
-				}
-			}
-			return next(e)
-		}
-		// The permission dialog of a peer end or kick says who it stops.
-		const stop = commands.find(
-			(args) => (args[0] === "end" || args[0] === "kick") && args[1],
-		)
-		const effect = stop && stopNote(roomIndex[stop[1] ?? ""], stop)
-		if (effect) {
-			try {
-				$.ui.notice(e.tool_use_id, effect)
-			} catch {
-				// no dialog for this call
-			}
-		}
-		const startedAt = new Date(Date.now() - 1000).toISOString()
-		const ran = await next(e)
-		if (ran.deny !== undefined || ran.isError) return ran
-		// Main ended the room itself, so it needs no note that it ended.
-		for (const args of commands) {
-			if (args[0] === "end" && args[1] && asRole(args, "main"))
-				await put($, notified, (list) => [...list, args[1] ?? ""])
-		}
-		// A room this session joins as a member is its own too, and the plugin
-		// reads it for that role: a peer join on a line of its own that
-		// printed the room with that role. On a longer line, another command
-		// can print the room after a failed join.
-		const stdout = (ran.result as { stdout?: string } | undefined)?.stdout ?? ""
-		const [cmd, id, role] = commands[0] ?? []
-		if (
-			all.length === 1 &&
-			cmd === "join" &&
-			id &&
-			role &&
-			role !== "main" &&
-			joinedRoom(stdout, id, role)
-		) {
-			await lead($, id, true, role)
-			return { ...ran, context: [handoff(role)] }
-		}
-		const start = commands.find((args) => args[0] === "start" && args[1])
-		if (!start) return ran
-		const room =
-			(await startedRoom(stdout)) ??
-			(await newRoom($, start[1] ?? "", startedAt))
-		if (!room) return ran
-		await put($, selected, () => room.id)
-		await lead($, room.id, true)
-		starting($, "")
-		void openPane($)
-		return { ...ran, context: [handoff("main")] }
 	})
 
 	on("ui.render", { component: "Pane", requestId: PANE }, async ($, e) => {
@@ -1665,70 +1569,6 @@ function deliverySummary(id: string, list: PeerMessage[], hasEnded: boolean) {
 	}
 }
 
-// stopNote says what a peer end or kick stops: the members of room whose
-// agents still run, or the kicked member's agent.
-function stopNote(room: PeerRoom | undefined, args: string[]) {
-	if (!room || room.ended_at) return ""
-	const running = room.members.filter(
-		(m) => m.role !== "main" && m.pid && !m.exited && !m.kicked,
-	)
-	if (args[0] === "end") {
-		const names = running.map((m) => m.role)
-		return names.length > 0
-			? `peer: ends ${room.id}; still running: ${names.join(", ")}`
-			: `peer: ends ${room.id}`
-	}
-	const member = room.members.find((m) => m.role === args[2])
-	if (!member) return ""
-	const agent = [member.agent, member.model].filter(Boolean).join(" ")
-	return `peer: removes ${member.role}${agent ? ` (${agent})` : ""} from ${room.id}${running.includes(member) ? " and stops its agent" : ""}`
-}
-
-// startedRoom reads the room peer start printed, when the output reached
-// the tool whole.
-async function startedRoom(stdout: string) {
-	try {
-		const room = JSON.parse(stdout.trim().split("\n")[0] ?? "") as PeerRoom
-		return room.id && room.members?.[0]?.role === "main" ? room : null
-	} catch {
-		return null
-	}
-}
-
-// joinedRoom reports whether stdout holds room id as peer join prints it,
-// with role among its members.
-function joinedRoom(stdout: string, id: string, role: string) {
-	return stdout.split("\n").some((line) => {
-		try {
-			const room = JSON.parse(line) as PeerRoom
-			return room.id === id && room.members?.some((m) => m.role === role)
-		} catch {
-			return false
-		}
-	})
-}
-
-// newRoom finds the room a peer start NAME made when its output was cut or
-// piped away: NAME, or NAME-2 and so on, started since the command ran.
-async function newRoom($: Engine, name: string, since: string) {
-	const { exitCode, stdout } = await peer($, ["status"])
-	if (exitCode !== 0) return null
-	const rooms: PeerRoom[] = []
-	for (const line of stdout.split("\n")) {
-		try {
-			if (line.trim()) rooms.push(JSON.parse(line))
-		} catch {
-			// skip a line that is not JSON
-		}
-	}
-	const named = new RegExp(`^${name.replace(/[^a-z0-9-]/g, "")}(-\\d+)?$`)
-	return (
-		rooms
-			.filter((room) => named.test(room.id) && room.started_at >= since)
-			.sort((a, b) => b.started_at.localeCompare(a.started_at))[0] ?? null
-	)
-}
-
 // shellCommands splits a shell command line into its commands, each a list
 // of words with quotes removed and leading VAR=value words dropped; text
 // inside quotes, as in echo "peer wait", is not a command. It reads simple
@@ -1781,13 +1621,6 @@ function shellCommands(line: string): string[][] {
 function peerArgs(words: string[]) {
 	const name = words[0] ?? ""
 	return name === "peer" || name.endsWith("/peer") ? words.slice(1) : null
-}
-
-function asRole(args: string[], role: string) {
-	return args.some(
-		(arg, i) =>
-			arg === `--as=${role}` || (arg === "--as" && args[i + 1] === role),
-	)
 }
 
 // authorColor gives each participant the color of its kind: main, the

@@ -909,3 +909,40 @@ func TestCodexHookKeepsRoleBindingsApart(t *testing.T) {
 		}
 	})
 }
+
+// TestHoldRefusesWaitUntilKick checks that start and join record the
+// Claude Code session, and that hold makes wait refuse the role, a wait
+// that already runs included, until the role is kicked.
+func TestHoldRefusesWaitUntilKick(t *testing.T) {
+	repo := testRepo(t)
+	t.Setenv("CLAUDE_CODE_SESSION_ID", "claude-1")
+	v := startRoom(t, repo, "hold")
+	for _, m := range v.Members {
+		if m.Session != "claude-1" {
+			t.Fatalf("%s has session %q", m.Role, m.Session)
+		}
+	}
+	s, err := openStore(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waited := make(chan error, 1)
+	go func() {
+		_, err := invoke(repo, "", "wait", v.ID, "--as", "reader")
+		waited <- err
+	}()
+	out, done := &syncBuffer{}, make(chan error, 1)
+	go func() { done <- s.hold(context.Background(), v.ID, "reader", out) }()
+	if err := <-waited; err == nil || !strings.Contains(err.Error(), "peer delivers room") {
+		t.Fatalf("wait while hold runs: %v", err)
+	}
+	if _, err := invoke(repo, "", "kick", v.ID, "reader", "--as", "main"); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), `"ready"`) {
+		t.Fatalf("hold printed %q", out.String())
+	}
+}

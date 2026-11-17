@@ -64,6 +64,9 @@ type member struct {
 	KickedBy string `json:"kicked_by,omitempty"`
 	// PID leads the process group of a launched member's wrapper.
 	PID int `json:"pid,omitempty"`
+	// Session is the Claude Code session that started or joined the room
+	// as this role, so its peer plugin finds the room in peer watch.
+	Session string `json:"session,omitempty"`
 	// Unread counts the messages that wait for the member; status sets
 	// it, and the session file never holds it.
 	Unread int `json:"unread,omitempty"`
@@ -461,7 +464,7 @@ func (s *store) finish(v *session, reason string) error {
 	return writeJSON(s.sessionPath(v.ID), v)
 }
 
-func (s *store) start(name, agent string, out io.Writer) (session, error) {
+func (s *store) start(name string, m member, out io.Writer) (session, error) {
 	var v session
 	err := s.locked(func() error {
 		if err := os.MkdirAll(filepath.Join(s.dir, "sessions"), 0700); err != nil {
@@ -479,7 +482,7 @@ func (s *store) start(name, agent string, out io.Writer) (session, error) {
 			}
 			id = fmt.Sprintf("%s-%d", name, n)
 		}
-		v = session{ID: id, Repo: s.repo, Members: []member{{Role: mainRole, Agent: agent}}, StartedAt: time.Now().UTC().Format(time.RFC3339Nano)}
+		v = session{ID: id, Repo: s.repo, Members: []member{{Role: mainRole, Agent: m.Agent, Session: m.Session}}, StartedAt: time.Now().UTC().Format(time.RFC3339Nano)}
 		if err := writeJSON(filepath.Join(dir, "session.json"), v); err != nil {
 			return err
 		}
