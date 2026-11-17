@@ -11,12 +11,15 @@ const PANE = {
 	view: {},
 } as never
 
+// SID is the session that started ROOM as main.
+const SID = "session-1"
+
 const ROOM = {
 	id: "csv-export",
 	repo: "/repo",
 	started_at: "2026-10-05T20:00:00Z",
 	members: [
-		{ role: "main", agent: "claude" },
+		{ role: "main", agent: "claude", session: SID },
 		{ role: "reader", agent: "codex", pid: 1 },
 	],
 }
@@ -151,26 +154,28 @@ function engineFooter(on: Parameters<TestBody>[1], button?: string) {
 }
 
 // start runs the plugin against a checkout that tracks main.go, in UTC+3,
-// with watch printing what it is given and memberlog printing memberlog,
-// and records the commands it runs and the panes it opens. The session
-// joins each room that watch prints unless isOwn is false, so the rooms
-// are its own.
+// with watch printing what it is given, piece by piece when it is a list,
+// and memberlog printing memberlog,
+// and records the commands it runs and the panes it opens. The session is
+// the one that started the rooms watch prints unless isOwn is false.
 async function start(
 	$: Parameters<TestBody>[0],
 	on: Parameters<TestBody>[1],
-	watch: string | { stderr: string } = WATCH,
+	watch: string | string[] | { stderr: string } = WATCH,
 	memberlog = "",
 	isOwn = true,
 ) {
 	const ran: string[][] = []
 	on("process.spawn", async function* (_, e, next) {
+		if (e.argv[1] === "hold")
+			return { value: { code: 0, signal: null } } as never
 		if (e.argv[1] !== "watch") return yield* next(e)
 		ran.push([...e.argv])
-		if (typeof watch !== "string") {
+		if (!Array.isArray(watch) && typeof watch !== "string") {
 			yield { stream: "stderr", text: watch.stderr }
 			return { value: { code: 1, signal: null } } as never
 		}
-		yield { stream: "stdout", text: watch }
+		for (const text of [watch].flat()) yield { stream: "stdout", text }
 		return { value: { code: 0, signal: null } } as never
 	})
 	on("process.run", (_, e) => {
@@ -184,6 +189,7 @@ async function start(
 	})
 	on("session.start", (_, e) => ({ cwd: e.cwd }) as never)
 	on("session.cwd", () => ({ value: "/repo" }) as never)
+	on("session.id", () => ({ value: isOwn ? SID : "session-2" }) as never)
 	// The pane is shown from its open to its close.
 	let isShown = false
 	on("ui.open", (_, e) => {
@@ -206,41 +212,8 @@ async function start(
 					: [],
 			}) as never,
 	)
-	// A Bash call prints the room it names, as peer join and peer start do;
-	// a join as main, a reserved role, fails and prints nothing.
-	on("tool.call", { tool: "Bash" }, (_, e) => {
-		const command = (e as { command: string }).command
-		const id = /peer \w+ ([a-z0-9-]+)/.exec(command)?.[1] ?? ROOM.id
-		if (/^peer join \S+ main$/.test(command))
-			return {
-				result: {
-					stdout: "",
-					stderr: 'peer: role "main" is reserved\n',
-					interrupted: false,
-				},
-			} as never
-		return {
-			result: {
-				stdout: `${JSON.stringify({ ...ROOM, id })}\n`,
-				stderr: "",
-				interrupted: false,
-			},
-		} as never
-	})
 	await $.session.start({ source: "startup", cwd: "/repo" } as never)
 	await new Promise((resolve) => setTimeout(resolve, 50))
-	if (isOwn && typeof watch === "string") {
-		const ids = new Set(
-			[...watch.matchAll(/"event":"room","room":\{"id":"([^"]+)"/g)].map(
-				(match) => match[1],
-			),
-		)
-		for (const id of ids)
-			await $.tool.call({
-				tool: "Bash",
-				command: `peer join ${id} reader`,
-			} as never)
-	}
 	return ran
 }
 
@@ -308,10 +281,11 @@ test("the footer counts messages the pane has not shown and toggles the pane", a
 		const drawn = JSON.stringify(await ui.drawn())
 		expect(drawn).toContain("👀 Peer 4")
 		expect(drawn).toContain("focus")
-		await ui.press({ key: "peer-open" })
-		expect(ran).toContainEqual(["ui.open", "peer"])
+		// The session's room opened the pane at the start.
 		await ui.press({ key: "peer-open" })
 		expect(ran).toContainEqual(["ui.close", "peer"])
+		await ui.press({ key: "peer-open" })
+		expect(ran).toContainEqual(["ui.open", "peer"])
 	}
 })
 
@@ -460,18 +434,14 @@ test("end room acts on a second press within three seconds", async ($, on) => {
 test("an ended room shows every member stopped", async ($, on) => {
 	// The room this session started stays in the pane once it has ended.
 	on("prompt.submit", (_, e) => ({ text: e.text }) as never)
-	await start(
-		$,
-		on,
-		lines(
-			{ event: "room", room: { ...ROOM, ended_at: "2026-10-05T21:00:00Z" } },
-			{ event: "ready" },
-		),
-	)
-	await $.tool.call({
-		tool: "Bash",
-		command: "peer start csv-export --agent claude",
-	} as never)
+	await start($, on, [
+		lines({ event: "ready" }),
+		lines({ event: "room", room: ROOM }),
+		lines({
+			event: "room",
+			room: { ...ROOM, ended_at: "2026-10-05T21:00:00Z" },
+		}),
+	])
 	const ui = await $.ui.mount({
 		plugin: "peer",
 		surface: "desktop",
@@ -561,17 +531,6 @@ test("another session's room of the checkout is not shown", async ($, on) => {
 	})
 	// The button shows without a room, with no count.
 	expect(JSON.stringify(await footer.drawn())).toContain('"label":"👀 Peer"')
-	// A failed join adopts nothing: alone, or inside a longer command line
-	// that prints the room with main in it.
-	await $.tool.call({
-		tool: "Bash",
-		command: "peer join csv-export main",
-	} as never)
-	await $.tool.call({
-		tool: "Bash",
-		command: "peer join csv-export main; peer status csv-export",
-	} as never)
-	expect(JSON.stringify(await footer.drawn())).toContain('"label":"👀 Peer"')
 })
 
 test("outside a Git checkout, a failing watch writes nothing to the chat", async ($, on) => {
@@ -626,20 +585,9 @@ test("a state from before own counts the rooms it led as its own", async ($, on)
 	expect(JSON.stringify(await ui.drawn())).toContain("reader joined")
 })
 
-test("after a rewind the rooms its conversation started are its own and led again", async ($, on) => {
-	// A rewind starts the session with an empty state; its chat holds the start.
-	const use = {
-		tool_use_id: "t1",
-		tool: "Bash",
-		input: { command: "peer start csv-export --agent claude" },
-		result: { stdout: `${JSON.stringify(ROOM)}\n` },
-	}
-	on(
-		"session.messages",
-		() =>
-			({ value: [{ role: "assistant", text: "", toolUses: [use] }] }) as never,
-	)
-	const ran = await start($, on, WATCH, "", false)
+test("after a reload or a rewind the rooms this session started are its own and led again", async ($, on) => {
+	// The session starts with an empty state; watch prints its room.
+	const ran = await start($, on)
 	expect(ran.some((argv) => argv[0] === "ui.open")).toBe(true)
 	// Leading it reads main's unread count, so what main read is not delivered again.
 	expect(ran.some((argv) => argv[1] === "status" && argv[2] === ROOM.id)).toBe(
@@ -1091,21 +1039,6 @@ test("/room toggles the pane and @ offers the room's members", async ($, on) => 
 		start: 4,
 	})
 	expect(suggestions.map((one) => one.text)).toContain("@reader")
-})
-
-test("the dialog of a peer end says which members still run", async ($, on) => {
-	const notices: string[] = []
-	on("ui.notice", (_, e) => {
-		notices.push(String((e as { text?: string }).text))
-		return { value: undefined } as never
-	})
-	await start($, on)
-	await $.tool.call({
-		tool: "Bash",
-		command: "peer end csv-export --as main",
-		tool_use_id: "t2",
-	} as never)
-	expect(notices).toContainEqual("peer: ends csv-export; still running: reader")
 })
 
 test("a member's edits replay one file at a time, from whole log entries only", async ($, on) => {

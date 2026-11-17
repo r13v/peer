@@ -1,10 +1,13 @@
 import { expect, mock, type TestBody, test } from "claude-code/testing"
 
+// SID is this session's id; peer records it for the roles it takes.
+const SID = "session-1"
+
 const ROOM = {
 	id: "csv-export",
 	repo: "/repo",
 	started_at: "2026-10-05T20:00:00Z",
-	members: [{ role: "main", agent: "claude" }],
+	members: [{ role: "main", agent: "claude", session: SID }],
 }
 
 const message = (i: number) => ({
@@ -25,9 +28,9 @@ type Tools = {
 	release: () => void
 }
 
-// lead starts the plugin, gives it a watch that prints the room and the
-// messages, then holds until released and prints more, and makes this
-// session main of the room through a peer start it sees.
+// lead starts the plugin, gives it a watch that prints the room this
+// session starts as main and the messages, then holds until released and
+// prints more.
 async function lead(
 	$: Parameters<TestBody>[0],
 	on: Parameters<TestBody>[1],
@@ -38,10 +41,13 @@ async function lead(
 	const tools: Tools = { submits: [], acks: [], failAcks: 0, release: () => {} }
 	const gate = new Promise<void>((resolve) => (tools.release = resolve))
 	on("process.spawn", async function* (_, e, next) {
+		if (e.argv[1] === "hold")
+			return { value: { code: 0, signal: null } } as never
 		if (e.argv[1] !== "watch") return yield* next(e)
+		yield { stream: "stdout", text: lines({ event: "ready" }) }
 		yield {
 			stream: "stdout",
-			text: lines({ event: "room", room: ROOM }, ...first, { event: "ready" }),
+			text: lines({ event: "room", room: ROOM }, ...first),
 		}
 		await gate
 		if (later.length) yield { stream: "stdout", text: lines(...later) }
@@ -65,30 +71,14 @@ async function lead(
 		tools.submits.push(e.text)
 		return answer(e.text, tools.submits.length, tools) as never
 	})
-	on(
-		"tool.call",
-		{ tool: "Bash" },
-		() =>
-			({
-				result: {
-					stdout: `${JSON.stringify(ROOM)}\n`,
-					stderr: "",
-					interrupted: false,
-				},
-			}) as never,
-	)
 	on("session.start", (_, e) => ({ cwd: e.cwd }) as never)
 	on("session.cwd", () => ({ value: "/repo" }) as never)
+	on("session.id", () => ({ value: SID }) as never)
 	on("ui.open", () => ({ value: { isPlaced: true } }) as never)
 	on("ui.scroll", () => ({ value: {} }) as never)
 	on("ui.panes", () => ({ value: [] }) as never)
 	await $.session.start({ source: "startup", cwd: "/repo" } as never)
-	await new Promise((resolve) => setTimeout(resolve, 50))
-	await $.tool.call({
-		tool: "Bash",
-		command: "peer start csv-export --agent claude",
-	} as never)
-	await new Promise((resolve) => setTimeout(resolve, 50))
+	await new Promise((resolve) => setTimeout(resolve, 100))
 	return tools
 }
 
@@ -174,13 +164,15 @@ test("a room whose ack keeps failing does not hold back another room's delivery"
 	let release = () => {}
 	const gate = new Promise<void>((resolve) => (release = resolve))
 	on("process.spawn", async function* (_, e, next) {
+		if (e.argv[1] === "hold")
+			return { value: { code: 0, signal: null } } as never
 		if (e.argv[1] !== "watch") return yield* next(e)
+		yield { stream: "stdout", text: lines({ event: "ready" }) }
 		yield {
 			stream: "stdout",
 			text: lines(
 				{ event: "room", room: ROOM },
 				{ event: "message", room: ROOM.id, message: message(1) },
-				{ event: "ready" },
 			),
 		}
 		await gate
@@ -213,39 +205,20 @@ test("a room whose ack keeps failing does not hold back another room's delivery"
 		submits.push(e.text)
 		return { text: e.text } as never
 	})
-	on("tool.call", { tool: "Bash" }, (_, e) => {
-		const room = e.command.includes(other.id) ? other : ROOM
-		return {
-			result: {
-				stdout: `${JSON.stringify(room)}\n`,
-				stderr: "",
-				interrupted: false,
-			},
-		} as never
-	})
 	on("session.start", (_, e) => ({ cwd: e.cwd }) as never)
 	on("session.cwd", () => ({ value: "/repo" }) as never)
+	on("session.id", () => ({ value: SID }) as never)
 	on("ui.open", () => ({ value: { isPlaced: true } }) as never)
 	on("ui.scroll", () => ({ value: {} }) as never)
 	on("ui.panes", () => ({ value: [] }) as never)
 	await $.session.start({ source: "startup", cwd: "/repo" } as never)
-	await new Promise((resolve) => setTimeout(resolve, 50))
-	await $.tool.call({
-		tool: "Bash",
-		command: `peer start ${ROOM.id} --agent claude`,
-	} as never)
-	await new Promise((resolve) => setTimeout(resolve, 50))
+	await new Promise((resolve) => setTimeout(resolve, 100))
 	expect(submits.map(delivered)).toEqual([[1]])
 	// The next pump fails on the first room's saved mark again.
 	await clock.advance(3000)
 	await new Promise((resolve) => setTimeout(resolve, 50))
 	release()
-	await new Promise((resolve) => setTimeout(resolve, 50))
-	await $.tool.call({
-		tool: "Bash",
-		command: `peer start ${other.id} --agent claude`,
-	} as never)
-	await new Promise((resolve) => setTimeout(resolve, 50))
+	await new Promise((resolve) => setTimeout(resolve, 100))
 	expect(submits.map(delivered)).toEqual([[1], [2]])
 	expect(acks).toContain(`${other.id}:m2`)
 	// The pane tells why the first room's cursor stands still.
@@ -348,8 +321,15 @@ test("a member that joined here gets its role's messages, acks as it, and learns
 		...ROOM,
 		members: [
 			{ role: "main", agent: "codex" },
-			{ role: "critic", agent: "claude" },
 			{ role: "tester", agent: "pi" },
+		],
+	}
+	// The room once this session joined it as critic.
+	const joined = {
+		...room,
+		members: [
+			...room.members,
+			{ role: "critic", agent: "claude", session: SID },
 		],
 	}
 	const mail = (i: number, from: string, to: string) => ({
@@ -359,10 +339,11 @@ test("a member that joined here gets its role's messages, acks as it, and learns
 	})
 	const submits: string[] = []
 	const acks: string[][] = []
-	const waits: string[] = []
 	let release = () => {}
 	const gate = new Promise<void>((resolve) => (release = resolve))
 	on("process.spawn", async function* (_, e, next) {
+		if (e.argv[1] === "hold")
+			return { value: { code: 0, signal: null } } as never
 		if (e.argv[1] !== "watch") return yield* next(e)
 		yield {
 			stream: "stdout",
@@ -373,6 +354,7 @@ test("a member that joined here gets its role's messages, acks as it, and learns
 				{ event: "ready" },
 			),
 		}
+		yield { stream: "stdout", text: lines({ event: "room", room: joined }) }
 		await gate
 		yield {
 			stream: "stdout",
@@ -390,8 +372,8 @@ test("a member that joined here gets its role's messages, acks as it, and learns
 				{
 					event: "room",
 					room: {
-						...room,
-						members: room.members.map((m) =>
+						...joined,
+						members: joined.members.map((m) =>
 							m.role === "critic" ? { ...m, kicked: true } : m,
 						),
 					},
@@ -410,65 +392,18 @@ test("a member that joined here gets its role's messages, acks as it, and learns
 		submits.push(e.text)
 		return { text: e.text } as never
 	})
-	on("tool.call", { tool: "Bash" }, (_, e) => {
-		if (e.command.startsWith("peer wait")) waits.push(e.command)
-		return {
-			result: {
-				stdout: e.command.startsWith("peer join")
-					? `${JSON.stringify(room)}\n`
-					: "",
-				stderr: "",
-				interrupted: false,
-			},
-		} as never
-	})
 	on("session.start", (_, e) => ({ cwd: e.cwd }) as never)
 	on("session.cwd", () => ({ value: "/repo" }) as never)
+	on("session.id", () => ({ value: SID }) as never)
 	on("ui.open", () => ({ value: { isPlaced: true } }) as never)
 	on("ui.scroll", () => ({ value: {} }) as never)
 	on("ui.panes", () => ({ value: [] }) as never)
 	await $.session.start({ source: "startup", cwd: "/repo" } as never)
-	await new Promise((resolve) => setTimeout(resolve, 50))
-	const joined = await $.tool.call({
-		tool: "Bash",
-		command: `peer join ${ROOM.id} critic --agent claude`,
-	} as never)
-	expect(JSON.stringify(joined)).toContain(
-		"The peer plugin reads this room for critic",
-	)
-	await new Promise((resolve) => setTimeout(resolve, 50))
+	await new Promise((resolve) => setTimeout(resolve, 100))
 	expect(submits).toHaveLength(1)
 	expect(submits[0]).toContain(
 		`peer room ${ROOM.id}: 1 new message for critic, delivered by the peer plugin`,
 	)
-	// The member's own wait is answered by the plugin, never run; main's is
-	// not the session's to take over.
-	const waited = await $.tool.call({
-		tool: "Bash",
-		command: `peer wait ${ROOM.id} --as critic`,
-	} as never)
-	expect(JSON.stringify(waited)).toContain("reads this room for critic")
-	const mixed = await $.tool.call({
-		tool: "Bash",
-		command: `peer send ${ROOM.id} --as critic --text hi; peer wait ${ROOM.id} --as critic`,
-	} as never)
-	expect(JSON.stringify(mixed)).toContain(
-		"Run the other commands without peer wait",
-	)
-	// A wait for another room first in the line does not let the member's
-	// wait through.
-	const behind = await $.tool.call({
-		tool: "Bash",
-		command: `peer wait other --as main --timeout 0; peer wait ${ROOM.id} --as critic --timeout 0`,
-	} as never)
-	expect(JSON.stringify(behind)).toContain(
-		"Run the other commands without peer wait",
-	)
-	await $.tool.call({
-		tool: "Bash",
-		command: `peer wait ${ROOM.id} --as main`,
-	} as never)
-	expect(waits).toEqual([`peer wait ${ROOM.id} --as main`])
 	release()
 	await new Promise((resolve) => setTimeout(resolve, 150))
 	// Only what is for critic, never its own words or another's mail; then

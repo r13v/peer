@@ -140,6 +140,8 @@ func run(args []string, in io.Reader, out io.Writer, cwd string) error {
 	}
 	fs := flag.NewFlagSet(args[0], flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
+	// Claude Code sets it for the commands its session runs.
+	claudeSession := os.Getenv("CLAUDE_CODE_SESSION_ID")
 	jsonLog := fs.Bool("json", false, "print the transcript as NDJSON")
 	follow := fs.Bool("follow", false, "follow the member log while the room is active")
 	actor := fs.String("as", "", "sender's role")
@@ -230,7 +232,7 @@ func run(args []string, in io.Reader, out io.Writer, cwd string) error {
 		if err := checkAgent(*agent); err != nil {
 			return err
 		}
-		_, err := s.start(id, *agent, out)
+		_, err := s.start(id, member{Agent: *agent, Session: claudeSession}, out)
 		return err
 	case "join":
 		if err := needRole("join ID ROLE [--agent NAME]"); err != nil {
@@ -239,7 +241,7 @@ func run(args []string, in io.Reader, out io.Writer, cwd string) error {
 		if err := checkAgent(*agent); err != nil {
 			return err
 		}
-		return s.join(id, member{Role: role, Agent: *agent}, out)
+		return s.join(id, member{Role: role, Agent: *agent, Session: claudeSession}, out)
 	case "invite":
 		if err := needRole("invite ID ROLE --as main --agent codex|claude|copilot|pi [--worker [--worktree]] [--model MODEL] [--brief TEXT]"); err != nil {
 			return err
@@ -324,6 +326,16 @@ func run(args []string, in io.Reader, out io.Writer, cwd string) error {
 			return s.forward(ctx, id, *actor, *copilotSession, in, out)
 		}
 		return errors.New("usage: peer forward ID --as ROLE --codex-thread UUID|--copilot-session UUID; it delivers the role's messages to the Codex session with that UUID, or over stdio to the Copilot extension of that session")
+	case "hold": // hidden: the Claude Code plugin runs it for a room it reads
+		if err := needID("hold"); err != nil {
+			return err
+		}
+		if err := checkName(*actor); err != nil {
+			return err
+		}
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		return s.hold(ctx, id, *actor, out)
 	case "drive": // hidden: invite runs it for a codex, claude or copilot member
 		if err := needRole("drive ID ROLE [--brief TEXT]"); err != nil {
 			return err

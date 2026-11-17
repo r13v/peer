@@ -219,6 +219,49 @@ func (s *store) forward(ctx context.Context, sid, as, thread string, in io.Reade
 	}
 }
 
+// hold takes role's delivery in room sid for a session that reads the
+// room from peer watch, as the Claude Code plugin does: wait refuses the
+// role while hold runs. It returns once the room ends, the role is kicked
+// or ctx is done.
+func (s *store) hold(ctx context.Context, sid, as string, out io.Writer) error {
+	var lock *os.File
+	err := s.locked(func() error {
+		v, err := s.load(sid)
+		if err != nil {
+			return err
+		}
+		if err := v.check(as); err != nil {
+			return err
+		}
+		if v.EndedAt != "" {
+			return endedError(v)
+		}
+		f, isHeld, err := s.claimDelivery(v.ID, as, "")
+		if isHeld {
+			return fmt.Errorf("another peer delivers room %s for %s", v.ID, as)
+		}
+		lock = f
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
+	if err := emitJSON(out, map[string]string{"status": "ready"}); err != nil {
+		return err
+	}
+	for sleepCtx(ctx, forwardPoll) {
+		v, err := s.session(sid)
+		if err != nil {
+			return err
+		}
+		if v.EndedAt != "" || v.check(as) != nil {
+			return nil
+		}
+	}
+	return nil
+}
+
 func (s *store) kicked(id, role string) (bool, error) {
 	v, err := s.session(id)
 	if err != nil {

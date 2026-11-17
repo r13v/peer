@@ -59,6 +59,7 @@ func testRepo(t *testing.T) string {
 		t.Fatalf("git init: %v: %s", err, out)
 	}
 	t.Setenv("PEER_HOME", filepath.Join(t.TempDir(), "data"))
+	t.Setenv("CLAUDE_CODE_SESSION_ID", "")
 	return repo
 }
 

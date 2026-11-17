@@ -10,6 +10,7 @@ export type PeerMember = {
 	base?: string
 	kicked?: boolean
 	pid?: number
+	session?: string
 	unread?: number
 }
 
