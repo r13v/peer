@@ -189,17 +189,24 @@ func TestDriveNeedsCompletedTurn(t *testing.T) {
 // so a failed Claude or Copilot turn leaves its batch unread.
 func TestResultEndsTurn(t *testing.T) {
 	for events, want := range map[string]bool{
-		`{"type":"result","subtype":"success","is_error":false}`: true,
-		`{"type":"result","subtype":"success","is_error":true}`:  false,
-		`{"type":"assistant","message":{}}`:                      false,
-		`{"type":"result","sessionId":"s","exitCode":0}`:         true,
-		`{"type":"result","sessionId":"s","exitCode":1}`:         false,
-		`{"type":"result","sessionId":"s","usage":{}}`:           false,
-		`{"type":"assistant.turn_end","data":{"turnId":"0"}}`:    false,
+		`{"type":"result","subtype":"success","is_error":false}`:                                 true,
+		`{"type":"result","subtype":"success","is_error":true}`:                                  false,
+		`{"type":"assistant","message":{}}`:                                                      false,
+		`{"type":"result","sessionId":"s","exitCode":0}`:                                         true,
+		`{"type":"result","sessionId":"s","exitCode":1}`:                                         false,
+		`{"type":"result","sessionId":"s","usage":{}}`:                                           false,
+		`{"type":"assistant.turn_end","data":{"turnId":"0"}}`:                                    false,
+		`{"event":"result","result":{"conversation_id":"c","status":"SUCCESS","response":"ok"}}`: true,
+		`{"event":"result","result":{"conversation_id":"c","status":"ERROR","error":"boom"}}`:    false,
+		`{"event":"result","result":{"conversation_id":"c","status":"CANCELED"}}`:                false,
+		`{"event":"init","conversation_id":"c","init":{}}`:                                       false,
 	} {
 		if _, got := copyEvents(strings.NewReader(events+"\n"), new(syncBuffer)); got != want {
 			t.Errorf("%s: completed = %v, want %v", events, got, want)
 		}
+	}
+	if cid, ok := copyEvents(strings.NewReader(`{"event":"init","conversation_id":"c1","init":{}}`+"\n"+`{"event":"result","result":{"conversation_id":"c1","status":"SUCCESS"}}`+"\n"), new(syncBuffer)); cid != "c1" || !ok {
+		t.Errorf("agy copyEvents = (%q, %v), want (c1, true)", cid, ok)
 	}
 }
 
@@ -335,6 +342,108 @@ func TestMemberResumeRepeatsLimits(t *testing.T) {
 	}
 	if slices.Contains(argv, "-p") {
 		t.Errorf("copilot resume takes a prompt argument: %s", joined)
+	}
+
+	// agy resumes with --input-format stream-json and --conversation ID,
+	// reading the batch as NDJSON on stdin instead of -p.
+	argv, err = memberArgs(s, member{Agent: "agy", Model: "gemini-4-neon-medium", Effort: "medium"}, "/repo", "", "C", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined = strings.Join(argv, " ")
+	for _, want := range []string{"--input-format stream-json", "--output-format stream-json", "--disable-slash-commands", "--sandbox", "--add-dir /store/room", "--settings", "--model gemini-4-neon-medium", "--effort medium", "--conversation C"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("agy resume lacks %s: %s", want, joined)
+		}
+	}
+	if slices.Contains(argv, "-p") {
+		t.Errorf("agy resume takes a prompt argument: %s", joined)
+	}
+}
+
+// TestDriveAgyResumesWithStreamJSON verifies that drive starts agy with -p,
+// captures conversation_id from init, resumes with --conversation and NDJSON
+// on stdin, and keeps a batch unread when agy reports an ERROR result.
+func TestDriveAgyResumesWithStreamJSON(t *testing.T) {
+	dir := t.TempDir()
+	script := `#!/bin/sh
+d="` + dir + `"
+n=$(ls "$d" | grep -c '^turn-')
+f="$d/turn-$((n + 1))"
+printf '%s\n' "$*" | tr '\n' ' ' > "$f.tmp"
+echo >> "$f.tmp"
+cat >> "$f.tmp"
+mv "$f.tmp" "$f"
+echo '{"event":"init","conversation_id":"` + driveThread + `","init":{}}'
+if [ -f "$d/fail" ]; then echo '{"event":"result","result":{"conversation_id":"` + driveThread + `","status":"ERROR","error":"quota exceeded"}}'; exit 1; fi
+echo '{"event":"result","result":{"conversation_id":"` + driveThread + `","status":"SUCCESS","response":"ok"}}'
+`
+	if err := os.WriteFile(filepath.Join(dir, "agy"), []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	old := drivePoll
+	drivePoll = 10 * time.Millisecond
+	t.Cleanup(func() { drivePoll = old })
+
+	repo := testRepo(t)
+	v := startRoom(t, repo, "agy-wake")
+	if _, err := invoke(repo, "", "invite", v.ID, "critic", "--as", "main", "--agent", "agy"); err != nil {
+		t.Fatal(err)
+	}
+	s, err := openStore(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- s.drive(context.Background(), v.ID, "critic", "security", new(syncBuffer)) }()
+
+	if _, err := invoke(repo, "check auth", "send", v.ID, "--as", "main", "--to", "critic"); err != nil {
+		t.Fatal(err)
+	}
+	args, _ := turnRecord(t, dir, 1)
+	if strings.Contains(args, "--conversation") || !strings.Contains(args, " -p ") || !strings.Contains(args, "security") || !strings.Contains(args, "check auth") {
+		t.Fatalf("first agy turn wrong: %s", args)
+	}
+
+	if _, err := invoke(repo, "and sessions", "send", v.ID, "--as", "main", "--to", "critic"); err != nil {
+		t.Fatal(err)
+	}
+	args, stdin := turnRecord(t, dir, 2)
+	if !strings.Contains(args, "--input-format stream-json") || !strings.Contains(args, "--conversation "+driveThread) {
+		t.Fatalf("second agy turn did not resume: %s", args)
+	}
+	var msg struct {
+		Event   string `json:"event"`
+		Message struct {
+			Content string `json:"content"`
+		} `json:"message"`
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(stdin)), &msg); err != nil || msg.Event != "user" || !strings.Contains(msg.Message.Content, "and sessions") {
+		t.Fatalf("second agy turn stdin is not stream-json user message: %q (err=%v)", stdin, err)
+	}
+	for deadline := time.Now().Add(5 * time.Second); unread(t, repo, v.ID, "critic") != 0; time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("delivered agy batch stayed unread")
+		}
+	}
+
+	if err := os.WriteFile(filepath.Join(dir, "fail"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := invoke(repo, "final pass", "send", v.ID, "--as", "main", "--to", "critic"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("drive went on after failed agy turn")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("drive did not stop after failed agy turn")
+	}
+	if n := unread(t, repo, v.ID, "critic"); n != 1 {
+		t.Fatalf("failed agy turn batch: unread %d, want 1", n)
 	}
 }
 

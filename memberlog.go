@@ -48,15 +48,16 @@ func stamped(line []byte) (time.Time, []byte) {
 
 // memberLogLine turns one log line into entries. The apps write JSON
 // events: codex exec --json, claude stream-json, copilot --output-format
-// json and pi --mode json.
+// json, agy --output-format stream-json and pi --mode json.
 // Anything else, such as stderr, older plain codex logs or an event it
 // does not know, is shown as it is.
 func memberLogLine(line []byte) []logEntry {
 	var ev struct {
 		Type      string          `json:"type"`
+		Event     string          `json:"event"`   // agy stream-json
 		Message   json.RawMessage `json:"message"` // claude's or pi's message, or codex's error text
 		Subtype   string          `json:"subtype"`
-		Result    json.RawMessage `json:"result"` // claude's text, or a pi tool's result
+		Result    json.RawMessage `json:"result"` // claude's text, agy's result, or a pi tool's result
 		Errors    []string        `json:"errors"`
 		IsError   bool            `json:"is_error"`
 		SessionID string          `json:"sessionId"` // only copilot's result
@@ -83,13 +84,17 @@ func memberLogLine(line []byte) []logEntry {
 		} `json:"item"`
 	}
 	raw := strings.TrimRight(string(line), "\r\n")
-	if json.Unmarshal(line, &ev) != nil || ev.Type == "" {
+	if json.Unmarshal(line, &ev) != nil || (ev.Type == "" && ev.Event == "") {
 		if raw == "" {
 			return nil
 		}
-		// Copilot reports an error that stops it before its events, such
-		// as an unknown model, as such a line on stderr.
-		return []logEntry{{Kind: logRaw, Text: raw, Failed: strings.HasPrefix(raw, "Error: ")}}
+		// Copilot and agy report pre-event errors (such as an unknown model)
+		// on stderr as "Error: ..." or "error: ...".
+		failed := strings.HasPrefix(raw, "Error: ") || strings.HasPrefix(raw, "error: ")
+		return []logEntry{{Kind: logRaw, Text: raw, Failed: failed}}
+	}
+	if ev.Event != "" {
+		return agyEvent(ev.Event, line, raw)
 	}
 	if ev.Ephemeral {
 		return nil
@@ -192,6 +197,83 @@ func memberLogLine(line []byte) []logEntry {
 		"user.message", "assistant.turn_start", "assistant.turn_end", "tool.execution_start", "session.auto_mode_resolved", "session.usage_checkpoint": // copilot
 		return nil
 	}
+	return []logEntry{{Kind: logRaw, Text: raw}}
+}
+
+// agyEvent turns one agy stream-json event into log entries. Tool calls are
+// emitted on DONE/ERROR so ACTIVE does not repeat them; assistant text comes
+// from result.response rather than chunked agent_response deltas.
+func agyEvent(event string, line []byte, raw string) []logEntry {
+	switch event {
+	case "init":
+		return nil
+	case "step_update":
+		var payload struct {
+			StepUpdate struct {
+				State    string `json:"state"`
+				StepType string `json:"step_type"`
+				ToolName string `json:"tool_name"`
+				ToolInfo *struct {
+					Name       string          `json:"name"`
+					Parameters json.RawMessage `json:"parameters"`
+					Output     string          `json:"output"`
+					Error      *struct {
+						Message string `json:"message"`
+					} `json:"error"`
+				} `json:"tool_info"`
+			} `json:"step_update"`
+		}
+		if json.Unmarshal(line, &payload) != nil {
+			return nil
+		}
+		su := payload.StepUpdate
+		if su.StepType != "tool" || su.State == "ACTIVE" || su.ToolInfo == nil {
+			return nil
+		}
+		ti := su.ToolInfo
+		name := cmp.Or(ti.Name, su.ToolName)
+		var in struct {
+			CommandLine string `json:"CommandLine"`
+		}
+		arg := string(ti.Parameters)
+		if json.Unmarshal(ti.Parameters, &in) == nil && in.CommandLine != "" {
+			arg = in.CommandLine
+		}
+		toolText := name
+		if arg != "" && arg != "{}" && arg != "null" {
+			toolText += " " + ansi.Truncate(arg, 200, "…")
+		}
+		failed := su.State == "ERROR" || ti.Error != nil
+		out := []logEntry{{Kind: logTool, Text: toolText, Failed: failed}}
+		if ti.Error != nil && ti.Error.Message != "" {
+			out = append(out, logEntry{Kind: logOutput, Text: strings.TrimRight(ti.Error.Message, "\r\n"), Failed: true})
+		} else if o := strings.TrimRight(ti.Output, "\r\n"); o != "" {
+			out = append(out, logEntry{Kind: logOutput, Text: o, Failed: failed})
+		}
+
+		return out
+	case "result":
+		var payload struct {
+			Result struct {
+				Status   string `json:"status"`
+				Response string `json:"response"`
+				Error    string `json:"error"`
+			} `json:"result"`
+		}
+		if json.Unmarshal(line, &payload) != nil {
+			return nil
+		}
+		r := payload.Result
+		if r.Status != "SUCCESS" {
+			why := cmp.Or(r.Error, r.Status)
+			return []logEntry{{Kind: logRaw, Text: "result: " + why, Failed: true}}
+		}
+		if text := strings.TrimRight(r.Response, "\r\n"); text != "" {
+			return []logEntry{{Kind: logText, Text: text}}
+		}
+		return nil
+	}
+
 	return []logEntry{{Kind: logRaw, Text: raw}}
 }
 
