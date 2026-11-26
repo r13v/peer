@@ -223,6 +223,15 @@ func TestMemberLogLine(t *testing.T) {
 		`{"type":"result","sessionId":"s","exitCode":0,"usage":{}}`:                                                                             nil,
 		`{"type":"result","sessionId":"s","exitCode":1,"usage":{}}`:                                                                             {{Kind: logRaw, Text: "result: exit code 1", Failed: true}},
 		`{"type":"result","sessionId":"s","usage":{}}`:                                                                                          {{Kind: logRaw, Text: "result: exit code none", Failed: true}},
+		`error: unknown model`: {{Kind: logRaw, Text: "error: unknown model", Failed: true}},
+		`{"event":"init","conversation_id":"c1","init":{"cwd":"/repo"}}`:                                                                                                                                                            nil,
+		`{"event":"step_update","step_update":{"state":"DONE","step_type":"agent_response","text_delta":"Hi"}}`:                                                                                                                     nil,
+		`{"event":"step_update","step_update":{"state":"ACTIVE","step_type":"tool","tool_name":"run_command","tool_info":{"name":"run_command","parameters":{"CommandLine":"ls"}}}}`:                                                nil,
+		`{"event":"step_update","step_update":{"state":"DONE","step_type":"tool","tool_name":"run_command","tool_info":{"name":"run_command","parameters":{"CommandLine":"peer send r --as reader --text hi"},"output":"ok\r\n"}}}`: {{Kind: logTool, Text: "run_command peer send r --as reader --text hi"}, {Kind: logOutput, Text: "ok"}},
+		`{"event":"step_update","step_update":{"state":"ERROR","step_type":"tool","tool_name":"edit_file","tool_info":{"name":"edit_file","parameters":{"Path":"/repo/a.go"},"error":{"type":"TOOL_ERROR","message":"denied\n"}}}}`: {{Kind: logTool, Text: `edit_file {"Path":"/repo/a.go"}`, Failed: true}, {Kind: logOutput, Text: "denied", Failed: true}},
+		`{"event":"result","result":{"conversation_id":"c1","status":"SUCCESS","response":"Reviewed.\n"}}`:                                                                                                                          {{Kind: logText, Text: "Reviewed."}},
+		`{"event":"result","result":{"conversation_id":"c1","status":"ERROR","error":"rate limited"}}`:                                                                                                                              {{Kind: logRaw, Text: "result: rate limited", Failed: true}},
+		`{"event":"result","result":{"conversation_id":"c1","status":"CANCELED"}}`:                                                                                                                                                  {{Kind: logRaw, Text: "result: CANCELED", Failed: true}},
 	} {
 		if got := memberLogLine([]byte(line)); !slices.Equal(got, want) {
 			t.Fatalf("memberLogLine(%q) = %+v, want %+v", line, got, want)
@@ -563,6 +572,7 @@ func TestInvite(t *testing.T) {
 		{"codex", "", "Follow peer skills member.", false},
 		{"claude", "opus", "Follow peer skills member.", false},
 		{"claude", "", "Follow peer skills member.", false},
+		{"agy", "", "Follow peer skills member.", false},
 		{"pi", "", "a worker in the shared checkout", true},
 		{"codex", "gpt-5", "a worker in the shared checkout", true},
 	} {
@@ -607,6 +617,8 @@ func TestInvite(t *testing.T) {
 			want = `"model":"opus","effort":"medium"`
 		case tc.agent == "codex" && tc.model == "":
 			want = `"model":"gpt-6.1-sol","effort":"medium"`
+		case tc.agent == "agy" && tc.model == "":
+			want = `"agent":"agy"`
 		case tc.agent == "pi":
 			want = `"agent":"pi"`
 		}
@@ -1089,6 +1101,84 @@ func TestCopilotMemberIsSandboxedWithoutEditTools(t *testing.T) {
 	}
 }
 
+func TestAgyMemberIsSandboxedWithoutEditTools(t *testing.T) {
+	binDir := t.TempDir()
+	fakePeer := filepath.Join(binDir, "peer")
+	if err := os.WriteFile(fakePeer, []byte("#!/bin/sh\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	argv, err := memberArgs(&store{dir: "/store/room"}, member{Agent: "agy"}, "/repo", "p", "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(argv, " ")
+	for _, want := range []string{"--output-format stream-json", "--disable-slash-commands", "--sandbox", "--add-dir /store/room", "-p p"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("argv lacks %s: %s", want, joined)
+		}
+	}
+	i := slices.Index(argv, "--settings")
+	if i < 0 {
+		t.Fatalf("argv lacks --settings: %s", joined)
+	}
+	var settings struct {
+		AgentMode               *string `json:"agentMode"`
+		ToolPermission          string  `json:"toolPermission"`
+		AllowNonWorkspaceAccess *bool   `json:"allowNonWorkspaceAccess"`
+		Permissions             struct {
+			Allow []string `json:"allow"`
+			Deny  []string `json:"deny"`
+		} `json:"permissions"`
+	}
+	if err := json.Unmarshal([]byte(argv[i+1]), &settings); err != nil {
+		t.Fatal(err)
+	}
+	wantPeer, err := canonicalPath(fakePeer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.AgentMode == nil || *settings.AgentMode != "" || settings.ToolPermission != "proceed-in-sandbox" ||
+		settings.AllowNonWorkspaceAccess == nil || *settings.AllowNonWorkspaceAccess ||
+		!slices.Contains(settings.Permissions.Allow, "write_file(/store/room)") ||
+		!slices.Contains(settings.Permissions.Allow, "read_url(*)") ||
+		!slices.Contains(settings.Permissions.Allow, "read_file("+wantPeer+")") ||
+		!slices.Equal(settings.Permissions.Deny, []string{"write_file(/repo)", "mcp(*)"}) {
+		t.Errorf("agy settings = %+v", settings)
+	}
+}
+
+func TestAgyMemberRejectsStoreInsideCheckout(t *testing.T) {
+	if _, err := memberArgs(&store{dir: "/repo/.peer"}, member{Agent: "agy"}, "/repo", "p", "", false); err == nil || !strings.Contains(err.Error(), "PEER_HOME") {
+		t.Fatalf("memberArgs accepted nested store: %v", err)
+	}
+	// A sibling directory sharing a name prefix is not inside the checkout.
+	if _, err := memberArgs(&store{dir: "/repo-peer"}, member{Agent: "agy"}, "/repo", "p", "", false); err != nil {
+		t.Fatalf("memberArgs rejected sibling store: %v", err)
+	}
+	// Workers run unsandboxed without deny write_file(checkout), so a nested store is fine.
+	if _, err := memberArgs(&store{dir: "/repo/.peer", repo: "/repo"}, member{Agent: "agy", Worker: true}, "/repo", "p", "", false); err != nil {
+		t.Fatalf("memberArgs rejected worker with nested store: %v", err)
+	}
+
+	// invite fails before adding the member when PEER_HOME is inside the checkout,
+	// both as an absolute path and as a relative path from the checkout root.
+	repo := testRepo(t)
+	t.Setenv("PEER_HOME", filepath.Join(repo, ".peer"))
+	v := startRoom(t, repo, "nested")
+	if _, err := invoke(repo, "", "invite", v.ID, "reader", "--as", "main", "--agent", "agy"); err == nil || !strings.Contains(err.Error(), "PEER_HOME") {
+		t.Fatalf("invite accepted nested store for agy member: %v", err)
+	}
+
+	t.Chdir(repo)
+	t.Setenv("PEER_HOME", ".peer-rel")
+	vRel := startRoom(t, repo, "nested-rel")
+	if _, err := invoke(repo, "", "invite", vRel.ID, "reader", "--as", "main", "--agent", "agy"); err == nil || !strings.Contains(err.Error(), "PEER_HOME") {
+		t.Fatalf("invite accepted relative nested PEER_HOME for agy member: %v", err)
+	}
+}
+
 func TestPiMemberHasNoEditTools(t *testing.T) {
 	argv, err := memberArgs(&store{dir: "/store/room"}, member{Agent: "pi"}, "/repo", "p", "", false)
 	if err != nil {
@@ -1113,6 +1203,7 @@ func TestWorkerHasNoLimits(t *testing.T) {
 		"claude":  {[]string{"--permission-mode bypassPermissions"}, []string{"dontAsk", "--settings", "--tools", "--allowedTools", "--strict-mcp-config", "--setting-sources"}},
 		"codex":   {[]string{"--dangerously-bypass-approvals-and-sandbox"}, []string{"workspace-write", "--add-dir"}},
 		"copilot": {[]string{"--yolo"}, []string{"--sandbox", "--excluded-tools", "--deny-tool", "--allow-all-tools"}},
+		"agy":     {[]string{"--dangerously-skip-permissions", `--settings {"enableTerminalSandbox":false}`}, []string{"--sandbox", "--add-dir"}},
 		"pi":      {[]string{"--approve"}, []string{"--no-approve", "--tools"}},
 	} {
 		argv, err := memberArgs(&store{dir: "/store/room"}, member{Agent: agent, Worker: true}, "/repo", "p", "", false)

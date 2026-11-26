@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -52,11 +53,11 @@ func memberPrompt(v session, m member, brief string, isDriven bool) string {
 // resume a session, so each batch becomes a turn of it. Pi runs without a
 // session and waits on its own.
 func isDriven(m member) bool {
-	return m.Agent == "codex" || m.Agent == "claude" || m.Agent == "copilot"
+	return m.Agent == "codex" || m.Agent == "claude" || m.Agent == "copilot" || m.Agent == "agy"
 }
 
 // inviteAgents are the agents peer invite launches.
-var inviteAgents = []string{"claude", "codex", "copilot", "pi"}
+var inviteAgents = []string{"claude", "codex", "copilot", "pi", "agy"}
 
 // claudeTools are a Claude member's tools: everything but the edit tools.
 // Its subagents get no more. A worker gets all tools.
@@ -187,6 +188,56 @@ func memberArgs(s *store, m member, dir, prompt, session string, isResume bool) 
 			return argv, nil
 		}
 		return append(argv, "-p", prompt), nil
+	case "agy":
+		argv = []string{"agy", "--output-format", "stream-json", "--disable-slash-commands"}
+		if isResume {
+			argv = append(argv, "--input-format", "stream-json")
+		}
+		if m.Worker {
+			// --dangerously-skip-permissions does not turn off a user's
+			// global enableTerminalSandbox setting.
+			argv = append(argv, "--dangerously-skip-permissions", "--settings", `{"enableTerminalSandbox":false}`)
+		} else {
+			storeDir, err := canonicalPath(s.dir)
+			if err != nil {
+				return nil, fmt.Errorf("resolve peer store %s: %w", s.dir, err)
+			}
+			workDir, err := canonicalPath(dir)
+			if err != nil {
+				return nil, fmt.Errorf("resolve checkout %s: %w", dir, err)
+			}
+			if err := checkAgyStore(workDir, storeDir); err != nil {
+				return nil, err
+			}
+			allow := []string{"write_file(" + storeDir + ")", "read_url(*)"}
+			for _, p := range peerBinaryPaths() {
+				allow = append(allow, "read_file("+p+")")
+			}
+			// Deny write_file on the checkout and mcp(*) while allowing
+			// write_file on the peer store and read_file on the peer binary
+			// so sandboxed commands can run peer send. Leaving command(*)
+			// out of allow keeps BypassSandbox auto-denied in headless mode.
+			settings, _ := json.Marshal(map[string]any{
+				"agentMode":               "",
+				"toolPermission":          "proceed-in-sandbox",
+				"allowNonWorkspaceAccess": false,
+				"permissions": map[string]any{
+					"allow": allow,
+					"deny":  []string{"write_file(" + workDir + ")", "mcp(*)"},
+				},
+			})
+			argv = append(argv, "--sandbox", "--add-dir", storeDir, "--settings", string(settings))
+		}
+		if m.Model != "" {
+			argv = append(argv, "--model", m.Model)
+		}
+		if m.Effort != "" {
+			argv = append(argv, "--effort", m.Effort)
+		}
+		if isResume {
+			return append(argv, "--conversation", session), nil
+		}
+		return append(argv, "-p", prompt), nil
 	case "pi":
 		argv = []string{"pi", "-p", "--mode", "json", "--no-session"}
 		if m.Worker {
@@ -200,6 +251,76 @@ func memberArgs(s *store, m member, dir, prompt, session string, isResume bool) 
 		return append(argv, "--", prompt), nil
 	}
 	return nil, fmt.Errorf("peer cannot launch %s", m.Agent)
+}
+
+// canonicalPath makes path absolute and resolves symlinks when it exists,
+// so agy sandbox rules and containment checks compare canonical paths.
+func canonicalPath(path string) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		return resolved, nil
+	}
+
+	return abs, nil
+}
+
+// checkAgyStore rejects a peer store inside the checkout for a sandboxed
+// agy member: agy evaluates Deny > Allow, so deny write_file(checkout)
+// blocks writes to a nested store and prevents peer send from working.
+func checkAgyStore(workDir, storeDir string) error {
+	workDir, err := canonicalPath(workDir)
+	if err != nil {
+		return fmt.Errorf("resolve checkout %s: %w", workDir, err)
+	}
+	storeDir, err = canonicalPath(storeDir)
+	if err != nil {
+		return fmt.Errorf("resolve peer store %s: %w", storeDir, err)
+	}
+	rel, err := filepath.Rel(workDir, storeDir)
+	if err != nil {
+		return fmt.Errorf("compare peer store %s and checkout %s: %w", storeDir, workDir, err)
+	}
+	if rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))) {
+		return fmt.Errorf("agy member cannot write peer store %s inside checkout %s (deny overrides allow); set PEER_HOME outside the checkout", storeDir, workDir)
+	}
+
+	return nil
+}
+
+// peerBinaryPaths returns the paths (symlink and resolved target) of the
+// peer binary on PATH and the running executable, so a sandboxed agy member
+// can execute peer even when it is installed under $HOME (e.g. ~/.local/bin).
+func peerBinaryPaths() []string {
+	var paths []string
+	add := func(p string) {
+		if p == "" {
+			return
+		}
+		abs, err := filepath.Abs(p)
+		if err != nil {
+			return
+		}
+		resolved, err := canonicalPath(abs)
+		if err != nil {
+			resolved = abs
+		}
+		for _, candidate := range []string{abs, resolved} {
+			if !slices.Contains(paths, candidate) {
+				paths = append(paths, candidate)
+			}
+		}
+	}
+	if p, err := exec.LookPath("peer"); err == nil {
+		add(p)
+	}
+	if exe, err := os.Executable(); err == nil {
+		add(exe)
+	}
+
+	return paths
 }
 
 // driveArgs runs peer drive for m. A missing agent CLI shows in m's exit
@@ -395,6 +516,11 @@ func (s *store) worktree(m member) error {
 func (s *store) invite(id, as string, m member, brief string, isolated bool, out io.Writer) error {
 	if as != mainRole {
 		return errors.New("only main can invite; run peer invite ID ROLE --as main")
+	}
+	if m.Agent == "agy" && !m.Worker {
+		if err := checkAgyStore(s.repo, s.dir); err != nil {
+			return err
+		}
 	}
 	m = withDefaults(m)
 	var v session

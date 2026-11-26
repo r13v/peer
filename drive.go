@@ -98,6 +98,8 @@ func (s *store) drive(ctx context.Context, id, role, brief string, out io.Writer
 		if !isStarted {
 			argv, err = memberArgs(s, m, dir, memberPrompt(v, m, brief, true)+"\n\n"+text, session, false)
 			text = ""
+		} else if m.Agent == "agy" {
+			text = agyStreamInput(text)
 		}
 		if err != nil {
 			return err
@@ -109,9 +111,9 @@ func (s *store) drive(ctx context.Context, id, role, brief string, out io.Writer
 		if err != nil {
 			return err
 		}
-		if !isStarted && m.Agent == "codex" {
+		if !isStarted && (m.Agent == "codex" || m.Agent == "agy") {
 			if thread == "" {
-				return errors.New("codex did not report its thread, so peer cannot resume it")
+				return fmt.Errorf("%s did not report its session, so peer cannot resume it", m.Agent)
 			}
 			session = thread
 		}
@@ -187,10 +189,11 @@ func (s *store) turn(ctx context.Context, id, role string, argv []string, dir, p
 }
 
 // copyEvents copies the agent's JSON events from in to out line by line.
-// It returns the thread that codex exec --json names in thread.started, and
-// whether the turn completed: Codex's turn.completed, or a result that is
-// not an error: Claude's without is_error, or Copilot's, told by its
-// sessionId, with exitCode 0. An exit status of 0 alone does not show it.
+// It returns the session ID that codex names in thread.started or agy names
+// in init/result, and whether the turn completed: Codex's turn.completed,
+// agy's result with status SUCCESS, or a result that is not an error:
+// Claude's without is_error, or Copilot's, told by its sessionId, with
+// exitCode 0. An exit status of 0 alone does not show it.
 func copyEvents(in io.Reader, out io.Writer) (string, bool) {
 	thread, isCompleted := "", false
 	r := bufio.NewReader(in)
@@ -199,11 +202,14 @@ func copyEvents(in io.Reader, out io.Writer) (string, bool) {
 		if len(line) > 0 {
 			_, _ = out.Write(line)
 			var ev struct {
-				Type      string `json:"type"`
-				Thread    string `json:"thread_id"`
-				IsError   bool   `json:"is_error"`
-				SessionID string `json:"sessionId"` // only copilot's result
-				ExitCode  *int   `json:"exitCode"`
+				Type           string          `json:"type"`
+				Thread         string          `json:"thread_id"`
+				IsError        bool            `json:"is_error"`
+				SessionID      string          `json:"sessionId"` // only copilot's result
+				ExitCode       *int            `json:"exitCode"`
+				Event          string          `json:"event"`           // agy stream-json
+				ConversationID string          `json:"conversation_id"` // agy init
+				Result         json.RawMessage `json:"result"`          // agy result object (string in claude)
 			}
 			if json.Unmarshal(line, &ev) == nil {
 				switch ev.Type {
@@ -219,12 +225,41 @@ func copyEvents(in io.Reader, out io.Writer) (string, bool) {
 						isCompleted = ev.ExitCode != nil && *ev.ExitCode == 0
 					}
 				}
+				switch ev.Event {
+				case "init":
+					thread = cmp.Or(thread, ev.ConversationID)
+				case "result":
+					var res struct {
+						ConversationID string `json:"conversation_id"`
+						Status         string `json:"status"`
+					}
+					if json.Unmarshal(ev.Result, &res) == nil {
+						thread = cmp.Or(thread, res.ConversationID)
+						isCompleted = res.Status == "SUCCESS"
+					}
+				}
 			}
 		}
 		if err != nil {
 			return thread, isCompleted
 		}
 	}
+}
+
+// agyStreamInput wraps text as one NDJSON user message for agy
+// --input-format stream-json.
+func agyStreamInput(text string) string {
+	var msg struct {
+		Event   string `json:"event"`
+		Message struct {
+			Content string `json:"content"`
+		} `json:"message"`
+	}
+	msg.Event = "user"
+	msg.Message.Content = text
+	b, _ := json.Marshal(msg)
+
+	return string(b) + "\n"
 }
 
 // busyRoles lists the members of v whose turn runs now. The caller holds

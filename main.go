@@ -243,11 +243,11 @@ func run(args []string, in io.Reader, out io.Writer, cwd string) error {
 		}
 		return s.join(id, member{Role: role, Agent: *agent, Session: claudeSession}, out)
 	case "invite":
-		if err := needRole("invite ID ROLE --as main --agent codex|claude|copilot|pi [--worker [--worktree]] [--model MODEL] [--brief TEXT]"); err != nil {
+		if err := needRole("invite ID ROLE --as main --agent codex|claude|copilot|agy|pi [--worker [--worktree]] [--model MODEL] [--brief TEXT]"); err != nil {
 			return err
 		}
 		if !slices.Contains(inviteAgents, *agent) {
-			return errors.New("invite launches codex, claude, copilot or pi; to add another agent, give it a join prompt")
+			return errors.New("invite launches codex, claude, copilot, agy or pi; to add another agent, give it a join prompt")
 		}
 		if *worktree && !*worker {
 			return errors.New("--worktree is for a worker; add --worker")
@@ -336,7 +336,7 @@ func run(args []string, in io.Reader, out io.Writer, cwd string) error {
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
 		return s.hold(ctx, id, *actor, out)
-	case "drive": // hidden: invite runs it for a codex, claude or copilot member
+	case "drive": // hidden: invite runs it for a codex, claude, copilot or agy member
 		if err := needRole("drive ID ROLE [--brief TEXT]"); err != nil {
 			return err
 		}
